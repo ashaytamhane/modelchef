@@ -43,6 +43,20 @@ def test_remote_model_rejected(tmp_path):
         serve_plan({"inference": {"model_path": "org/remote-model"}}, tmp_path)
 
 
+def test_public_serving_requires_tls_and_does_not_print_secrets(exported_model, tmp_path, monkeypatch):
+    exported_model['inference']['host'] = '0.0.0.0'
+    with pytest.raises(ValueError, match='TLS'):
+        serve_plan(exported_model, tmp_path)
+    for filename in ['cert.pem', 'server.key']:
+        (tmp_path / filename).write_text('fixture')
+    exported_model['inference']['security'] = {'tls_certfile': 'cert.pem', 'tls_keyfile': 'server.key'}
+    monkeypatch.setenv('ASHAYLLM_API_KEY', 'secret' * 10)
+    plan = serve_plan(exported_model, tmp_path)
+    assert plan['endpoint'].startswith('https://')
+    assert 'secret' * 10 not in str(plan)
+    assert '--middleware' in plan['command']
+
+
 @pytest.mark.parametrize("key,value", [
     ("gpu_memory_utilization", 1), ("gpu_memory_utilization", True),
     ("max_num_seqs", 0), ("max_model_len", -1), ("port", 70000), ("dtype", "bad"),
@@ -51,3 +65,16 @@ def test_invalid_serving_settings(exported_model, tmp_path, key, value):
     exported_model["inference"][key] = value
     with pytest.raises(ValueError):
         serve_plan(exported_model, tmp_path)
+
+
+@pytest.mark.parametrize('capability,supported', [([8, 9], False), ([10, 0], True)])
+def test_native_fp4_requires_blackwell(exported_model, tmp_path, monkeypatch, capability, supported):
+    exported_model['inference']['quantization'] = 'nvfp4_per_token'
+    monkeypatch.setattr('ashayllm.hardware.detect_hardware', lambda: {
+        'backend': 'cuda', 'compute_capability': capability})
+    if supported:
+        plan = serve_plan(exported_model, tmp_path)
+        assert plan['command'][-2:] == ['--quantization', 'nvfp4_per_token']
+    else:
+        with pytest.raises(ValueError, match='Blackwell'):
+            serve_plan(exported_model, tmp_path)

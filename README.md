@@ -1,10 +1,148 @@
 # AshayLLM
 
+Imagine building an offline study buddy, a game character with its own voice, a personal writing assistant, a code explainer, or a finance-news summarizer. AshayLLM provides the model experimentation tools for these future projects; useful application quality will depend on suitable data, training and evaluation.
+
 AshayLLM is a configurable language-model experimentation workbench: acquire bounded corpus samples, prepare data, train a custom tokenizer, pretrain a decoder-only transformer, evaluate it and interact with its trained checkpoints. One Python/PyTorch codebase supports local development and cloud execution, with a separate budget-controlled EC2 Spot smoke-test runner.
 
-**Implemented:** hardware-aware setup, bounded data acquisition, filtering/deduplication/PII heuristics, sampled benchmark decontamination, custom byte-level BPE, from-scratch pretraining, checkpoint recovery, domain-selected sample benchmarks, Hugging Face-compatible export, CLI inference through PyTorch or optional vLLM, and EC2 Spot smoke tests. **Next stages:** midtraining, SFT, optional DPO/RLVR, full benchmark comparisons and automated AWS pretraining orchestration. These later stages are not executable features yet.
+**Available workflows:** hardware-aware setup; bounded data acquisition and preparation with filtering, deduplication, PII heuristics and sampled benchmark decontamination; custom byte-level BPE training; from-scratch pretraining; checkpoint recovery; midtraining, response-masked SFT, DPO, experimental verifiable-reward training and distillation; capped pretrained-model acquisition/import; domain-selected sample benchmarks, local baseline comparisons and an optional standard evaluation harness; Hugging Face-compatible export; CLI inference through PyTorch or optional vLLM; and budget-controlled EC2 Spot smoke tests and S3-backed native training stages.
+
+Local CPU/CUDA checks exercise the training paths; live AWS training, full standard suites, macOS hardware and native Blackwell FP4 still require separate validation.
 
 ## Choose where to run
+
+### Serve a trained checkpoint as a secure API
+
+Serving runs on the machine where you invoke it: a prepared Linux/WSL CUDA laptop, an existing EC2 host, or another compatible vLLM host. It does not provision a machine. Keep the process running while clients use it; AWS running costs continue for the lifetime of the host.
+
+1. Export a completed run: `python -m ashayllm.cli export RUN_DIR`. Use the printed export directory as `inference.model_path`. Install the optional vLLM environment using the setup instructions below.
+2. Obtain a trusted TLS certificate for the hostname clients will use. Keep its full certificate chain and private key outside Git, restrict the private key's file permissions, and put their paths in a copy of `configs/inference-public.yaml`, named `configs/inference-public.local.yaml`. Do not disable certificate verification on clients.
+3. Set `ASHAYLLM_API_KEY` in the serving process environment to a cryptographically random token of at least 32 characters. For example, generate a token with `python -c 'import secrets; print(secrets.token_urlsafe(48))'` and load it through your secret manager or a private environment file. Do not put the token in YAML, shell command arguments, Git or shared logs. All clients holding this token share access; rotate it by changing the environment and restarting the server.
+4. Preview: `python -m ashayllm.cli serve-vllm configs/inference-public.local.yaml`. Then start: `python -m ashayllm.cli serve-vllm configs/inference-public.local.yaml --run`. The default local config binds loopback; the public example binds port 8443 with TLS. A missing token or missing TLS files prevents startup. Plans contain the secret's variable name, never its value.
+5. Allow inbound TCP 8443 only from intended client networks in your host firewall and, on EC2, its security group. For a laptop, WSL/Windows forwarding and your router or VPN must make that port reachable. The code does not open firewall rules or router ports. Prefer a private VPN for a small group.
+6. Clients send `Authorization: Bearer <token>` to `https://YOUR_HOSTNAME:8443/v1/models` or POST text requests to `/v1/completions` and `/v1/chat/completions`. For example, a completions body is `{"model":"artifacts/exports/ashayllm","prompt":"Explain gravity","max_tokens":64}`; use the model ID returned by `/v1/models`. Chat requires a suitable model chat template and instruction training; a base checkpoint can use completions.
+
+The middleware in `src/ashayllm/api_security.py` authenticates every exposed HTTP request and blocks all routes except these three, including administrative routes and alternate inference paths. It enforces bounded request bodies, process-wide rate/concurrency limits, timeouts, and text-only inputs; request prompt logging and interactive API docs are disabled. TLS files and tokens stay local. Native vLLM API keys alone do not cover all routes; see the [vLLM serving security guidance](https://docs.vllm.ai/en/latest/cli/serve/).
+
+These controls are a secure starting point, not a guarantee of complete security. This mode supports one API process and a shared token; it does not provide individual identities, billing quotas, distributed rate limits, or protection against network-level denial of service. For public multi-user production access, place it behind a managed gateway with identity, quotas and network protection, keep the backend private, and review the deployment. No public endpoint is opened automatically.
+
+
+### Custom CUDA and execution settings
+
+Custom CUDA is opt-in for the native decoder. The included example replaces the SwiGLU activation with a CUDA extension implementing both forward and backward operations. PyTorch remains the default. This is a correctness-oriented example; no speedup has been established.
+
+1. Use a Linux CUDA host or WSL2 with a working NVIDIA driver, C++ compiler and a CUDA toolkit compatible with your installed PyTorch. The toolkit's `nvcc` and runtime headers must also match. CPU and Apple MPS cannot execute this extension.
+2. Install the small build dependency in your active environment: `python -m pip install -e '.[cuda-kernels]'`. If the toolkit is outside standard locations, set `CUDA_HOME` to its root. This command does not install a CUDA toolkit.
+
+   For the project's Linux x86-64 PyTorch CUDA **13.0** environment, compatible compiler components are available through `python -m pip install -e '.[cuda-kernels,cuda13-toolchain]'`. This pins `nvidia-cuda-nvcc`, `nvidia-cuda-crt` and `nvidia-nvvm` to 13.0.88; it does not replace PyTorch's runtime. Set the toolkit root for these wheels with `export CUDA_HOME="$(python -c 'import site; print(site.getsitepackages()[0])')/nvidia/cu13"`. Use a matching toolkit instead if your PyTorch build uses another CUDA version.
+3. Run the forward/gradient check before training:
+
+   ```bash
+   python -m ashayllm.cli check-cuda-kernel kernels/swiglu
+   ```
+
+4. Start with `configs/pretrain-custom-cuda.yaml`, or copy your training recipe and edit the following fields within its existing sections:
+
+   ```yaml
+   model:
+     custom_swiglu_path: kernels/swiglu
+     attention_kernel: auto
+   training:
+     accelerator: cuda
+     precision: bf16
+     compile: false
+     optimizer_kernel: default
+     allow_tf32: false
+   ```
+
+5. Run `python -m ashayllm.cli pipeline configs/YOUR_RECIPE.yaml --run`. Startup validates FP32, FP16 and supported BF16 outputs and gradients against PyTorch before acquiring data. Source hashes are recorded and checked when resuming. Build products stay under ignored `artifacts/cuda-extensions/`.
+
+`src/ashayllm/execution.py` loads the trusted local plugin and runs checks; `model.py` selects it; `kernels/swiglu/kernel.py` provides the autograd wrapper; `swiglu.cpp` exposes bindings; and `swiglu.cu` implements the CUDA operations. Your own directory must export `swiglu(gate, up)` from `kernel.py` with autograd support. Selecting a plugin executes its local code, so use a source directory you trust. Set `custom_swiglu_path: null` to restore the built-in activation.
+
+Other optional execution controls are `model.attention_kernel: auto|math|flash|efficient|cudnn`, `training.compile`, `compile_backend: inductor|aot_eager|eager`, `compile_mode: default|reduce-overhead|max-autotune`, and `optimizer_kernel: default|fused|foreach`. Explicit optimized attention and fused optimizer selections require a compatible GPU. Measure throughput and memory for your workload; compilation can add startup time. Custom CUDA is currently limited to native-model SwiGLU and prepared hosts; managed `aws-train` packaging rejects it. Native FP4 kernels are a separate capability.
+
+The included kernel has passed FP32, FP16 and BF16 forward/backward checks on an RTX 4060 Laptop GPU with CUDA 13.0 compiler components. NVIDIA runtime wheels that lack an unversioned `libcudart.so` receive a linker alias inside the ignored build directory. A mismatched toolkit still fails visibly rather than bypassing compatibility checks. These checks establish correctness for the tested inputs, not a performance improvement.
+
+### Optional reasoning supervision
+
+Reasoning supervision defaults to `stage.reasoning_format: plain`. For SFT or distillation, select `think_answer` and supply JSONL records with `prompt`, `reasoning` and `answer` fields. The prepared response contains `<think>…</think>` followed by `<answer>…</answer>`. Allocate enough context for both sections. This trains the supplied explanation format; it does not establish reasoning quality. With verifiable-reward training, the optional format checks the final answer inside a single answer tag.
+
+
+### High-level architecture
+
+```mermaid
+flowchart TD
+    User[CLI user] --> Recipe[Versioned YAML recipe]
+    Recipe --> Local[Local machine or existing EC2 host]
+    Local --> Data[Bounded data acquisition and preparation]
+    Data --> Scratch[Train BPE and initialize native decoder]
+    Data --> Parent[Reuse a trained parent model and tokenizer]
+    Download[Explicit capped pretrained download] --> Import[Register local HF model]
+    Import --> Parent
+    Scratch --> Train[Pretraining]
+    Parent --> Stages[Midtraining / SFT / DPO / RLVR / distillation]
+    Teacher[Frozen teacher or reference] --> Stages
+    Train --> Outputs[Checkpoints, manifests, metrics and reports]
+    Stages --> Outputs
+    Outputs --> Eval[Held-out evaluation and domain benchmarks]
+    Outputs --> Chat[CLI inference: PyTorch or vLLM]
+    Outputs --> Export[HF-compatible export]
+    User --> AWS[Explicit EC2 Spot runner]
+    AWS --> Guard[Local checks, budget ledger and termination deadlines]
+    Guard --> Cloud[Temporary cloud workload]
+    Cloud --> Cleanup[Collect evidence and confirm termination]
+```
+
+The local pipeline runs where invoked; it does not choose or provision AWS automatically. Run artifacts and downloaded models remain outside Git. Post-training objectives and pretrained import/SFT/export are covered by small CPU tests, with native stages also exercised on CUDA. Real-device macOS, live AWS training and native FP4 validation require their respective environments.
+
+### Low-level component map
+
+```mermaid
+flowchart TD
+    CLI[cli.py: parse commands] --> Config[run_config.py: strict recipe validation]
+    CLI --> HW[hardware.py: detect and resolve device / precision]
+    CLI --> PT[pretrained.py: download, import and stage recipes]
+    CLI --> Tools[data_tools.py: format conversion and teacher responses]
+    CLI --> Compare[comparison.py: saved samples and standard-suite plans]
+    Config --> Pipeline[pipeline.py: narrate, orchestrate, checkpoint and resume]
+    HW --> Pipeline
+    Pipeline --> Corpus[corpus.py: capped acquisition and filtering]
+    Pipeline --> Bench[benchmarks.py: domain selection and continuation scoring]
+    Pipeline --> Pack[Tokenizer training and next-token packing]
+    Corpus --> Objective[objectives.py: structured data and training losses]
+    Pack --> Engine[engines.py: native / local HF adapters]
+    Objective --> Engine
+    Engine --> Native[model.py: RoPE, GQA, RMSNorm, SwiGLU decoder]
+    Engine --> HF[Transformers: local causal language model]
+    Engine --> Quant[quantization.py: experimental FP4 fake quantization]
+    Pipeline --> Saved[Ignored artifacts: config, snapshots, metrics, checkpoint]
+    Saved --> Chat[chat.py: load, generate and export]
+    Chat --> VLLM[inference.py: optional vLLM setup / serving]
+    CLI --> Spot[aws_runner.py: preflight, ledger, Spot and cleanup]
+    Spot --> Bundle[aws_training.py: capped bundle and guest training script]
+    Bundle --> S3[S3: encrypted source and result transfer]
+    Tests[tests/: configuration, objectives, causality and recovery] --> Pipeline
+    Tests --> Spot
+```
+
+| Code | Responsibility |
+| --- | --- |
+| `cli.py`, `run_config.py` | Command dispatch and strict, versioned configuration |
+| `hardware.py`, `engines.py` | Backend selection and native/local pretrained model adapters |
+| `corpus.py` | Bounded source snapshots, quality/PII/dedup/decontamination heuristics and document splits |
+| `pipeline.py` | Stage explanations, BPE/packing, optimizer loop, checkpoints, recovery and run reports |
+| `model.py` | Custom decoder implementation used for from-scratch experiments |
+| `objectives.py` | Response masking, DPO reference likelihoods, verifiable-reward rollouts and teacher KL |
+| `pretrained.py` | Explicit capped model download, local import and parent-derived stage recipes |
+| `data_tools.py` | Bounded text/CSV/JSONL conversion and local teacher-response generation |
+| `comparison.py` | Local baseline comparisons and optional standard-suite execution plans |
+| `quantization.py` | Software FP4 simulation with straight-through gradients; no packed-weight acceleration |
+| `execution.py`, `kernels/swiglu/` | Attention/compiler policy, custom CUDA source verification and differentiable SwiGLU extension |
+| `api_security.py` | vLLM route authentication, text-only request checks and process-wide resource limits |
+| `benchmarks.py` | Domain benchmark acquisition and custom sampled evaluation protocol |
+| `chat.py`, `inference.py` | Checkpoint inference, exports and optional vLLM serving |
+| `aws_runner.py` | Local preflight, conservative budget reservations, Spot lifecycle and shutdown safeguards |
+| `aws_training.py` | Allowlisted training bundles, local data/training preflight, source verification and bounded result upload |
+| `tests/` | Small unit/integration tests; hardware availability determines device coverage |
 
 | Goal | Where execution happens | What to run | AWS required? |
 | --- | --- | --- | --- |
@@ -19,7 +157,7 @@ AshayLLM is a configurable language-model experimentation workbench: acquire bou
 | Provision and test a cloud GPU | Local controller launches a temporary EC2 instance; tests run there | `aws-test ... --run` | Yes; incurs AWS charges |
 | Recover cloud results/cleanup | Local controller queries AWS and removes temporary resources after termination | `aws-reconcile` | Yes; no new instance launched |
 
-Commands run **where you invoke them**. If you SSH into an existing EC2 instance and run `doctor`, it inspects that EC2 instance. It does not provision another machine. Only `aws-test --run` launches compute in this project.
+Commands run **where you invoke them**. If you SSH into an existing EC2 instance and run `doctor`, it inspects that EC2 instance. It does not provision another machine. `aws-test --run` and `aws-train CONFIG --run` explicitly launch temporary Spot compute.
 
 `configs/local.yaml` and `configs/aws.yaml` describe runtime/model planning settings. Selecting `aws.yaml` does **not** deploy anything. `configs/aws-test.yaml` is the separate EC2 provisioning/budget configuration.
 
@@ -140,7 +278,7 @@ After training, replace `PATH_TO_COMPLETED_RUN` with the run directory printed b
 python -m ashayllm.cli chat PATH_TO_COMPLETED_RUN --backend torch
 ```
 
-The CLI supports `/reset` and `/exit`. A short pretraining test produces a base model with limited text quality, not an instruction-tuned assistant. Use the PyTorch backend on macOS: the project's automatic vLLM installation targets Linux/WSL with NVIDIA CUDA. A Mac can also act as an AWS controller after installing `.[aws]` and following the AWS sections below.
+The CLI supports `/reset` and `/exit`. A short training test produces limited text quality; SFT support does not make a tiny validation model a useful assistant. Use the PyTorch backend on macOS: the project's automatic vLLM installation targets Linux/WSL with NVIDIA CUDA. A Mac can also act as an AWS controller after installing `.[aws]` and following the AWS sections below.
 
 ### Hardware support and validation
 
@@ -185,7 +323,8 @@ The default stack pins PyTorch 2.13.0 and NumPy 2.3.5. The default CUDA 13.0 ins
 | `precision: auto` | BF16 when PyTorch reports support on CUDA/ROCm; otherwise FP32 |
 | `fp16` | Explicit CUDA/ROCm training with gradient scaling |
 | `fp32` | Default fallback; useful for CPU checks |
-| FP4 | Not implemented |
+| FP4 simulation | `model.quantization: fp4_fake`; experimental software fake quantization with FP32/BF16 master weights |
+| Native NVFP4 inference | `inference.quantization: nvfp4_per_token`; supported Blackwell CUDA hardware and vLLM required |
 
 BF16 reporting can include emulated support; it does not establish native acceleration or performance. Explicit unavailable backends/precision fail rather than silently switching. Microbatch defaults to 1; automatic model-specific memory calibration is pending.
 
@@ -217,7 +356,7 @@ python -m ashayllm.cli serve-vllm configs/inference.yaml
 python -m ashayllm.cli serve-vllm configs/inference.yaml --run
 ```
 
-The first command validates files and prints a plan. The second starts foreground serving at `http://127.0.0.1:8000/v1`. Stop it with Ctrl+C. Downloads and remote model code are disabled. A `.pt` checkpoint alone is insufficient; export from the future AshayLLM transformer is not implemented yet. Default memory utilization is 50%, context 2048 and concurrency 4; adjust for your model, and avoid simultaneous training/serving on a small GPU.
+The first command validates files and prints a plan. The second starts foreground serving at `http://127.0.0.1:8000/v1`. Stop it with Ctrl+C. Downloads and remote model code are disabled. A `.pt` checkpoint alone is insufficient; use `export RUN_DIR` to create the compatible model directory. Default memory utilization is 50%, context 2048 and concurrency 4; adjust for your model, and avoid simultaneous training/serving on a small GPU.
 
 ## 4. Prepare AWS access
 
@@ -424,7 +563,7 @@ Copy a provided YAML recipe before editing it. The strict schema rejects unsuppo
 | `training` | Device, precision, seed, determinism, optimizer steps, microbatch, accumulation, AdamW, schedule, clipping, checkpoints and runtime cap |
 | `evaluation` | Benchmark selection/sample/download cap, loss batches and generation controls |
 
-Currently the executable architecture is a causal RoPE decoder with GQA, RMSNorm and SwiGLU; the tokenizer algorithm is byte-level BPE. Other architecture or tokenizer names are rejected. The runtime limit is checked between training steps, not a deadline for the entire acquisition/evaluation workflow. Hardware detection does not automatically choose a model size that fits memory.
+From-scratch experiments use the native causal RoPE decoder with GQA, RMSNorm and SwiGLU, plus a trained byte-level BPE tokenizer. Imported Hugging Face models use their original architecture and tokenizer through the local pretrained adapter. Optional reasoning supervision, execution kernels and stage objectives are configured in the same recipe. The runtime limit is checked between training steps, not a deadline for the entire acquisition/evaluation workflow. Hardware detection does not automatically choose a model size that fits memory.
 
 ### Finance-focused experiment
 
@@ -492,9 +631,148 @@ The vLLM chat backend exports the trained weights if necessary and loads them lo
 
 ### AWS experiments and subsequent stages
 
-Use the AWS tutorial above for a budget-controlled GPU readiness test. `aws-test --run` currently runs synthetic smoke checks, not this complete training recipe. On an already provisioned EC2 machine, install the same package and run `pipeline CONFIG --run` there; that command itself does not provision or terminate EC2. Automated Spot deployment of the full pipeline remains a subsequent implementation step.
+Use the AWS tutorial above for a budget-controlled GPU readiness test. `aws-test --run` currently runs synthetic smoke checks, not this complete training recipe. For managed native training use `aws-train` and the S3/profile setup below. On an already provisioned EC2 machine, install the same package and run `pipeline CONFIG --run` there; that command itself does not provision or terminate EC2.
 
-The next model stages are continued pretraining/midtraining on domain data, supervised fine-tuning on prompt/response examples, and optional DPO with preference pairs or RLVR with verifiable rewards. These require their own objectives, data formats, tests and evaluation; they are not enabled by the current pretraining command. Broader corpora and comparisons against GPT-2, Pythia and SmolLM2 will follow the bounded local validation workflow.
+The executable stage recipes and required data formats are described below. Broader corpus quality assessment and full published-model comparisons need larger, explicitly chosen experiments; the small local checks establish execution and recovery, not quality or parity with production training systems.
+
+## Continue training: midtraining, SFT, DPO and RLVR
+
+Use a completed run as the parent. `stage-config` copies its architecture and tokenizer settings, avoiding manual mismatches. Write personal recipes to ignored `configs/*.local.yaml` files:
+
+```bash
+python -m ashayllm.cli stage-config PATH_TO_PARENT --kind sft --data data/raw/sft.jsonl --output configs/sft.local.yaml --steps 40
+python -m ashayllm.cli pipeline configs/sft.local.yaml
+python -m ashayllm.cli pipeline configs/sft.local.yaml --run
+python -m ashayllm.cli chat PATH_TO_NEW_COMPLETED_RUN
+```
+
+Each stage creates a new run and optimizer; it retains the parent's weights and vocabulary. `--resume` recovers a stage using that stage's own saved optimizer and random states. Parent and teacher checkpoint hashes are recorded and checked during recovery. Parent artifacts must remain available.
+
+| Stage / `--kind` | JSONL record fields | Objective |
+| --- | --- | --- |
+| `midtrain` | `text` | Continued next-token cross entropy on specialized documents |
+| `sft` | `prompt`, `response` | Response-only cross entropy; prompt/padding loss masked |
+| `dpo` | `prompt`, `chosen`, `rejected` | Preference objective against a frozen parent reference |
+| `rlvr` | `prompt`, `answer` | Sampled group-relative policy objective and reference KL with exact-match or integer rewards |
+| `distill` | `prompt`, `response` | Teacher-distribution KL mixed with response cross entropy |
+
+Examples, one per JSONL line:
+
+```json
+{"prompt":"What does a bank do?","response":"A bank accepts deposits and provides financial services."}
+{"prompt":"What is 2 plus 3?","chosen":"5","rejected":"6"}
+{"prompt":"What is 2 plus 3?","answer":"5"}
+```
+
+Keep separate files for each format. At least ten distinct accepted records are required to form document splits. Structured stages use `User: ...` / `Assistant:` formatting. They reject overlong examples rather than silently truncate answers. Duplicate prompts are removed before splitting. Existing PII/quality/decontamination heuristics still apply; provide benchmark files for your evaluation data.
+
+Copy `configs/posttrain-*.yaml` for full native defaults, or prefer `stage-config` for the actual parent. Edit `stage.dpo_beta`, reward/verifier, group size, rollout cap, KL coefficient and optimizer settings deliberately. RLVR is a small GRPO-inspired implementation with one update per sampled group, not a distributed production RL system. Equal rewards give zero policy advantage; mostly wrong samples may provide no useful learning signal. The integer verifier accepts a complete signed integer response, not arbitrary reasoning text or executable code. The DPO and group-relative objectives follow the ideas in [DPO](https://arxiv.org/abs/2305.18290) and [DeepSeekMath](https://arxiv.org/abs/2402.03300).
+
+## Fine-tune an existing pretrained model
+
+Install the optional adapter dependencies alongside your PyTorch environment:
+
+```bash
+uv pip install -e '.[pipeline,pretrained]'
+# Metadata-only preview: pins the resolved upstream revision and checks total file size.
+python -m ashayllm.cli download-model HuggingFaceTB/SmolLM2-135M --max-bytes 500000000
+# Explicitly execute only after reviewing model license, size and disk/memory requirements.
+python -m ashayllm.cli download-model HuggingFaceTB/SmolLM2-135M --max-bytes 500000000 --run
+python -m ashayllm.cli import-model PATH_TO_DOWNLOADED_MODEL --context 128
+```
+
+Use the printed imported run directory as `PATH_TO_PARENT` in the stage tutorial. `midtrain` uses your raw text; `sft` uses your instruction/response data; DPO/RLVR use their corresponding formats. This reuses the pretrained tokenizer and weights, rather than starting from random initialization. Models supported by Transformers' causal-language-model auto classes with fast tokenizers can use the adapter; remote model code and implicit model downloads are disabled. Compatibility and memory use still depend on the selected architecture. A local tiny GPT-2 fixture tests import, SFT and export; this is not a claim that every Hub model has been validated.
+
+The downloader selects safetensors weights and tokenizer/configuration assets, records resolved revision and file hashes, and excludes Python code and pickle weight files. Downloads stay under ignored `artifacts/pretrained/`. An existing local HF export can be imported directly without network access. Imported models keep a dependency on that local source directory; retain it for future stages and exports.
+
+### Prepare your own data
+
+```bash
+python -m ashayllm.cli convert-data documents.txt --format text --output data/raw/documents.jsonl --max-bytes 10000000 --max-documents 1000
+python -m ashayllm.cli convert-data instructions.csv --format csv --output data/raw/sft.jsonl
+```
+
+Text conversion treats blank-line-separated paragraphs as documents. CSV headers become JSON field names: use `text` for midtraining or `prompt,response` for SFT. JSONL conversion also exists. Conversion preserves records; training performs objective-specific validation and filtering. PDFs, images, audio and arbitrary schemas require a separate extraction/mapping step. Outputs refuse to overwrite existing files. Choose source licenses and training rights appropriate to your intended use.
+
+## Distill a teacher into a student
+
+Two methods are available:
+
+1. **Sequence distillation:** generate responses from a local teacher, then SFT the student on those responses. Teacher and student may have different tokenizers.
+2. **Token distillation:** optimize student logits against a frozen teacher, with temperature-scaled KL and configurable hard-label mixing. This requires identical tokenizer contents and special-token identities; architectures may differ, and the teacher context must cover the student context.
+
+For sequence distillation, create a JSONL file with `prompt` strings:
+
+```bash
+python -m ashayllm.cli teacher-data PATH_TO_TEACHER --prompts data/raw/prompts.jsonl --output data/raw/teacher-sft.jsonl --max-documents 32 --max-tokens 32
+python -m ashayllm.cli stage-config PATH_TO_STUDENT --kind sft --data data/raw/teacher-sft.jsonl --output configs/sequence-distill.local.yaml
+python -m ashayllm.cli pipeline configs/sequence-distill.local.yaml --run
+```
+
+For token distillation:
+
+```bash
+python -m ashayllm.cli stage-config PATH_TO_STUDENT --kind distill --teacher PATH_TO_TEACHER --data data/raw/sft.jsonl --output configs/distill.local.yaml
+python -m ashayllm.cli pipeline configs/distill.local.yaml --run
+```
+
+Configure `stage.distillation_temperature` and `stage.distillation_alpha` in the recipe. Alpha weights the soft teacher loss; the remaining weight applies to response cross entropy. A weak teacher can teach poor behavior; a short execution test does not establish distillation benefit.
+
+## FP4 experiments
+
+For portable software experiments:
+
+```bash
+python -m ashayllm.cli pipeline configs/pretrain-fp4-fake.yaml
+python -m ashayllm.cli pipeline configs/pretrain-fp4-fake.yaml --run
+```
+
+`model.quantization: fp4_fake` applies block-scaled E2M1-style fake quantization to compatible linear weights and activations, using straight-through gradients. It requires linear input dimensions divisible by 16. It can run on the current laptop, but **does not pack checkpoints, accelerate GEMMs or guarantee bitwise parity with NVIDIA's NVFP4 recipes**. Master weights, optimizer state and accumulation remain at the configured higher precision. Chat through PyTorch reproduces fake quantization; HF export writes full-precision master weights and records that distinction.
+
+For native online NVFP4 inference, set `inference.quantization: nvfp4_per_token` in a serving recipe and use `serve-vllm`. The project checks for Blackwell CUDA compute capability before selecting it; vLLM performs final kernel/model checks. The RTX 4060 and macOS do not have this native path. Native FP4 training kernels are not implemented. See [vLLM online NVFP4](https://docs.vllm.ai/en/latest/api/vllm/model_executor/layers/quantization/online/nvfp4/) and [TorchAO workflows](https://docs.pytorch.org/ao/stable/workflows/index.html).
+
+## Compare models and use standard benchmarks
+
+After downloading/importing any approved baseline models separately:
+
+```bash
+python -m ashayllm.cli compare PATH_TO_COMPLETED_RUN --baseline PATH_TO_LOCAL_GPT2 --baseline PATH_TO_LOCAL_PYTHIA --baseline PATH_TO_LOCAL_SMOLLM2 --output artifacts/comparison.json
+```
+
+This uses the run's saved benchmark examples for every candidate, retaining each model's own tokenizer. Baselines can be completed AshayLLM runs or local HF exports. Custom continuation scoring differs from published-suite protocols; tokenizers and context/truncation choices affect comparisons. No baseline weights are fetched by `compare`.
+
+For the optional [EleutherAI evaluation harness](https://github.com/EleutherAI/lm-evaluation-harness):
+
+```bash
+uv pip install -e '.[evaluation]'
+python -m ashayllm.cli export PATH_TO_COMPLETED_RUN
+python -m ashayllm.cli evaluate-standard PATH_TO_EXPORT --tasks hellaswag piqa arc_easy --limit 100
+# Explicit execution can download benchmark datasets.
+python -m ashayllm.cli evaluate-standard PATH_TO_EXPORT --tasks hellaswag piqa arc_easy --limit 100 --run
+```
+
+The default command only prints a plan. `--limit` caps scored examples, **not dataset download bytes**; obtain approval for large datasets before executing. The harness is an optional external integration: full suite execution and real GPT-2/Pythia/SmolLM2 comparisons have not been run in the bounded local validation. Finance selection in the built-in pipeline uses FinancialPhraseBank; choose additional harness tasks explicitly when needed.
+
+## Run a native training stage on budget-controlled EC2 Spot
+
+Copy `configs/aws-training.yaml` to ignored `configs/aws-training.local.yaml`. Follow the AWS credential/IAM tutorial above, then provide:
+
+- `pipeline_config`: the full training recipe to package.
+- `artifact_bucket`: an existing private S3 bucket in the chosen region, with suitable encryption and retention/lifecycle rules.
+- `instance_profile_name`: an existing EC2 instance profile whose role can read the source object and write the result object under the configured prefix.
+- Instance type, budgets, runtime, transfer caps and artifact cost reserve.
+
+Your controller also needs S3 PutObject/GetObject permissions on that prefix and IAM PassRole for the selected instance role. The EC2 role must trust `ec2.amazonaws.com`; use temporary instance-role credentials rather than placing IAM keys in the bundle. Have your IAM administrator scope permissions to the actual bucket/prefix and role. This workflow does not create the bucket or instance profile.
+
+```bash
+python -m ashayllm.cli aws-train configs/aws-training.local.yaml
+# Explicit provisioning, upload and cloud training:
+python -m ashayllm.cli aws-train configs/aws-training.local.yaml --run
+```
+
+Before provisioning, the runner performs local tests/lint and an actual bounded two-step CPU data/training preflight. The controller therefore needs PyTorch and pipeline dependencies for `aws-train`, unlike the lightweight `aws-test` controller. It allowlists source/configuration and declared inputs, checks bundle size, reserves budget, uploads encrypted source, launches one Spot instance and attaches the supplied profile. It packages native pretraining and native parent/teacher stages; the managed bundler currently rejects external pretrained-model paths.
+
+The guest arms a shutdown timer before package/data work, verifies the source checksum, runs the pipeline and attempts a bounded result upload on exit. The existing AWS deadline and controller termination safeguards remain active. Confirm `terminated` and inspect the saved cloud report; a lost/interrupted result upload can leave `results_missing` even after cleanup. Results are downloaded as an ignored `results.tar.gz`, without automatically extracting an external archive. S3 objects persist until your lifecycle rules remove them; the ledger is a conservative estimate, not a hard cap on every AWS charge. Live cloud training has not been validated during this local-only development pass.
 
 ## CLI reference and repository layout
 
@@ -503,7 +781,16 @@ The next model stages are continued pretraining/midtraining on domain data, supe
 | `pipeline CONFIG [--run] [--resume CHECKPOINT]` | Strict recipe validation or narrated local pretraining |
 | `chat RUN_DIR [--backend torch\|vllm]` | CLI inference from a completed training run |
 | `export RUN_DIR` | Export trained model/tokenizer for HF-compatible inference |
+| `stage-config PARENT --kind STAGE --data FILE --output CONFIG` | Derive a post-training recipe from its parent |
+| `download-model REPO [--run]` | Preview or execute revision-pinned, capped pretrained acquisition |
+| `import-model LOCAL_DIR` | Register a local pretrained model for later stages |
+| `convert-data SOURCE --format FORMAT --output FILE` | Bounded text/CSV/JSONL conversion |
+| `teacher-data TEACHER --prompts FILE --output FILE` | Generate local sequence-distillation data |
+| `compare RUN_DIR [--baseline LOCAL_DIR]` | Compare models using saved benchmark examples |
+| `evaluate-standard LOCAL_EXPORT [--run]` | Plan or invoke the optional standard harness |
+| `aws-train CONFIG [--run]` | Plan or execute an S3-backed native Spot training stage |
 | `doctor` | Inspect current hardware and PyTorch/CUDA |
+| `check-cuda-kernel PATH` | Validate local custom SwiGLU outputs and backward gradients on CUDA |
 | `setup [--apply]` | Plan/install hardware-aware PyTorch packages |
 | `check-config CONFIG` | Validate required top-level project/runtime sections; not full schema validation |
 | `resolve-runtime CONFIG [--output FILE]` | Resolve device/precision and optionally persist the result |
@@ -514,6 +801,8 @@ The next model stages are continued pretraining/midtraining on domain data, supe
 | `aws-reconcile RUN_ID [--path CONFIG]` | Recover cloud results and finish cleanup after termination |
 
 Use `python -m ashayllm.cli COMMAND --help` for flags.
+
+`init-student TEACHER_RUN` creates a random native student using the teacher's vocabulary. Use the printed student run as the parent for `stage-config ... --kind distill --teacher TEACHER_RUN`; this permits a smaller student architecture while retaining matching token IDs. An optional `--architecture FILE` supplies an architecture YAML mapping.
 
 - `src/ashayllm/`: CLI, corpus processing, tokenizer/model training, benchmarks, inference, hardware policy and AWS runner.
 - `configs/`: versioned portable defaults; `*.local.yaml` stays local.

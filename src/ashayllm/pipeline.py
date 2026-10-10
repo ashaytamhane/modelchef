@@ -15,8 +15,10 @@ from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
 from ashayllm.benchmarks import acquire_benchmark, evaluate_choices, select_benchmark
 from ashayllm.corpus import acquire, digest, process
+from ashayllm.engines import create_model, load_tokenizer
+from ashayllm.execution import check_custom_kernel, configure_execution, plugin_fingerprint
 from ashayllm.hardware import detect_hardware, resolve_runtime
-from ashayllm.model import Decoder
+from ashayllm.objectives import evaluate_stage, objective, pack_structured, prepare_structured
 
 
 class Narrator:
@@ -36,6 +38,8 @@ class Narrator:
 
 
 def train_tokenizer(documents, c):
+    if c.algorithm != 'byte_bpe':
+        raise ValueError('Pretrained tokenizers must be reused from a parent, not retrained')
     tokenizer = Tokenizer(models.BPE(unk_token="<unk>"))
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     tokenizer.decoder = decoders.ByteLevel()
@@ -49,7 +53,7 @@ def train_tokenizer(documents, c):
 def pack(documents, tokenizer, c, context, token_limit):
     tokens = []
     for row in documents:
-        ids = tokenizer.encode(row["text"]).ids
+        ids = tokenizer.encode(row["text"], add_special_tokens=False).ids
         if c.add_bos:
             ids.insert(0, tokenizer.token_to_id("<bos>"))
         if c.append_eos:
@@ -76,7 +80,7 @@ def evaluate(model, blocks, batches, batch_size, device, amp):
                 logits = model(x)
                 loss = F.cross_entropy(logits.float().flatten(0, 1), y.flatten(), reduction="sum")
             loss_sum += loss.item()
-            tokens += y.numel()
+            tokens += (y != -100).sum().item()
     model.train()
     nll = loss_sum / tokens
     return {"loss": nll, "perplexity": math.exp(min(nll, 80)), "tokens": tokens,
@@ -90,7 +94,9 @@ def run_pipeline(config, root, resume=None):
     folder = (Path(resume).resolve().parent.parent if resume else
               root / config.output_dir / (config.name + "-" + uuid.uuid4().hex[:12]))
     folder.mkdir(parents=True, exist_ok=True)
-    if resume and json.loads((folder / "config.json").read_text()) != recipe:
+    from ashayllm.run_config import RunConfig
+    if resume and RunConfig.model_validate_json((folder / "config.json").read_text()).model_dump(
+            mode="json") != recipe:
         raise ValueError("Resume configuration differs; refusing to modify the saved run")
     narrate = Narrator(folder, config.explain == "detailed")
     report = {"status": "running", "run_dir": str(folder), "config_sha256": fingerprint}
@@ -105,15 +111,28 @@ def run_pipeline(config, root, resume=None):
 
 
 def _execute(c, root, folder, fingerprint, n, report, resume):
+    if c.model.backend == 'huggingface' and c.stage.kind == 'pretrain':
+        raise ValueError('Import the pretrained model, then choose a continuation/post-training stage')
     n.stage("1. Configuration and hardware", "Validate the complete recipe before data access. "
             "Detect this machine's accelerator; no AWS instance is launched by this command.")
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     random.seed(c.training.seed)
     torch.manual_seed(c.training.seed)
     torch.use_deterministic_algorithms(c.training.deterministic)
-    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_tf32 = c.training.allow_tf32
     runtime = resolve_runtime(c.training.model_dump(), detect_hardware())
     device = runtime["device"]
+    if c.model.attention_kernel not in {'auto', 'math'} and device != 'cuda':
+        raise ValueError('Selected optimized attention kernel requires CUDA/ROCm')
+    if c.training.optimizer_kernel == 'fused' and device != 'cuda':
+        raise ValueError('Fused optimizer selection currently requires CUDA/ROCm')
+    if c.model.custom_swiglu_path:
+        kernel_hash = plugin_fingerprint(root / c.model.custom_swiglu_path)
+        saved_kernel = folder / 'custom-kernel.sha256'
+        if resume and saved_kernel.read_text() != kernel_hash:
+            raise ValueError('Custom CUDA source changed since this run started')
+        report['custom_kernel'] = check_custom_kernel(root / c.model.custom_swiglu_path)
+        saved_kernel.write_text(kernel_hash, encoding='utf-8')
     dtype = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}[
         runtime["precision"]]
     def amp():
@@ -125,13 +144,30 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
     n.stage("2. Acquire a bounded corpus snapshot", f"Source={c.data.dataset}, domain={c.data.domain}. "
             f"Limits: {c.data.max_documents} documents and {c.data.max_download_bytes:,} bytes. "
             "The saved SHA256 identifies the exact sample; raw text is never committed to Git.")
-    records, source = acquire(c, root, lambda message: n.say(message, detail=True))
+    snapshot = folder / 'raw.jsonl'
+    if resume and snapshot.exists():
+        records = [json.loads(line) for line in snapshot.read_text(encoding='utf-8').splitlines()]
+        source = json.loads((folder / 'source-manifest.json').read_text())
+        if digest(snapshot.read_bytes()) != source['raw_sha256']:
+            raise ValueError('Run snapshot checksum changed')
+    else:
+        records, source = acquire(c, root, lambda message: n.say(message, detail=True))
+        snapshot.write_bytes(b''.join((json.dumps(row, ensure_ascii=False) + '\n').encode()
+                                     for row in records))
     (folder / "source-manifest.json").write_text(json.dumps(source, indent=2), encoding="utf-8")
 
     n.stage("2b. Select domain benchmarks", f"Domain '{c.data.domain}' selects "
             f"'{select_benchmark(c)}'. Download only the configured small evaluation sample. "
             "These examples are excluded from tokenizer/training inputs and used only for evaluation.")
-    examples, benchmark_source = acquire_benchmark(c, root)
+    benchmark_snapshot = folder / 'benchmark-examples.json'
+    if resume and benchmark_snapshot.exists():
+        benchmark_source = json.loads((folder / 'benchmark-manifest.json').read_text())
+        if benchmark_source.get('sha256') and digest(benchmark_snapshot.read_bytes()) != benchmark_source['sha256']:
+            raise ValueError('Saved benchmark sample checksum changed')
+        examples = json.loads(benchmark_snapshot.read_text())
+    else:
+        examples, benchmark_source = acquire_benchmark(c, root)
+        benchmark_snapshot.write_text(json.dumps(examples), encoding='utf-8')
     (folder / "benchmark-manifest.json").write_text(
         json.dumps(benchmark_source, indent=2), encoding="utf-8")
     processing_config = c.model_copy(deep=True)
@@ -145,7 +181,9 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
             "length/quality/repetition failures, apply domain keywords, regex PII handling and "
             "lexical deduplication before document-level seeded train/validation/test splitting. "
             "Configured benchmark files enable exact n-gram decontamination; otherwise it is unconfigured.")
-    splits, processing = process(records, processing_config, root)
+    structured = c.stage.kind in {'sft', 'dpo', 'rlvr', 'distill'}
+    splits, processing = (prepare_structured(records, processing_config, root) if structured else
+                          process(records, processing_config, root))
     for name, rows in splits.items():
         (folder / f"{name}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows),
                                            encoding="utf-8")
@@ -154,10 +192,33 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
     n.say(f"Benchmark decontamination: {processing['decontamination']}. "
           "PII/dedup checks are limited heuristics, not complete guarantees.")
 
-    n.stage("4. Train a tokenizer from scratch", "Byte-level BPE learns merges on training documents "
-            "only. Validation/test text cannot influence the vocabulary. No pretrained tokenizer is loaded.")
-    tokenizer = train_tokenizer(splits["train"], c.tokenizer)
+    n.stage("4. Prepare the tokenizer", "From-scratch pretraining learns byte-level BPE on training "
+            "documents only. Later stages retain the parent's vocabulary and special-token identities.")
+    parent = None
+    if c.stage.kind != 'pretrain':
+        from ashayllm.chat import checkpoint_for
+        from ashayllm.run_config import RunConfig
+        parent_folder = (root / c.stage.parent_run).resolve()
+        parent_config = RunConfig.model_validate_json((parent_folder / 'config.json').read_text())
+        execution_fields = {'quantization', 'attention_kernel', 'custom_swiglu_path'}
+        if c.model.model_dump(exclude=execution_fields) != parent_config.model.model_dump(
+                exclude=execution_fields) or c.tokenizer != parent_config.tokenizer:
+            raise ValueError('Parent architecture/tokenizer settings must match; copy the parent recipe')
+        tokenizer = load_tokenizer(parent_folder)
+        parent_path = checkpoint_for(parent_folder)
+        parent = torch.load(parent_path, map_location='cpu', weights_only=True)['model']
+        report['parent'] = {'checkpoint_sha256': digest(parent_path.read_bytes()),
+                            'tokenizer_sha256': digest((parent_folder / 'tokenizer.json').read_bytes())}
+        parent_manifest = folder / 'parent-manifest.json'
+        if resume and json.loads(parent_manifest.read_text()) != report['parent']:
+            raise ValueError('Parent checkpoint/tokenizer changed since this stage started')
+        parent_manifest.write_text(json.dumps(report['parent']), encoding='utf-8')
+        n.say(f'Reuse parent vocabulary and weights for {c.stage.kind}; no vocabulary retraining.')
+    else:
+        tokenizer = train_tokenizer(splits["train"], c.tokenizer)
     tokenizer.save(str(folder / "tokenizer.json"))
+    if parent is not None and hasattr(tokenizer, 'roles'):
+        (folder / 'tokenizer-roles.json').write_text(json.dumps(tokenizer.roles), encoding='utf-8')
     tokenizer_hash = digest((folder / "tokenizer.json").read_bytes())
     n.say(f"BPE vocabulary={tokenizer.get_vocab_size()} (requested {c.tokenizer.vocab_size}).")
 
@@ -168,8 +229,9 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
     fractions = {"validation": c.processing.validation_fraction, "test": c.processing.test_fraction,
                  "train": 1 - c.processing.validation_fraction - c.processing.test_fraction}
     for name, rows in splits.items():
-        blocks[name], token_counts[name] = pack(rows, tokenizer, c.tokenizer,
-            c.model.context_length, int(c.data.max_tokens * fractions[name]))
+        limit = int(c.data.max_tokens * fractions[name])
+        blocks[name], token_counts[name] = (pack_structured(rows, tokenizer, c, limit) if structured
+            else pack(rows, tokenizer, c.tokenizer, c.model.context_length, limit))
     torch.save(blocks, folder / "tokens.pt")
     token_hash = digest((folder / "tokens.pt").read_bytes())
     # Logical data identity is independent of torch ZIP container metadata.
@@ -178,18 +240,62 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
     n.say(f"Token counts: {token_counts}; context={c.model.context_length}. "
           "This is bounded pretraining data, not a full corpus download.")
 
-    n.stage("6. Initialize a decoder-only transformer", "Random weights with causal scaled dot-product "
-            "attention, rotary positions, grouped-query attention, RMSNorm and SwiGLU. "
-            "Parameter count comes from actual tensors, not a target label.")
-    model = Decoder(c.model, tokenizer.get_vocab_size()).to(device)
+    n.stage("6. Construct the training model", "The native decoder uses causal attention, RoPE, GQA, "
+            "RMSNorm and SwiGLU. Pretraining starts from random weights; later stages restore a parent. "
+            "The HF adapter loads local pretrained models without remote code or implicit downloads.")
+    model = create_model(c.model, tokenizer.get_vocab_size()).to(device)
+    if parent is not None:
+        model.load_state_dict(parent)
+    if c.model.quantization == 'fp4_fake':
+        n.say('Experimental software FP4 fake quantization enabled: FP32/BF16 master weights and '
+              'straight-through gradients. No packed-weight storage or native FP4 acceleration.')
+    reference = None
+    if c.stage.kind in {'dpo', 'rlvr'}:
+        reference = create_model(c.model, tokenizer.get_vocab_size()).to(device)
+        reference.load_state_dict(parent)
+        reference.requires_grad_(False).eval()
+        # Preference/RL likelihoods must not fluctuate because of dropout.
+        for network in [model, reference]:
+            for module in network.modules():
+                if isinstance(module, torch.nn.Dropout):
+                    module.p = 0
+                if hasattr(module, 'attention_dropout'):
+                    module.attention_dropout = 0.0
+            if hasattr(network, 'blocks'):
+                for block in network.blocks:
+                    block.attention.c = block.attention.c.model_copy(update={'attention_dropout': 0})
+    if c.stage.kind == 'distill':
+        from ashayllm.chat import checkpoint_for
+        from ashayllm.run_config import RunConfig
+        teacher_folder = (root / c.stage.teacher_run).resolve()
+        if digest((teacher_folder / 'tokenizer.json').read_bytes()) != tokenizer_hash:
+            raise ValueError('Token distillation requires identical student/teacher tokenizers')
+        if load_tokenizer(teacher_folder).roles != getattr(tokenizer, 'roles', {}):
+            raise ValueError('Teacher/student special-token identities differ')
+        teacher_config = RunConfig.model_validate_json((teacher_folder / 'config.json').read_text())
+        if teacher_config.model.context_length < c.model.context_length:
+            raise ValueError('Teacher context must cover the student context')
+        reference = create_model(teacher_config.model, tokenizer.get_vocab_size()).to(device)
+        teacher_path = checkpoint_for(teacher_folder)
+        reference.load_state_dict(torch.load(teacher_path, map_location='cpu', weights_only=True)['model'])
+        reference.requires_grad_(False).eval()
+        report['teacher_checkpoint_sha256'] = digest(teacher_path.read_bytes())
+        teacher_manifest = folder / 'teacher-manifest.json'
+        if resume and teacher_manifest.read_text() != report['teacher_checkpoint_sha256']:
+            raise ValueError('Teacher checkpoint changed since this stage started')
+        teacher_manifest.write_text(report['teacher_checkpoint_sha256'], encoding='utf-8')
     parameters = sum(parameter.numel() for parameter in model.parameters())
     n.say(f"Parameters={parameters:,}; layers={c.model.layers}; width={c.model.hidden_size}; "
           f"attention heads={c.model.attention_heads}; KV heads={c.model.kv_heads}.")
     t = c.training
+    report['execution'] = configure_execution(model, t, device)
     groups = [{"params": [p for p in model.parameters() if p.ndim >= 2],
                "weight_decay": t.weight_decay},
               {"params": [p for p in model.parameters() if p.ndim < 2], "weight_decay": 0}]
-    optimizer = torch.optim.AdamW(groups, lr=t.learning_rate, betas=t.betas, eps=t.optimizer_eps)
+    optimizer_options = ({'fused': True} if t.optimizer_kernel == 'fused' else
+                         {'foreach': True} if t.optimizer_kernel == 'foreach' else {})
+    optimizer = torch.optim.AdamW(groups, lr=t.learning_rate, betas=t.betas,
+                                  eps=t.optimizer_eps, **optimizer_options)
     scaler = torch.amp.GradScaler("cuda", enabled=runtime["requires_grad_scaler"])
     generator = torch.Generator().manual_seed(t.seed)
     step, consumed = 0, 0
@@ -224,11 +330,19 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
         n.say(f"Checkpoint saved at step {index}: {path.name}", detail=True)
         return path
 
-    n.stage("7. Pretrain and validate", "Measure held-out validation loss before updates, then train "
-            "next-token cross entropy using AdamW, gradient accumulation/clipping and the configured "
-            "learning-rate schedule. Log loss, throughput and validation metrics. A short run tests "
-            "the pipeline; it does not produce a useful language model.")
-    baseline = evaluate(model, blocks["validation"], c.evaluation.batches,
+    explanations = {
+        'pretrain': 'Next-token cross entropy from random initialization.',
+        'midtrain': 'Continue next-token training with parent weights and vocabulary.',
+        'sft': 'Response-only cross entropy: prompt and padding tokens are masked from loss.',
+        'dpo': 'Preference loss against a frozen parent reference, using summed response log likelihoods.',
+        'rlvr': 'Sample groups of responses, verify answers, normalize rewards and optimize a '
+                'clipped policy objective with reference KL. Equal rewards give zero policy advantage.',
+        'distill': 'Mix response cross entropy with temperature-scaled KL from a frozen teacher.'}
+    n.stage(f"7. Train stage: {c.stage.kind}", explanations[c.stage.kind] +
+            ' Use AdamW, gradient accumulation/clipping and the configured schedule. '
+            'A short test validates execution; it does not establish model quality.')
+    evaluation_blocks = {name: parts[:2] for name, parts in blocks.items()}
+    baseline = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
                         t.micro_batch_size, device, amp)
     n.say(f"Initial validation loss={baseline['loss']:.4f}; perplexity={baseline['perplexity']:.2f}.")
     started = time.monotonic()
@@ -246,18 +360,20 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
         for group in optimizer.param_groups:
             group["lr"] = lr
         optimizer.zero_grad(set_to_none=True)
-        train_loss = 0
+        train_loss, auxiliary = 0, {}
         for _ in range(t.gradient_accumulation):
             indices = torch.randint(len(blocks["train"][0]), (t.micro_batch_size,), generator=generator)
-            x, y = (part[indices].to(device) for part in blocks["train"])
+            parts = tuple(part[indices].to(device) for part in blocks["train"])
             with amp():
-                logits = model(x)
-                loss = F.cross_entropy(logits.float().flatten(0, 1), y.flatten())
+                loss, objective_metrics = objective(model, parts, c, reference, tokenizer)
+            for key, value in objective_metrics.items():
+                auxiliary[key] = auxiliary.get(key, 0) + value / (
+                    t.gradient_accumulation if key in {'reward_mean', 'teacher_kl'} else 1)
             if not torch.isfinite(loss):
                 raise FloatingPointError("Non-finite training loss")
             scaler.scale(loss / t.gradient_accumulation).backward()
             train_loss += loss.item() / t.gradient_accumulation
-            consumed += y.numel()
+            consumed += sum((part != -100).sum().item() for part in parts[1::2])
         scaler.unscale_(optimizer)
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), t.gradient_clip_norm,
                                               error_if_nonfinite=True)
@@ -268,8 +384,9 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
                    "gradient_norm": norm.item(), "tokens_seen": consumed,
                    "tokens_per_second": (step - initial_step) * t.micro_batch_size *
                    t.gradient_accumulation * c.model.context_length / (time.monotonic() - started)}
+        metrics.update(auxiliary)
         if step % t.evaluate_every == 0 or step == t.steps:
-            metrics["validation"] = evaluate(model, blocks["validation"], c.evaluation.batches,
+            metrics["validation"] = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
                                               t.micro_batch_size, device, amp)
         with (folder / "metrics.jsonl").open("a", encoding="utf-8") as output:
             output.write(json.dumps(metrics) + "\n")
@@ -284,11 +401,14 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
     n.stage("8. Final held-out evaluation and checkpoint reload", "Evaluate validation and test splits "
             "without gradient updates. Reload the final weights into a fresh decoder and check matching "
             "logits. Perplexity only applies to this sample/tokenizer; it is not a standard-suite score.")
-    validation = evaluate(model, blocks["validation"], c.evaluation.batches,
+    validation = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
                           t.micro_batch_size, device, amp)
-    test = evaluate(model, blocks["test"], c.evaluation.batches, t.micro_batch_size, device, amp)
+    test = evaluate(model, evaluation_blocks["test"], c.evaluation.batches, t.micro_batch_size, device, amp)
+    report['stage_evaluation'] = {
+        'validation': evaluate_stage(model, reference, blocks['validation'], tokenizer, c, device, amp),
+        'test': evaluate_stage(model, reference, blocks['test'], tokenizer, c, device, amp)}
     model.eval()
-    restored = Decoder(c.model, tokenizer.get_vocab_size()).to(device)
+    restored = create_model(c.model, tokenizer.get_vocab_size()).to(device)
     restored.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True)["model"])
     restored.eval()
     probe = blocks["test"][0][:1].to(device)
@@ -325,7 +445,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
             if token.item() == tokenizer.token_to_id("<eos>"):
                 break
     sample = tokenizer.decode(generated[0].tolist())
-    report.update(status="completed", parameters=parameters, optimizer_steps=step,
+    report.update(status="completed", stage=c.stage.kind, parameters=parameters, optimizer_steps=step,
                   tokens_seen=consumed, token_counts=token_counts,
                   initial_validation=baseline, validation=validation, test=test,
                   checkpoint_recovery="passed", checkpoint=str(checkpoint_path),

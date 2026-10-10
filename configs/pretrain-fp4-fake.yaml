@@ -1,0 +1,112 @@
+schema_version: 1
+name: fp4-fake-local
+output_dir: artifacts/training
+explain: detailed
+data:
+  provider: hf_rows
+  dataset: HuggingFaceFW/fineweb-edu
+  subset: sample-10BT
+  split: train
+  text_field: text
+  local_path: null
+  offset: 0
+  max_documents: 256
+  page_size: 50
+  max_download_bytes: 16000000
+  timeout_seconds: 30
+  max_tokens: 200000
+  domain: general
+  domain_keywords: []
+processing:
+  unicode_normalization: NFKC
+  strip_html: true
+  min_chars: 200
+  max_chars: 20000
+  min_alnum_fraction: 0.5
+  max_repeated_line_fraction: 0.4
+  exact_dedup: true
+  near_dedup: true
+  near_dedup_jaccard: 0.9
+  dedup_ngram_words: 5
+  pii: redact
+  benchmark_files: []
+  decontamination_ngram_words: 13
+  validation_fraction: 0.1
+  test_fraction: 0.1
+tokenizer:
+  algorithm: byte_bpe
+  vocab_size: 4096
+  min_frequency: 2
+  special_tokens:
+  - <pad>
+  - <unk>
+  - <bos>
+  - <eos>
+  add_bos: false
+  append_eos: true
+model:
+  backend: native
+  pretrained_path: null
+  pretrained_config_sha256: null
+  quantization: fp4_fake
+  type: decoder_rope
+  layers: 6
+  hidden_size: 512
+  attention_heads: 8
+  kv_heads: 2
+  intermediate_size: 1360
+  context_length: 128
+  norm: rmsnorm
+  norm_eps: 1.0e-05
+  activation: swiglu
+  rope_theta: 10000.0
+  attention_dropout: 0.0
+  residual_dropout: 0.0
+  bias: false
+  tie_embeddings: true
+  init_std: 0.02
+  gradient_checkpointing: false
+training:
+  accelerator: auto
+  precision: auto
+  seed: 42
+  deterministic: true
+  steps: 40
+  micro_batch_size: 2
+  gradient_accumulation: 2
+  optimizer: adamw
+  learning_rate: 0.0005
+  min_learning_rate_ratio: 0.1
+  betas:
+  - 0.9
+  - 0.95
+  weight_decay: 0.1
+  optimizer_eps: 1.0e-08
+  schedule: cosine
+  warmup_steps: 4
+  gradient_clip_norm: 1.0
+  checkpoint_every: 20
+  evaluate_every: 10
+  log_every: 5
+  max_runtime_seconds: 600
+evaluation:
+  benchmark: auto
+  benchmark_examples: 8
+  benchmark_max_download_bytes: 2000000
+  batches: 4
+  prompt: Education helps people
+  generate_tokens: 24
+  temperature: 0.8
+  top_k: 30
+stage:
+  kind: pretrain
+  parent_run: null
+  teacher_run: null
+  distillation_temperature: 2.0
+  distillation_alpha: 0.5
+  dpo_beta: 0.1
+  reward: integer
+  group_size: 4
+  rollout_tokens: 16
+  kl_coefficient: 0.02
+  clip_ratio: 0.2

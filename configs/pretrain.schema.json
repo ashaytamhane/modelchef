@@ -3,6 +3,72 @@
     "Architecture": {
       "additionalProperties": false,
       "properties": {
+        "backend": {
+          "default": "native",
+          "enum": [
+            "native",
+            "huggingface"
+          ],
+          "title": "Backend",
+          "type": "string"
+        },
+        "pretrained_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pretrained Path"
+        },
+        "pretrained_config_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pretrained Config Sha256"
+        },
+        "quantization": {
+          "default": "none",
+          "enum": [
+            "none",
+            "fp4_fake"
+          ],
+          "title": "Quantization",
+          "type": "string"
+        },
+        "attention_kernel": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "math",
+            "flash",
+            "efficient",
+            "cudnn"
+          ],
+          "title": "Attention Kernel",
+          "type": "string"
+        },
+        "custom_swiglu_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Custom Swiglu Path"
+        },
         "type": {
           "const": "decoder_rope",
           "default": "decoder_rope",
@@ -375,18 +441,128 @@
       "title": "Processing",
       "type": "object"
     },
+    "Stage": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "default": "pretrain",
+          "enum": [
+            "pretrain",
+            "midtrain",
+            "sft",
+            "dpo",
+            "rlvr",
+            "distill"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "parent_run": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Run"
+        },
+        "teacher_run": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Teacher Run"
+        },
+        "distillation_temperature": {
+          "default": 2,
+          "exclusiveMinimum": 0,
+          "title": "Distillation Temperature",
+          "type": "number"
+        },
+        "distillation_alpha": {
+          "default": 0.5,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Distillation Alpha",
+          "type": "number"
+        },
+        "dpo_beta": {
+          "default": 0.1,
+          "exclusiveMinimum": 0,
+          "title": "Dpo Beta",
+          "type": "number"
+        },
+        "reward": {
+          "default": "integer",
+          "enum": [
+            "exact_match",
+            "integer"
+          ],
+          "title": "Reward",
+          "type": "string"
+        },
+        "group_size": {
+          "default": 4,
+          "maximum": 32,
+          "minimum": 2,
+          "title": "Group Size",
+          "type": "integer"
+        },
+        "rollout_tokens": {
+          "default": 16,
+          "minimum": 1,
+          "title": "Rollout Tokens",
+          "type": "integer"
+        },
+        "kl_coefficient": {
+          "default": 0.02,
+          "minimum": 0,
+          "title": "Kl Coefficient",
+          "type": "number"
+        },
+        "clip_ratio": {
+          "default": 0.2,
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "Clip Ratio",
+          "type": "number"
+        },
+        "reasoning_format": {
+          "default": "plain",
+          "enum": [
+            "plain",
+            "think_answer"
+          ],
+          "title": "Reasoning Format",
+          "type": "string"
+        }
+      },
+      "title": "Stage",
+      "type": "object"
+    },
     "Tokenization": {
       "additionalProperties": false,
       "properties": {
         "algorithm": {
-          "const": "byte_bpe",
           "default": "byte_bpe",
+          "enum": [
+            "byte_bpe",
+            "pretrained"
+          ],
           "title": "Algorithm",
           "type": "string"
         },
         "vocab_size": {
           "default": 4096,
-          "maximum": 65536,
+          "maximum": 262144,
           "minimum": 260,
           "title": "Vocab Size",
           "type": "integer"
@@ -427,6 +603,46 @@
     "Training": {
       "additionalProperties": false,
       "properties": {
+        "compile": {
+          "default": false,
+          "title": "Compile",
+          "type": "boolean"
+        },
+        "compile_backend": {
+          "default": "inductor",
+          "enum": [
+            "inductor",
+            "aot_eager",
+            "eager"
+          ],
+          "title": "Compile Backend",
+          "type": "string"
+        },
+        "compile_mode": {
+          "default": "default",
+          "enum": [
+            "default",
+            "reduce-overhead",
+            "max-autotune"
+          ],
+          "title": "Compile Mode",
+          "type": "string"
+        },
+        "allow_tf32": {
+          "default": false,
+          "title": "Allow Tf32",
+          "type": "boolean"
+        },
+        "optimizer_kernel": {
+          "default": "default",
+          "enum": [
+            "default",
+            "fused",
+            "foreach"
+          ],
+          "title": "Optimizer Kernel",
+          "type": "string"
+        },
         "accelerator": {
           "default": "auto",
           "enum": [
@@ -623,6 +839,9 @@
     },
     "evaluation": {
       "$ref": "#/$defs/Evaluation"
+    },
+    "stage": {
+      "$ref": "#/$defs/Stage"
     }
   },
   "title": "RunConfig",

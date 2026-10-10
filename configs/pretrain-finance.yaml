@@ -51,6 +51,10 @@ tokenizer:
   add_bos: false
   append_eos: true
 model:
+  backend: native
+  pretrained_path: null
+  pretrained_config_sha256: null
+  quantization: none
   type: decoder_rope
   layers: 6
   hidden_size: 512
@@ -100,3 +104,15 @@ evaluation:
   generate_tokens: 24
   temperature: 0.8
   top_k: 30
+stage:
+  kind: pretrain
+  parent_run: null
+  teacher_run: null
+  distillation_temperature: 2.0
+  distillation_alpha: 0.5
+  dpo_beta: 0.1
+  reward: integer
+  group_size: 4
+  rollout_tokens: 16
+  kl_coefficient: 0.02
+  clip_ratio: 0.2

@@ -1,4 +1,4 @@
-"""Initial CLI: environment checks and configuration validation."""
+"""CLI for data, model training stages, inference, evaluation and explicit AWS runs."""
 import argparse
 import json
 import shutil
@@ -58,6 +58,10 @@ def main() -> None:
     aws_test.add_argument("path", type=Path, nargs="?", default=Path("configs/aws-test.yaml"))
     aws_test.add_argument("--instance-type")
     aws_test.add_argument("--run", action="store_true")
+    aws_train = command.add_parser('aws-train', help='Plan/run budgeted Spot pipeline training')
+    aws_train.add_argument('path', type=Path)
+    aws_train.add_argument('--instance-type')
+    aws_train.add_argument('--run', action='store_true')
     aws_reconcile = command.add_parser("aws-reconcile", help="Recover reports/cleanup for a saved run")
     aws_reconcile.add_argument("run_id")
     aws_reconcile.add_argument("--path", type=Path, default=Path("configs/aws-test.yaml"))
@@ -74,8 +78,84 @@ def main() -> None:
     chat_parser.add_argument("--top-k", type=int, default=30)
     export_parser = command.add_parser("export", help="Export a trained run for HF/vLLM")
     export_parser.add_argument("run_dir", type=Path)
+    download = command.add_parser('download-model', help='Preview/download capped safetensors model')
+    download.add_argument('repo')
+    download.add_argument('--revision', default='main')
+    download.add_argument('--max-bytes', type=int, default=500_000_000)
+    download.add_argument('--run', action='store_true')
+    imported = command.add_parser('import-model', help='Register a local pretrained HF model')
+    imported.add_argument('path', type=Path)
+    imported.add_argument('--context', type=int, default=128)
+    student = command.add_parser('init-student', help='Initialize a native student with teacher vocabulary')
+    student.add_argument('teacher', type=Path)
+    student.add_argument('--architecture', type=Path)
+    stage = command.add_parser('stage-config', help='Create a post-training recipe from a parent run')
+    stage.add_argument('parent', type=Path)
+    stage.add_argument('--kind', required=True, choices=['midtrain', 'sft', 'dpo', 'rlvr', 'distill'])
+    stage.add_argument('--data', required=True)
+    stage.add_argument('--output', required=True, type=Path)
+    stage.add_argument('--steps', type=int, default=40)
+    stage.add_argument('--teacher', type=Path)
+    stage.add_argument('--reasoning', choices=['plain', 'think_answer'], default='plain')
+    custom = command.add_parser('check-cuda-kernel', help='Check custom SwiGLU forward/backward on CUDA')
+    custom.add_argument('path', type=Path)
+    conversion = command.add_parser('convert-data', help='Convert bounded text/CSV/JSONL to JSONL')
+    conversion.add_argument('source', type=Path)
+    conversion.add_argument('--output', required=True, type=Path)
+    conversion.add_argument('--format', choices=['text', 'csv', 'jsonl'], default='jsonl')
+    conversion.add_argument('--max-bytes', type=int, default=10_000_000)
+    conversion.add_argument('--max-documents', type=int, default=1000)
+    teacher = command.add_parser('teacher-data', help='Generate bounded local teacher responses')
+    teacher.add_argument('teacher', type=Path)
+    teacher.add_argument('--prompts', required=True, type=Path)
+    teacher.add_argument('--output', required=True, type=Path)
+    teacher.add_argument('--max-documents', type=int, default=32)
+    teacher.add_argument('--max-tokens', type=int, default=32)
+    comparisons = command.add_parser('compare', help='Score local baselines on saved benchmark samples')
+    comparisons.add_argument('run_dir', type=Path)
+    comparisons.add_argument('--baseline', action='append', default=[], type=Path)
+    comparisons.add_argument('--output', type=Path, default=Path('artifacts/comparison.json'))
+    standard = command.add_parser('evaluate-standard', help='Plan/run optional lm-eval harness')
+    standard.add_argument('model_path', type=Path)
+    standard.add_argument('--tasks', nargs='+')
+    standard.add_argument('--limit', type=int, default=100)
+    standard.add_argument('--output', default='artifacts/standard-evaluation')
+    standard.add_argument('--run', action='store_true')
     args = parser.parse_args()
-    if args.command == "chat":
+    if args.command == 'convert-data':
+        from ashayllm.data_tools import convert_data
+        print(json.dumps(convert_data(args.source, args.output, args.format, args.max_bytes,
+                                      args.max_documents), indent=2))
+    elif args.command == 'teacher-data':
+        from ashayllm.data_tools import teacher_responses
+        print(json.dumps(teacher_responses(args.teacher, args.prompts, args.output,
+                                          args.max_documents, max_tokens=args.max_tokens), indent=2))
+    elif args.command == 'compare':
+        from ashayllm.comparison import compare
+        print(json.dumps(compare(args.run_dir, args.baseline, args.output), indent=2))
+    elif args.command == 'evaluate-standard':
+        from ashayllm.comparison import standard_plan
+        print(json.dumps(standard_plan(args.model_path, args.tasks, args.limit,
+                                       args.output, args.run), indent=2))
+    elif args.command == 'download-model':
+        from ashayllm.pretrained import download_model
+        print(json.dumps(download_model(args.repo, Path.cwd(), args.revision,
+                                        args.max_bytes, args.run), indent=2))
+    elif args.command == 'import-model':
+        from ashayllm.pretrained import register_model
+        print(register_model(args.path, Path.cwd(), args.context))
+    elif args.command == 'init-student':
+        from ashayllm.pretrained import initialize_student
+        architecture = yaml.safe_load(args.architecture.read_text()) if args.architecture else None
+        print(initialize_student(args.teacher, Path.cwd(), architecture))
+    elif args.command == 'stage-config':
+        from ashayllm.pretrained import stage_config
+        print(stage_config(args.parent, args.kind, args.data, args.output, args.steps, args.teacher,
+                           args.reasoning))
+    elif args.command == 'check-cuda-kernel':
+        from ashayllm.execution import check_custom_kernel
+        print(json.dumps(check_custom_kernel(args.path), indent=2))
+    elif args.command == "chat":
         from ashayllm.chat import chat
         chat(args.run_dir, args.backend, args.prompt, args.max_tokens, args.temperature, args.top_k)
     elif args.command == "export":
@@ -92,10 +172,12 @@ def main() -> None:
             print("Validated plan only: no dataset download, training or AWS launch. "
                   "Add --run to execute on this machine.")
             print(json.dumps(config.model_dump(mode="json"), indent=2))
-    elif args.command in {"aws-test", "aws-reconcile"}:
+    elif args.command in {"aws-test", "aws-train", "aws-reconcile"}:
         from ashayllm.aws_runner import SpotRunner
         with args.path.open(encoding="utf-8") as stream:
             settings = yaml.safe_load(stream)["aws_test"]
+        if args.command == 'aws-train' and not settings.get('pipeline_config'):
+            raise ValueError('aws-train requires pipeline_config in the AWS configuration')
         if getattr(args, "instance_type", None):
             settings["instance_type"] = args.instance_type
         runner = SpotRunner(settings, Path.cwd())

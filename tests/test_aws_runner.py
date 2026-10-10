@@ -109,6 +109,47 @@ def test_failed_local_preflight_prevents_cloud_plan(settings, tmp_path, monkeypa
         local_preflight(tmp_path)
 
 
+def test_training_uploads_bundle_and_terminates_before_result_fetch(settings, tmp_path, monkeypatch):
+    import io
+    from types import SimpleNamespace
+
+    from ashayllm.aws_runner import SpotRunner
+
+    calls = []
+    settings.update(pipeline_config='job.yaml', artifact_bucket='test-bucket',
+                    instance_profile_name='test-profile')
+    monkeypatch.setattr('ashayllm.aws_runner.local_preflight', lambda _: {'passed': True})
+    monkeypatch.setattr('ashayllm.aws_training.build_bundle', lambda *a: b'allowed-source')
+    monkeypatch.setattr('ashayllm.aws_training.training_preflight', lambda *a: {'passed': True})
+    runner = SpotRunner.__new__(SpotRunner)
+    runner.root, runner.settings, runner.account = tmp_path, settings, 'test-account'
+    runner.plan = lambda: {'user_data': 'preview', 'vpc_id': 'vpc-test', 'ami_id': 'ami-test',
+                           'subnet_id': 'subnet-test', 'root_device': '/dev/xvda'}
+    runner.prepare_deadline_role = lambda: 'role-test'
+    runner.s3 = SimpleNamespace(
+        put_object=lambda **kw: calls.append(('upload', kw)),
+        get_object=lambda **kw: (calls.append(('download', kw)) or {'Body': io.BytesIO(b'results')}))
+    def launch(**kw):
+        calls.append(('launch', kw))
+        return {'Instances': [{'InstanceId': 'i-test'}]}
+    runner.ec2 = SimpleNamespace(
+        create_security_group=lambda **kw: {'GroupId': 'sg-test'}, run_instances=launch,
+        describe_instances=lambda **kw: {'Reservations': [{'Instances': [
+            {'InstanceId': 'i-test', 'State': {'Name': 'terminated'}}]}]},
+        get_console_output=lambda **kw: {'Output': 'ASHAYLLM_RESULT=0'},
+        delete_security_group=lambda **kw: calls.append(('cleanup', kw)))
+    runner.scheduler = SimpleNamespace(create_schedule=lambda **kw: None,
+                                      delete_schedule=lambda **kw: None)
+    result = runner.run()
+    assert result['terminated'] and result['test_passed']
+    kinds = [kind for kind, _ in calls]
+    assert kinds.index('upload') < kinds.index('launch') < kinds.index('cleanup') < kinds.index('download')
+    arguments = next(value for kind, value in calls if kind == 'launch')
+    assert arguments['InstanceMarketOptions']['MarketType'] == 'spot'
+    assert arguments['IamInstanceProfile'] == {'Name': 'test-profile'}
+    assert Path(result['results_path']).read_bytes() == b'results'
+
+
 @pytest.mark.parametrize("state", ["shutting-down", "terminated"])
 def test_reconcile_preserves_watchdog_until_terminated(settings, tmp_path, state):
     from types import SimpleNamespace

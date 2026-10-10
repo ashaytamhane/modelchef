@@ -23,6 +23,22 @@ def export_model(folder):
     state = torch.load(checkpoint_for(folder), map_location="cpu", weights_only=True)["model"]
     output = folder / "export"
     output.mkdir(exist_ok=True)
+    if c.quantization != 'none':
+        (output / 'ashayllm-quantization.json').write_text(json.dumps({
+            'training': c.quantization, 'export': 'full_precision_master_weights',
+            'note': 'Export does not preserve fake-quantization forward behavior or produce packed FP4 weights.'}),
+            encoding='utf-8')
+    if c.backend == 'huggingface':
+        from transformers import AutoTokenizer
+
+        from ashayllm.engines import create_model, load_tokenizer
+        tokenizer = load_tokenizer(folder)
+        model = create_model(c, tokenizer.get_vocab_size())
+        model.load_state_dict(state)
+        model.model.save_pretrained(output, safe_serialization=True)
+        AutoTokenizer.from_pretrained(c.pretrained_path, local_files_only=True,
+                                      trust_remote_code=False).save_pretrained(output)
+        return output
     weights = {"model.embed_tokens.weight": state["embedding.weight"].contiguous(),
                "model.norm.weight": state["norm.weight"].contiguous()}
     if not c.tie_embeddings:
@@ -47,8 +63,8 @@ def export_model(folder):
                                             else c.kv_heads)
                 weights[f"model.layers.{layer}.{target}{suffix}"] = weight.contiguous()
     save_file(weights, str(output / "model.safetensors"), metadata={"format": "pt"})
-    from tokenizers import Tokenizer
-    tokenizer = Tokenizer.from_file(str(folder / "tokenizer.json"))
+    from ashayllm.engines import load_tokenizer
+    tokenizer = load_tokenizer(folder)
     (output / "tokenizer.json").write_bytes((folder / "tokenizer.json").read_bytes())
     hf_config = {"model_type": "llama", "architectures": ["LlamaForCausalLM"],
         "vocab_size": tokenizer.get_vocab_size(), "hidden_size": c.hidden_size,
@@ -62,8 +78,9 @@ def export_model(folder):
         "eos_token_id": tokenizer.token_to_id("<eos>"),
         "pad_token_id": tokenizer.token_to_id("<pad>"), "initializer_range": c.init_std}
     (output / "config.json").write_text(json.dumps(hf_config, indent=2), encoding="utf-8")
-    tokenizer_config = {"tokenizer_class": "PreTrainedTokenizerFast", "bos_token": "<bos>",
-                        "eos_token": "<eos>", "unk_token": "<unk>", "pad_token": "<pad>",
+    tokenizer_config = {"tokenizer_class": "PreTrainedTokenizerFast",
+                        **{role + '_token': tokenizer.id_to_token(tokenizer.token_to_id('<' + role + '>'))
+                           for role in ['bos', 'eos', 'unk', 'pad']},
                         "model_max_length": c.context_length, "clean_up_tokenization_spaces": False}
     (output / "tokenizer_config.json").write_text(json.dumps(tokenizer_config), encoding="utf-8")
     return output
@@ -71,17 +88,16 @@ def export_model(folder):
 
 def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, top_k=30):
     import torch
-    from tokenizers import Tokenizer
 
+    from ashayllm.engines import create_model, load_tokenizer
     from ashayllm.hardware import detect_hardware, resolve_runtime
-    from ashayllm.model import Decoder
     from ashayllm.run_config import RunConfig
 
     if max_tokens < 1 or temperature <= 0 or top_k < 0:
         raise ValueError("max_tokens/temperature must be positive; top_k must be nonnegative")
     folder = Path(folder).resolve()
     config = RunConfig.model_validate_json((folder / "config.json").read_text())
-    tokenizer = Tokenizer.from_file(str(folder / "tokenizer.json"))
+    tokenizer = load_tokenizer(folder)
     torch.manual_seed(config.training.seed)
     if backend == "vllm":
         os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", VLLM_NO_USAGE_STATS="1")
@@ -103,7 +119,7 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
     else:
         runtime = resolve_runtime({"accelerator": "auto", "precision": "fp32"}, detect_hardware())
         device = runtime["device"]
-        model = Decoder(config.model, tokenizer.get_vocab_size()).to(device)
+        model = create_model(config.model, tokenizer.get_vocab_size()).to(device)
         model.load_state_dict(torch.load(checkpoint_for(folder), map_location=device,
                                         weights_only=True)["model"])
         model.eval()
@@ -124,9 +140,12 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
                     reply.append(token.item())
                     sequence = torch.cat((sequence, token), -1)
             return tokenizer.decode(reply)
-    print(f"Loaded trained checkpoint using {backend}. Base-model completions; "
-          "not instruction-tuned. Tiny smoke-run weights will not provide useful answers.", flush=True)
+    print(f"Loaded checkpoint using {backend}; stage={config.stage.kind}. "
+          "Short validation runs do not produce a useful assistant.", flush=True)
     if prompt is not None:
+        if config.stage.kind in {'sft', 'dpo', 'rlvr', 'distill'}:
+            from ashayllm.objectives import format_prompt
+            prompt = format_prompt(prompt)
         print(generate(prompt), flush=True)
         return
     print("Enter a message; /reset clears history, /exit quits. History is kept only in memory.")

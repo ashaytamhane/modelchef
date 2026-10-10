@@ -1,5 +1,7 @@
 """Optional vLLM layer sharing the project's verified PyTorch environment."""
 
+import ipaddress
+import json
 import os
 import platform
 import shutil
@@ -54,15 +56,57 @@ def serve_plan(config, root):
     if dtype not in {"auto", "half", "float16", "bfloat16", "float", "float32"}:
         raise ValueError("Unsupported vLLM dtype")
     executable = root / ".venv/bin/vllm"
-    command = [str(executable), "serve", str(model), "--host", "127.0.0.1",
+    host = settings.get('host', '127.0.0.1')
+    try:
+        external = not ipaddress.ip_address(host).is_loopback
+    except ValueError as error:
+        raise ValueError('host must be a literal IP address') from error
+    security = settings.get('security', {})
+    if not isinstance(security, dict):
+        raise TypeError('security must be a mapping')
+    key_env = security.get('api_key_env', 'ASHAYLLM_API_KEY')
+    if not isinstance(key_env, str) or not key_env.isidentifier():
+        raise ValueError('api_key_env must be an environment variable name')
+    limits = {}
+    for name, default in [('max_body_bytes', 1048576), ('requests_per_minute', 30),
+                          ('max_concurrent_requests', 2), ('request_timeout_seconds', 120)]:
+        value = security.get(name, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f'{name} must be a positive integer')
+        limits[name] = value
+    limits['api_key_env'] = key_env
+    cert, key = security.get('tls_certfile'), security.get('tls_keyfile')
+    if bool(cert) != bool(key) or (external and not cert):
+        raise ValueError('Non-loopback serving requires both TLS certificate and key files')
+    command = [str(executable), "serve", str(model), "--host", host,
                "--port", str(port), "--dtype", dtype,
                "--gpu-memory-utilization", str(memory), "--max-model-len", str(length),
                "--max-num-seqs", str(sequences)]
+    command += ['--middleware', 'ashayllm.api_security.SecurityMiddleware',
+                '--disable-fastapi-docs', '--no-enable-log-requests', '--api-server-count', '1']
+    if cert:
+        for flag, filename in [('--ssl-certfile', cert), ('--ssl-keyfile', key)]:
+            path = (root / filename).resolve()
+            if not path.is_file():
+                raise ValueError(f'{flag} file does not exist')
+            command += [flag, str(path)]
     if settings.get("enforce_eager", True):
         command.append("--enforce-eager")
+    quantization = settings.get('quantization', 'none')
+    if quantization not in {'none', 'nvfp4_per_token'}:
+        raise ValueError('quantization must be none or nvfp4_per_token')
+    if quantization != 'none':
+        from ashayllm.hardware import detect_hardware
+        hardware = detect_hardware()
+        if hardware['backend'] != 'cuda' or hardware.get('compute_capability', [0])[0] < 10:
+            raise ValueError('Native NVFP4 inference requires a supported Blackwell CUDA GPU')
+        command += ['--quantization', quantization]
     return {"command": command, "environment": {"HF_HUB_OFFLINE": "1",
-            "TRANSFORMERS_OFFLINE": "1", "VLLM_NO_USAGE_STATS": "1"},
-            "endpoint": f"http://127.0.0.1:{port}/v1",
+            "TRANSFORMERS_OFFLINE": "1", "VLLM_NO_USAGE_STATS": "1",
+            "ASHAYLLM_API_SECURITY": json.dumps(limits),
+            "PYTHONPATH": os.pathsep.join([str(root / 'src'), os.environ.get('PYTHONPATH', '')])},
+            "endpoint": f"{'https' if cert else 'http'}://{'[' + host + ']' if ':' in host else host}:{port}/v1",
+            "api_key_env": key_env,
             "note": "Local weights only; architecture compatibility and memory fit "
                     "are verified by vLLM at startup. No trust-remote-code enabled."}
 
@@ -72,4 +116,7 @@ def launch_server(plan):
 
     if not Path(plan["command"][0]).is_file():
         raise ValueError("vLLM environment is missing; run setup-vllm --apply first")
+    secret = os.environ.get(plan['api_key_env'], '')
+    if len(secret) < 32 or any(char.isspace() for char in secret):
+        raise ValueError('Set the configured API key environment variable to a random token of at least 32 characters')
     subprocess.run(plan["command"], env={**os.environ, **plan["environment"]}, check=True)

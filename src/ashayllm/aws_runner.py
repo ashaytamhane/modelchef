@@ -52,6 +52,11 @@ def budget_reservation(settings):
     hours = (minutes + 3) / 60
     estimate = hours * (hourly + amount("ipv4_hourly_usd") +
                         storage * amount("ebs_gb_month_usd") / 730) + reserve
+    if settings.get('pipeline_config'):
+        artifact_reserve = Decimal(str(settings.get('artifact_cost_reserve_usd', '0.05')))
+        if not artifact_reserve.is_finite() or artifact_reserve <= 0:
+            raise ValueError('artifact_cost_reserve_usd must be positive and finite')
+        estimate += artifact_reserve
     if estimate > per_run or per_run > total:
         raise ValueError("Configured runtime/rates cannot fit the per-run and total budgets")
     if minutes != int(minutes) or storage != int(storage):
@@ -91,17 +96,19 @@ def package_source(root):
     """Allowlist code files only: never package .aws, .env, keys, or Git history."""
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-        for folder in ["src/ashayllm", "tests"]:
-            for path in sorted((root / folder).glob("*.py")):
-                if path.name in {"aws_runner.py", "test_aws_runner.py", "pipeline.py",
-                                 "model.py", "run_config.py", "corpus.py", "benchmarks.py", "chat.py",
-                                 "test_pipeline.py"}:
-                    continue
-                archive.add(path, arcname=str(path.relative_to(root)), recursive=False)
+        files = ['src/ashayllm/' + name for name in
+                 ['__init__.py', 'cli.py', 'hardware.py', 'inference.py', 'smoke.py']]
+        files += ['tests/' + name for name in ['test_cli.py', 'test_hardware.py', 'test_inference.py']]
+        for filename in files:
+            path = root / filename
+            archive.add(path, arcname=filename, recursive=False)
     return buffer.getvalue()
 
 
 def user_data(root, settings):
+    if settings.get('pipeline_config'):
+        from ashayllm.aws_training import training_user_data
+        return training_user_data(settings)
     payload = base64.b64encode(package_source(root)).decode()
     minutes = int(settings["max_runtime_minutes"])
     inference = ("python -m pip install vllm==0.31.0\n" if settings.get("install_vllm") else "")
@@ -147,6 +154,8 @@ class SpotRunner:
         self.iam = session.client("iam", config=cfg)
         self.scheduler = session.client("scheduler", config=cfg)
         self.ssm = session.client("ssm", config=cfg)
+        if settings.get('pipeline_config'):
+            self.s3 = session.client('s3', config=cfg)
         self.account = session.client("sts", config=cfg).get_caller_identity()["Account"]
 
     def reconcile(self, run_id):
@@ -178,6 +187,8 @@ class SpotRunner:
                 {"Name": "group-name", "Values": [run_id]}])["SecurityGroups"]
             for group in groups:
                 self.ec2.delete_security_group(GroupId=group["GroupId"])
+            if report.get('artifact_bucket'):
+                self.fetch_training_results(report, out)
         return report
 
     def plan(self):
@@ -259,6 +270,11 @@ class SpotRunner:
     def run(self):
         s = self.settings
         preflight = local_preflight(self.root)
+        bundle = None
+        if s.get('pipeline_config'):
+            from ashayllm.aws_training import build_bundle, training_preflight
+            bundle = build_bundle(self.root, s)
+            preflight['training'] = training_preflight(self.root, s)
         plan = self.plan()
         run_id = "ashayllm-" + uuid.uuid4().hex
         ledger = Ledger(self.root / s["ledger_path"])
@@ -273,12 +289,23 @@ class SpotRunner:
         schedule_created = False
         terminated = False
         try:
+            if bundle is not None:
+                prefix = s.get('artifact_prefix', 'ashayllm-training').strip('/') + '/' + run_id
+                self.s3.put_object(Bucket=s['artifact_bucket'], Key=prefix + '/source.tar.gz',
+                    Body=bundle, ServerSideEncryption='AES256')
+                report.update(artifact_bucket=s['artifact_bucket'], artifact_prefix=prefix,
+                              bundle_sha256=hashlib.sha256(bundle).hexdigest())
+                plan['user_data'] = user_data(self.root, {**s, '_artifact_prefix': prefix,
+                                                         '_bundle_sha256': report['bundle_sha256']})
             role = self.prepare_deadline_role()
             security_group = self.ec2.create_security_group(
                 GroupName=run_id, Description="AshayLLM outbound-only test",
                 VpcId=plan["vpc_id"])["GroupId"]
             deadline = datetime.now(UTC) + timedelta(minutes=s["max_runtime_minutes"])
+            profile = ({'IamInstanceProfile': {'Name': s['instance_profile_name']}}
+                       if bundle is not None else {})
             launch = self.ec2.run_instances(
+                **profile,
                 ClientToken=run_id, MinCount=1, MaxCount=1,
                 ImageId=plan["ami_id"], InstanceType=s["instance_type"],
                 UserData=plan["user_data"], InstanceInitiatedShutdownBehavior="terminate",
@@ -357,4 +384,28 @@ class SpotRunner:
                     pass
             if security_group and (terminated or not instance_id):
                 self.ec2.delete_security_group(GroupId=security_group)
+        if bundle is not None and terminated:
+            self.fetch_training_results(report, out)
         return report
+
+    def fetch_training_results(self, report, out):
+        try:
+            response = self.s3.get_object(Bucket=report['artifact_bucket'],
+                                         Key=report['artifact_prefix'] + '/results.tar.gz')
+        except self.s3.exceptions.NoSuchKey:
+            report['results_missing'] = True
+            (out / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+            return
+        cap = int(self.settings.get('max_result_bytes', 512_000_000))
+        body = response['Body']
+        try:
+            content = body.read(cap + 1)
+        finally:
+            body.close()
+        if len(content) > cap:
+            raise ValueError('Cloud result exceeds max_result_bytes; instance already terminated')
+        path = out / 'results.tar.gz'
+        path.write_bytes(content)
+        report['results_sha256'] = hashlib.sha256(content).hexdigest()
+        report['results_path'] = str(path)
+        (out / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')

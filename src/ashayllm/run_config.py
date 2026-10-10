@@ -44,8 +44,8 @@ class Processing(Section):
 
 
 class Tokenization(Section):
-    algorithm: Literal["byte_bpe"] = "byte_bpe"
-    vocab_size: int = Field(default=4096, ge=260, le=65536)
+    algorithm: Literal["byte_bpe", "pretrained"] = "byte_bpe"
+    vocab_size: int = Field(default=4096, ge=260, le=262144)
     min_frequency: int = Field(default=2, gt=0)
     special_tokens: list[str] = ["<pad>", "<unk>", "<bos>", "<eos>"]
     add_bos: bool = False
@@ -53,6 +53,12 @@ class Tokenization(Section):
 
 
 class Architecture(Section):
+    backend: Literal["native", "huggingface"] = "native"
+    pretrained_path: str | None = None
+    pretrained_config_sha256: str | None = None
+    quantization: Literal["none", "fp4_fake"] = "none"
+    attention_kernel: Literal['auto', 'math', 'flash', 'efficient', 'cudnn'] = 'auto'
+    custom_swiglu_path: str | None = None
     type: Literal["decoder_rope"] = "decoder_rope"
     layers: int = Field(default=6, ge=1, le=48)
     hidden_size: int = Field(default=512, gt=0)
@@ -73,6 +79,11 @@ class Architecture(Section):
 
 
 class Training(Section):
+    compile: bool = False
+    compile_backend: Literal['inductor', 'aot_eager', 'eager'] = 'inductor'
+    compile_mode: Literal['default', 'reduce-overhead', 'max-autotune'] = 'default'
+    allow_tf32: bool = False
+    optimizer_kernel: Literal['default', 'fused', 'foreach'] = 'default'
     accelerator: Literal["auto", "cpu", "cuda", "rocm", "mps"] = "auto"
     precision: Literal["auto", "fp32", "bf16", "fp16"] = "auto"
     seed: int = Field(default=42, ge=0)
@@ -106,6 +117,30 @@ class Evaluation(Section):
     top_k: int = Field(default=30, ge=0)
 
 
+class Stage(Section):
+    kind: Literal["pretrain", "midtrain", "sft", "dpo", "rlvr", "distill"] = "pretrain"
+    parent_run: str | None = None
+    teacher_run: str | None = None
+    distillation_temperature: float = Field(default=2, gt=0)
+    distillation_alpha: float = Field(default=0.5, ge=0, le=1)
+    dpo_beta: float = Field(default=0.1, gt=0)
+    reward: Literal["exact_match", "integer"] = "integer"
+    group_size: int = Field(default=4, ge=2, le=32)
+    rollout_tokens: int = Field(default=16, ge=1)
+    kl_coefficient: float = Field(default=0.02, ge=0)
+    clip_ratio: float = Field(default=0.2, gt=0, lt=1)
+    reasoning_format: Literal['plain', 'think_answer'] = 'plain'
+
+    def data_fields(self):
+        if self.kind == 'dpo':
+            return ['prompt', 'chosen', 'rejected']
+        if self.kind == 'rlvr':
+            return ['prompt', 'answer']
+        if self.reasoning_format == 'think_answer':
+            return ['prompt', 'reasoning', 'answer']
+        return ['prompt', 'response']
+
+
 class RunConfig(Section):
     schema_version: Literal[1] = 1
     name: str = Field(default="first-local", pattern=r"^[a-zA-Z0-9_-]+$")
@@ -117,12 +152,13 @@ class RunConfig(Section):
     model: Architecture = Field(default_factory=Architecture)
     training: Training = Field(default_factory=Training)
     evaluation: Evaluation = Field(default_factory=Evaluation)
+    stage: Stage = Field(default_factory=Stage)
 
     @model_validator(mode="after")
     def consistency(self):
         m, p, t = self.model, self.processing, self.training
         if m.hidden_size % m.attention_heads or m.attention_heads % m.kv_heads:
-            raise ValueError("hidden_size must divide heads; heads must divide kv_heads")
+            raise ValueError("hidden_size must be divisible by heads; heads by kv_heads")
         if (m.hidden_size // m.attention_heads) % 2:
             raise ValueError("RoPE head dimension must be even")
         if p.min_chars > p.max_chars or p.validation_fraction + p.test_fraction >= 1:
@@ -139,4 +175,12 @@ class RunConfig(Section):
             raise ValueError("Domain selection requires explicit domain_keywords")
         if self.evaluation.benchmark == "auto" and self.data.domain not in {"general", "finance"}:
             raise ValueError("No automatic benchmark recipe for this domain; override or choose none")
+        if self.stage.kind != "pretrain" and not self.stage.parent_run:
+            raise ValueError("Post-training requires stage.parent_run")
+        if self.stage.kind in {"sft", "dpo", "rlvr", "distill"} and self.data.provider != "local_jsonl":
+            raise ValueError("Structured post-training requires a local JSONL dataset")
+        if self.stage.kind == 'distill' and not self.stage.teacher_run:
+            raise ValueError('Token distillation requires a teacher_run')
+        if m.backend == 'huggingface' and not m.pretrained_path:
+            raise ValueError('Hugging Face backend requires a local pretrained_path')
         return self

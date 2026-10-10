@@ -1,0 +1,18 @@
+inference:
+  model_path: artifacts/exports/ashayllm
+  host: 0.0.0.0
+  port: 8443
+  dtype: auto
+  quantization: none
+  gpu_memory_utilization: 0.5
+  max_model_len: 2048
+  max_num_seqs: 2
+  enforce_eager: true
+  security:
+    api_key_env: ASHAYLLM_API_KEY
+    tls_certfile: artifacts/tls/fullchain.pem
+    tls_keyfile: artifacts/tls/server.key
+    max_body_bytes: 1048576
+    requests_per_minute: 30
+    max_concurrent_requests: 2
+    request_timeout_seconds: 120

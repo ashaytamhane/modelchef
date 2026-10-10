@@ -24,6 +24,7 @@ def detect_hardware():
         info["backend"] = "rocm" if torch.version.hip else "cuda"
         info["bf16_supported"] = torch.cuda.is_bf16_supported()
         info["gpu_count"] = torch.cuda.device_count()
+        info['compute_capability'] = list(torch.cuda.get_device_capability())
         info["gpus"] = [{"name": torch.cuda.get_device_name(i),
                          "memory_bytes": torch.cuda.get_device_properties(i).total_memory}
                         for i in range(torch.cuda.device_count())]

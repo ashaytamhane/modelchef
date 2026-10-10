@@ -19,7 +19,7 @@ def acquire(config, root, explain):
     identity = digest(json.dumps(c.model_dump(), sort_keys=True).encode())
     cache = root / "data/cache" / identity
     raw, manifest = cache / "raw.jsonl", cache / "source.json"
-    if raw.exists() and manifest.exists():
+    if c.provider != "local_jsonl" and raw.exists() and manifest.exists():
         info = json.loads(manifest.read_text())
         content = raw.read_bytes()
         if digest(content) != info["raw_sha256"]:
@@ -37,7 +37,14 @@ def acquire(config, root, explain):
                 if index < c.offset:
                     continue
                 row = json.loads(line)
-                records.append({"text": row[c.text_field], "source_index": index})
+                if config.stage.kind in {"sft", "dpo", "rlvr", "distill"}:
+                    fields = config.stage.data_fields()
+                    values = {key: row[key] for key in fields}
+                    if any(not isinstance(value, str) or not value.strip() for value in values.values()):
+                        raise ValueError("Structured fields must be nonempty strings")
+                    records.append({**values, "text": " ".join(values.values()), "source_index": index})
+                else:
+                    records.append({"text": row[c.text_field], "source_index": index})
                 if len(records) >= c.max_documents:
                     break
         origin = {"provider": "local_jsonl", "path": str(path)}

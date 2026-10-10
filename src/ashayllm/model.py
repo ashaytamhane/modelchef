@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
+from ashayllm.execution import attention_context, custom_swiglu
+
 
 class RMSNorm(nn.Module):
     def __init__(self, width, eps):
@@ -41,14 +43,16 @@ class Attention(nn.Module):
         v = self.v(x).view(b, s, self.c.kv_heads, self.dim).transpose(1, 2)
         repeat = self.c.attention_heads // self.c.kv_heads
         k, v = k.repeat_interleave(repeat, 1), v.repeat_interleave(repeat, 1)
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True,
-            dropout_p=self.c.attention_dropout if self.training else 0)
+        with attention_context(self.c.attention_kernel):
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=True,
+                dropout_p=self.c.attention_dropout if self.training else 0)
         return self.out(y.transpose(1, 2).contiguous().view(b, s, -1))
 
 
 class Block(nn.Module):
     def __init__(self, c):
         super().__init__()
+        self.config = c
         self.attention_norm = RMSNorm(c.hidden_size, c.norm_eps)
         self.ffn_norm = RMSNorm(c.hidden_size, c.norm_eps)
         self.attention = Attention(c)
@@ -60,7 +64,10 @@ class Block(nn.Module):
     def forward(self, x):
         x = x + self.dropout(self.attention(self.attention_norm(x)))
         y = self.ffn_norm(x)
-        return x + self.dropout(self.down(F.silu(self.gate(y)) * self.up(y)))
+        gate, up = self.gate(y), self.up(y)
+        activation = (custom_swiglu(self.config.custom_swiglu_path, gate, up)
+                      if self.config.custom_swiglu_path else F.silu(gate) * up)
+        return x + self.dropout(self.down(activation))
 
 
 class Decoder(nn.Module):
