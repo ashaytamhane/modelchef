@@ -1,0 +1,20 @@
+aws_test:
+  profile: ashayllm
+  region: us-east-1
+  instance_type: g4dn.xlarge
+  total_budget_usd: '10.00'
+  per_run_budget_usd: '0.50'
+  max_runtime_minutes: 12
+  max_spot_hourly_usd: '0.80'
+  safety_reserve_usd: '0.15'
+  storage_gb: 100
+  # Conservative rate inputs; check these when moving to another region.
+  ebs_gb_month_usd: '0.10'
+  ipv4_hourly_usd: '0.005'
+  ledger_path: .aws-runs/ledger.sqlite
+  # Omit networking IDs to select a public subnet in the default VPC.
+  subnet_id: null
+  ami_id: null
+  ami_parameter: /aws/service/deeplearning/ami/x86_64/oss-nvidia-driver-gpu-pytorch-2.13-amazon-linux-2023/latest/ami-id
+  ami_name: Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.13 (Amazon Linux 2023) ????????
+  install_vllm: false  # First test uses preinstalled PyTorch; no multi-GB vLLM download.

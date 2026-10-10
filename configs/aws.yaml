@@ -1,0 +1,12 @@
+project:
+  name: ashayllm
+  seed: 42
+runtime:
+  accelerator: cuda
+  precision: bf16
+  checkpoint_dir: artifacts/checkpoints
+data:
+  cache_dir: data/cache
+model:
+  target_parameters: 200000000  # planning target; training code pending
+  context_length: 2048

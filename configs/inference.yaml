@@ -1,0 +1,8 @@
+inference:
+  model_path: artifacts/exports/ashayllm  # Local Hugging Face export; not a .pt checkpoint
+  dtype: auto
+  gpu_memory_utilization: 0.5
+  max_model_len: 2048
+  max_num_seqs: 4
+  enforce_eager: true
+  port: 8000

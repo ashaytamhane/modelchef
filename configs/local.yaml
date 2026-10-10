@@ -1,0 +1,13 @@
+project:
+  name: ashayllm
+  seed: 42
+runtime:
+  accelerator: auto  # cpu/cuda/rocm/mps/auto
+  precision: auto    # bf16 on supported CUDA/ROCm; otherwise fp32
+  checkpoint_dir: artifacts/checkpoints
+data:
+  max_sample_documents: 1000
+  cache_dir: data/cache
+model:
+  target_parameters: 10000000  # smoke-test target, not final model
+  context_length: 256
