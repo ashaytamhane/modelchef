@@ -4,12 +4,14 @@ import uuid
 from pathlib import Path
 
 from modelchef.corpus import digest, file_digest
+from modelchef.progress import report as progress
 
 
 def download_model(repo, root, revision='main', max_bytes=500_000_000, run=False):
     from huggingface_hub import HfApi, snapshot_download
     if max_bytes <= 0:
         raise ValueError('Download cap must be positive')
+    progress('Requesting model revision and file sizes from Hugging Face; no weights downloaded yet.')
     info = HfApi().model_info(repo, revision=revision, files_metadata=True)
     files = [f for f in info.siblings if f.rfilename.endswith(('.json', '.safetensors', '.model', '.jinja'))
              or f.rfilename in {'merges.txt', 'vocab.txt'}]
@@ -23,8 +25,10 @@ def download_model(repo, root, revision='main', max_bytes=500_000_000, run=False
     plan = {'repo': repo, 'revision': info.sha, 'bytes': size,
             'files': [f.rfilename for f in files], 'downloaded': False}
     if run:
+        progress(f'Downloading {len(files)} approved model files ({size:,} bytes).')
         output = Path(root) / 'artifacts/pretrained' / (repo.replace('/', '--') + '-' + info.sha[:12])
         snapshot_download(repo, revision=info.sha, allow_patterns=plan['files'], local_dir=output)
+        progress('Verifying downloaded file sizes and recording SHA256 checksums.')
         actual = sum((output / name).stat().st_size for name in plan['files'])
         if actual > max_bytes:
             raise ValueError('Downloaded bytes exceed cap')
@@ -41,6 +45,7 @@ def inspect_model(path, context=128):
     from modelchef.run_config import RunConfig
 
     path = Path(path).resolve()
+    progress('Reading local model configuration and tokenizer; remote model code is disabled.')
     hf = AutoConfig.from_pretrained(path, local_files_only=True, trust_remote_code=False)
     tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
     if not tokenizer.is_fast:
@@ -87,9 +92,11 @@ def register_model(path, root, context=128):
     tokenizer.backend_tokenizer.save(str(folder / 'tokenizer.json'))
     (folder / 'tokenizer-roles.json').write_text(json.dumps(roles), encoding='utf-8')
     (folder / 'config.json').write_text(config.model_dump_json(indent=2), encoding='utf-8')
+    progress('Loading pretrained weights into memory for the imported parent checkpoint.')
     model = create_model(config.model, tokenizer.backend_tokenizer.get_vocab_size())
     checkpoint = folder / 'checkpoints/step-000000.pt'
     checkpoint.parent.mkdir()
+    progress('Saving the imported parent checkpoint and source metadata; no training is performed.')
     torch.save({'model': model.state_dict()}, checkpoint)
     report = {'status': 'completed', 'stage': 'import', 'optimizer_steps': 0,
               'checkpoint': str(checkpoint.resolve()), 'source': str(path),

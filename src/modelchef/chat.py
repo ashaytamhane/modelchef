@@ -3,6 +3,8 @@ import json
 import os
 from pathlib import Path
 
+from modelchef.progress import report as progress
+
 
 def checkpoint_for(folder):
     report = json.loads((folder / "report.json").read_text())
@@ -12,6 +14,7 @@ def checkpoint_for(folder):
 
 
 def export_model(folder):
+    progress('Loading the completed checkpoint for inference-compatible export.')
     import torch
     from safetensors.torch import save_file
 
@@ -131,6 +134,7 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
     tokenizer = load_tokenizer(folder)
     torch.manual_seed(config.training.seed)
     if backend == "vllm":
+        progress('Preparing the local export and loading vLLM model weights.')
         os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", VLLM_NO_USAGE_STATS="1")
         from vllm import LLM, SamplingParams
         export = export_model(folder)
@@ -148,8 +152,9 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
             return engine.generate([{"prompt_token_ids": ids}], params,
                                    use_tqdm=False)[0].outputs[0].text
     else:
-        runtime = resolve_runtime({"accelerator": "auto", "precision": "fp32"}, detect_hardware())
+        runtime = resolve_runtime({"accelerator": "auto", "precision": "fp32"}, detect_hardware(progress=progress))
         device = runtime["device"]
+        progress('Constructing the model and loading checkpoint weights on the selected device.')
         model = create_model(config.model, tokenizer.get_vocab_size()).to(device)
         model.load_state_dict(torch.load(checkpoint_for(folder), map_location=device,
                                         weights_only=True)["model"])
@@ -174,6 +179,7 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
     print(f"Loaded checkpoint using {backend}; stage={config.stage.kind}. "
           "Short validation runs do not produce a useful assistant.", flush=True)
     if prompt is not None:
+        progress(f'Generating a response with an output limit of {max_tokens} tokens.')
         if config.stage.kind in {'sft', 'dpo', 'rlvr', 'distill'}:
             from modelchef.objectives import format_prompt
             prompt = format_prompt(prompt)

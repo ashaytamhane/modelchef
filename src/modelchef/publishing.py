@@ -51,6 +51,9 @@ def model_card(config):
 
 
 def publish(config, root, run=False):
+    from modelchef.progress import report as progress
+
+    progress('Checking allowlisted export files, sizes, checksums and model-card contents.')
     folder = (Path(root) / config.export_dir).resolve()
     if not folder.is_dir():
         raise ValueError('export_dir must be an existing model export directory')
@@ -105,6 +108,7 @@ def publish(config, root, run=False):
     if not token:
         raise ValueError('Hugging Face authentication missing; run hf auth login outside the repository')
     api = HfApi(token=token)
+    progress('Checking Hugging Face repository access and requested visibility.')
     api.create_repo(repo_id=config.repo_id, repo_type='model', private=config.private, exist_ok=True)
     info = api.repo_info(repo_id=config.repo_id, repo_type='model')
     if info.private != config.private:
@@ -116,6 +120,7 @@ def publish(config, root, run=False):
             raise ValueError('Export changed during publication preparation; retry with immutable export files')
         operations.append(CommitOperationAdd(path_in_repo=item['name'], path_or_fileobj=str(path)))
     operations.append(CommitOperationAdd(path_in_repo='README.md', path_or_fileobj=card))
+    progress(f'Uploading {len(operations)} approved files and creating the model publication commit.')
     commit = api.create_commit(repo_id=config.repo_id, repo_type='model', operations=operations,
                                commit_message=config.commit_message)
     result.update(uploaded=True, commit_url=commit.commit_url, commit_sha=commit.oid)

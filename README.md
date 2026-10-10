@@ -28,7 +28,7 @@ python -m modelchef.cli doctor
 python -m modelchef.cli smoke
 ```
 
-Routine input and dependency errors give concise messages; add `--debug` to show a traceback. `check-config` validates runtime settings, training recipes or linked workflow recipes without executing them. CLI commands print immediate progress, elapsed-time updates every 10 seconds during longer operations, and a completion message to stderr. `doctor` explains its Python/PyTorch import, device discovery and GPU calculation checks as they happen. Use `--quiet` to suppress CLI progress; result output remains on stdout. Training retains its recipe-controlled detailed or brief narration.
+Routine input and dependency errors give concise messages; add `--debug` to show a traceback. `check-config` validates runtime settings, training recipes or linked workflow recipes without executing them. CLI commands report the work starting, meaningful stage changes and completion on stderr. They do not repeat timer messages while waiting; the last stage message identifies the work underway. Elapsed time is included at completion or failure. `doctor` explains its Python/PyTorch import, device discovery and GPU calculation checks as they happen. Use `--quiet` to suppress CLI progress; result output remains on stdout. Training retains its recipe-controlled detailed or brief narration.
 
 `setup` previews the PyTorch installation; `--apply` installs it. Review the preview for your hardware. If prerequisites are missing, see [local setup](#local-setup). Package installation requires internet access.
 

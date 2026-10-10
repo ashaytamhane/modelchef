@@ -5,6 +5,7 @@ from pathlib import Path
 
 from modelchef.corpus import digest, file_digest
 from modelchef.hardware import detect_hardware, resolve_runtime
+from modelchef.progress import report as progress
 
 
 def compare(run_dir, baselines, output):
@@ -22,6 +23,7 @@ def compare(run_dir, baselines, output):
     device = resolve_runtime({'precision': 'fp32'}, detect_hardware())['device']
     results = []
     for path in [folder, *map(Path, baselines)]:
+        progress('Loading the next comparison model and its tokenizer.')
         if (path / 'report.json').exists():
             config = RunConfig.model_validate_json((path / 'config.json').read_text())
             tokenizer = load_tokenizer(path)
@@ -49,6 +51,7 @@ def compare(run_dir, baselines, output):
             model = Adapter(raw)
             context = getattr(raw.config, 'max_position_embeddings', 128)
         model.to(device).eval()
+        progress(f'Scoring this model on {len(examples)} saved benchmark examples.')
         scores = evaluate_choices(model, tokenizer, examples, device, context, nullcontext)
         weight_paths = [checkpoint_for(path)] if (path / 'report.json').exists() else (
             sorted(path.glob('*.safetensors')) or sorted(path.glob('*.bin')))
@@ -91,6 +94,7 @@ def standard_plan(model_path, tasks=None, limit=100, output='artifacts/standard-
                '--limit', str(limit), '--batch_size', '1', '--device', runtime['device'],
                '--output_path', str(output)]
     if run:
+        progress('Starting the standard evaluation harness; its logs below report dataset loading and task progress.')
         subprocess.run(command, check=True)
     return {'command': command, 'executed': run, 'device': runtime['device'],
             'note': 'Execution may download benchmark datasets; --limit bounds scored examples, not download bytes.'}

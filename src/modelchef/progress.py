@@ -44,24 +44,12 @@ def report(message):
 
 
 @contextmanager
-def operation(command, quiet=False, interval=10):
+def operation(command, quiet=False):
     previous = getattr(_state, 'quiet', False)
     _state.quiet = quiet
     started = time.monotonic()
-    stop = threading.Event()
-
-    def heartbeat():
-        while not stop.wait(interval):
-            import sys
-            print(f'[ModelChef] {command} still running ({time.monotonic() - started:.0f}s elapsed).',
-                  file=sys.stderr, flush=True)
-
-    worker = None
-    report(f'Starting {command}. Progress appears here; results follow on stdout.')
+    report(f'Starting {command}.')
     report(_activities.get(command, 'Executing the requested operation.'))
-    if not quiet:
-        worker = threading.Thread(target=heartbeat, daemon=True)
-        worker.start()
     try:
         yield
     except BaseException:
@@ -70,7 +58,4 @@ def operation(command, quiet=False, interval=10):
     else:
         report(f'{command} completed ({time.monotonic() - started:.1f}s elapsed).')
     finally:
-        stop.set()
-        if worker:
-            worker.join()
         _state.quiet = previous

@@ -24,7 +24,7 @@ def test_cli_progress_preserves_json_stdout_and_quiet(monkeypatch, capsys):
     assert output.err == ''
 
 
-def test_progress_reports_failure_and_stops_heartbeat(capsys):
+def test_progress_reports_failure_without_background_worker(capsys):
     import threading
 
     import pytest
@@ -35,3 +35,33 @@ def test_progress_reports_failure_and_stops_heartbeat(capsys):
         raise ValueError('failure')
     assert 'did not complete' in capsys.readouterr().err
     assert set(threading.enumerate()) == before
+
+
+def test_progress_waits_silently_between_specific_updates(capsys, monkeypatch):
+    import threading
+
+    from modelchef.progress import operation, report
+
+    def forbidden_worker(*args, **kwargs):
+        raise AssertionError('Progress must not create a periodic timer thread')
+
+    monkeypatch.setattr(threading, 'Thread', forbidden_worker)
+    with operation('doctor'):
+        report('Importing PyTorch; the first import can take several seconds.')
+        waiting = capsys.readouterr()
+        assert 'Importing PyTorch' in waiting.err
+        assert 'still running' not in waiting.err
+        assert waiting.out == ''
+        report('Checking CUDA/ROCm and Apple MPS availability.')
+    completed = capsys.readouterr()
+    assert 'Checking CUDA/ROCm' in completed.err
+    assert 'doctor completed' in completed.err
+    assert 'still running' not in completed.err
+
+
+def test_quiet_suppresses_specific_stage_updates(capsys):
+    from modelchef.progress import operation, report
+
+    with operation('doctor', quiet=True):
+        report('Importing PyTorch.')
+    assert capsys.readouterr().err == ''

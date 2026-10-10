@@ -119,9 +119,12 @@ def serve_plan(config, root, *, check_hardware=True):
 def launch_server(plan):
     import subprocess
 
+    from modelchef.progress import report
+
     if not Path(plan["command"][0]).is_file():
         raise ValueError("vLLM environment is missing; run setup-vllm --apply first")
     secret = os.environ.get(plan['api_key_env'], '')
     if len(secret) < 32 or any(char.isspace() for char in secret):
         raise ValueError('Set the configured API key environment variable to a random token of at least 32 characters')
+    report('Starting vLLM: loading model weights and initializing the API. Server logs below report readiness; this command stays open until the server exits.')
     subprocess.run(plan["command"], env={**os.environ, **plan["environment"]}, check=True)

@@ -282,13 +282,18 @@ class SpotRunner:
             return role["Arn"]
 
     def run(self):
+        from modelchef.progress import report as progress
+
         s = self.settings
+        progress('Running local tests and lint before requesting any cloud compute.')
         preflight = local_preflight(self.root)
         bundle = None
         if s.get('pipeline_config'):
             from modelchef.aws_training import build_bundle, training_preflight
             bundle = build_bundle(self.root, s)
+            progress('Running the bounded local CPU training preflight before cloud launch.')
             preflight['training'] = training_preflight(self.root, s)
+        progress('Resolving the AWS image, subnet, Spot price and budget reservation.')
         plan = self.plan()
         run_id = "modelchef-" + uuid.uuid4().hex
         ledger = Ledger(self.root / s["ledger_path"])
@@ -315,6 +320,7 @@ class SpotRunner:
         terminated = False
         try:
             if bundle is not None:
+                progress('Uploading the approved training bundle to encrypted S3 storage.')
                 prefix = s.get('artifact_prefix', 'modelchef-training').strip('/') + '/' + run_id
                 self.s3.put_object(Bucket=s['artifact_bucket'], Key=prefix + '/source.tar.gz',
                     Body=bundle, ServerSideEncryption='AES256')
@@ -322,6 +328,7 @@ class SpotRunner:
                               bundle_sha256=hashlib.sha256(bundle).hexdigest())
                 plan['user_data'] = user_data(self.root, {**s, '_artifact_prefix': prefix,
                                                          '_bundle_sha256': report['bundle_sha256']})
+            progress('Preparing the shutdown deadline and outbound-only instance network.')
             role = self.prepare_deadline_role()
             security_group = self.ec2.create_security_group(
                 GroupName=run_id, Description="ModelChef outbound-only test",
@@ -331,6 +338,7 @@ class SpotRunner:
             deadline = datetime.now(UTC) + timedelta(minutes=s["max_runtime_minutes"])
             profile = ({'IamInstanceProfile': {'Name': s['instance_profile_name']}}
                        if bundle is not None else {})
+            progress('Requesting the configured one-time Spot instance.')
             launch = self.ec2.run_instances(
                 **profile,
                 ClientToken=run_id, MinCount=1, MaxCount=1,
@@ -359,10 +367,16 @@ class SpotRunner:
                     "RoleArn": role, "Input": json.dumps({"InstanceIds": [instance_id]}),
                     "RetryPolicy": {"MaximumEventAgeInSeconds": 300, "MaximumRetryAttempts": 3}})
             schedule_created = True
+            progress('Monitoring EC2 state until guest completion or the configured deadline. Guest training logs are collected after termination; unchanged state is not repeated.')
+            last_state = None
             while time.monotonic() - started < s["max_runtime_minutes"] * 60:
                 instance = self.ec2.describe_instances(InstanceIds=[instance_id])[
                     "Reservations"][0]["Instances"][0]
-                if instance["State"]["Name"] == "terminated":
+                state = instance["State"]["Name"]
+                if state != last_state:
+                    progress(f'EC2 state changed to {state}.')
+                    last_state = state
+                if state == "terminated":
                     terminated = True
                     break
                 if instance["State"]["Name"] == "shutting-down":
@@ -383,6 +397,7 @@ class SpotRunner:
                         persist('recovered')
                 # Preserve the watchdog and reservation until termination is confirmed.
                 if instance_id and not terminated:
+                    progress('Requesting instance termination and waiting for AWS confirmation.')
                     from botocore.exceptions import WaiterError
 
                     self.ec2.terminate_instances(InstanceIds=[instance_id])
@@ -400,6 +415,7 @@ class SpotRunner:
                 report.update(terminated=terminated, elapsed_seconds=time.monotonic() - started)
                 persist('terminated' if terminated else 'no-instance')
                 if instance_id:
+                    progress('Collecting guest console results and cleaning up temporary cloud resources.')
                     from botocore.exceptions import BotoCoreError, ClientError
 
                     try:
@@ -424,6 +440,7 @@ class SpotRunner:
                 persist('cleanup-pending')
                 raise
         if bundle is not None and terminated:
+            progress('Downloading the completed training result bundle from S3.')
             self.fetch_training_results(report, out)
         return report
 
