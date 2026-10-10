@@ -2,10 +2,15 @@
 import hashlib
 import html
 import json
+import os
 import random
 import re
+import time
 import unicodedata
 from collections import Counter
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -21,6 +26,59 @@ def file_digest(path):
         while chunk := source.read(1024 * 1024):
             checksum.update(chunk)
     return checksum.hexdigest()
+
+
+def viewer_headers():
+    """Use optional runtime authentication, never recipe/manifest credentials."""
+    token = os.environ.get('HF_TOKEN')
+    if not token:
+        try:
+            from huggingface_hub import get_token
+        except ImportError:
+            token = None
+        else:
+            token = get_token()
+    headers = {'User-Agent': 'ModelChef/0.1'}
+    if token:
+        if any(char.isspace() for char in token):
+            raise ValueError('HF_TOKEN contains whitespace; configure a valid token outside the recipe')
+        headers['Authorization'] = 'Bearer ' + token
+    return headers
+
+
+def viewer_page(request, timeout, limit, explain):
+    """Bounded retries; failed pages do not advance the offset or byte counter."""
+    for attempt in range(7):
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                return response.read(limit)
+        except HTTPError as error:
+            code = error.code
+            retry_after = error.headers.get('Retry-After') if error.headers else None
+            error.close()
+            if code not in {429, 500, 502, 503, 504} or attempt == 6:
+                raise
+            delay = min(5 * 2 ** attempt, 60)
+            if retry_after:
+                try:
+                    requested = float(retry_after)
+                except ValueError:
+                    try:
+                        date = parsedate_to_datetime(retry_after)
+                        requested = (date - datetime.now(UTC)).total_seconds()
+                    except (TypeError, ValueError, OverflowError):
+                        requested = 0
+                delay = max(delay, requested)
+            if delay > 300:
+                raise ValueError('Dataset viewer requires a cooldown longer than five minutes; '
+                                 'wait before rerunning or use a local corpus snapshot') from None
+            explain(f'Dataset viewer HTTP {code}: waiting {delay:.0f}s before retrying the same '
+                    f'page (retry {attempt + 1}/6); training has not started.')
+            remaining = delay
+            while remaining > 0:
+                pause = min(remaining, 60)
+                time.sleep(pause)
+                remaining -= pause
 
 
 def acquire(config, root, explain):
@@ -75,16 +133,21 @@ def acquire(config, root, explain):
                 index += 1
         origin = {"provider": "local_jsonl", "path": str(path), "paths": [str(p) for p in paths]}
     else:
+        headers = viewer_headers()
+        explain('Using authenticated dataset viewer requests.' if 'Authorization' in headers
+                else 'Using anonymous dataset viewer requests; optional HF_TOKEN or hf auth login enables authentication.')
         explain("Downloading only viewer row pages, not the multi-GB Parquet corpus. "
                 "This is an ordered smoke-test slice, not a representative random sample.")
         for offset in range(c.offset, c.offset + c.max_documents, c.page_size):
+            if offset != c.offset:
+                time.sleep(2)  # Pace viewer requests instead of bursting through the API.
             query = urlencode({"dataset": c.dataset, "config": c.subset, "split": c.split,
                                "offset": offset,
                                "length": min(c.page_size, c.offset + c.max_documents - offset)})
             request = Request("https://datasets-server.huggingface.co/rows?" + query,
-                              headers={"User-Agent": "ModelChef/0.1"})
-            with urlopen(request, timeout=c.timeout_seconds) as response:
-                payload = response.read(c.max_download_bytes - downloaded + 1)
+                              headers=headers)
+            payload = viewer_page(request, c.timeout_seconds,
+                                  c.max_download_bytes - downloaded + 1, explain)
             downloaded += len(payload)
             if downloaded > c.max_download_bytes:
                 raise ValueError("Download exceeded byte cap; no complete snapshot cached")

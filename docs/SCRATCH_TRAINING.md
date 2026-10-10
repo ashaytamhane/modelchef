@@ -33,6 +33,36 @@ is requested for this narrow story-writing experiment.
 
 ## Preview, then launch explicitly
 
+### Optional Hugging Face authentication and rate limits
+
+The viewer accepts [Bearer-token authentication](https://huggingface.co/docs/dataset-viewer/quick_start).
+Use a read token through `hf auth login` in the same WSL environment, or an externally
+managed `HF_TOKEN` environment variable. Install the optional client if needed:
+
+```bash
+uv pip install 'huggingface_hub>=0.34,<1'
+hf auth login
+```
+
+Never put the token in YAML, Git or chat. ModelChef reads the environment/local Hub
+credential cache and attaches it to viewer requests; it does not save token values in
+recipes or manifests. Authentication does not guarantee faster viewer responses or
+remove rate limits. See [Hub rate limits](https://huggingface.co/docs/hub/rate-limits);
+Hub file-download limits should not be assumed to equal viewer endpoint limits.
+
+Viewer pages are paced two seconds apart. HTTP 429 and selected transient server errors
+retry the same page up to six times with backoff and `Retry-After` handling. Messages
+explain the actual cooldown. A server cooldown over five minutes stops instead of
+retrying early. If acquisition ultimately fails, rerun after the cooldown: incomplete
+acquisition is not yet resumable, so it starts again; `--resume` is for training
+checkpoints. Only a complete acquisition is cached for subsequent reuse.
+
+Credentials on your laptop are not forwarded to AWS guests. Public TinyStories can be
+acquired anonymously there with the same retry/pacing logic; private datasets require
+separately managed guest credentials or a prepared local input bundle.
+
+### Configure cloud execution
+
 Update your clone and install controller dependencies and appropriate PyTorch first:
 
 ```bash

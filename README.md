@@ -1613,6 +1613,7 @@ AWS launch journals are saved before provisioning steps so interrupted/lost laun
 | Budget exhausted | Review retained ledger reservations and intentionally adjust budget; do not delete the journal to bypass it |
 | CUDA unavailable | Check driver, installed wheel and `doctor`; choose an appropriate official PyTorch build |
 | WSL HTTPS timeout | Test networking inside Ubuntu before setup; this project does not repair host networking |
+| Dataset viewer HTTP 429 | Allow the announced retry cooldown; optionally use `hf auth login` in the same environment. Authentication is not a speed guarantee. See [acquisition and authentication](docs/SCRATCH_TRAINING.md#optional-hugging-face-authentication-and-rate-limits). |
 | vLLM export missing | Provide local config/tokenizer/weights; a checkpoint alone cannot be served |
 | Termination timeout | Check EC2 state; use reconciliation after termination and retain the AWS deadline |
 
