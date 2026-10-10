@@ -6,7 +6,7 @@ The platform connects these workflows through reusable model/tokenizer adapters,
 
 ## Quick Start
 
-These examples run on your current machine and do not launch AWS resources. Start with a small experiment; the default training run tests the pipeline rather than producing a useful assistant.
+The Quick Start examples below run on your current machine. AshayLLM can also launch AWS instances: see [the Spot training example](#run-a-managed-native-training-stage) for a temporary training job that terminates when finished, or [the API hosting example](#persistent-api-hosting-on-ec2) for persistent on-demand serving. AWS launches require configured credentials and explicit execution with `--run`, and incur charges. Start with a small local experiment; the default training run tests the pipeline rather than producing a useful assistant.
 
 ### Set up once
 
