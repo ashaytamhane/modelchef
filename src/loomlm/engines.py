@@ -29,7 +29,7 @@ class HFDecoder(torch.nn.Module):
         from transformers import AutoModelForCausalLM
         self.config = c
         if c.pretrained_config_sha256:
-            from ashayllm.corpus import digest
+            from loomlm.corpus import digest
             if digest((Path(c.pretrained_path) / 'config.json').read_bytes()) != c.pretrained_config_sha256:
                 raise ValueError('Original pretrained model configuration changed')
         self.model = AutoModelForCausalLM.from_pretrained(c.pretrained_path,
@@ -54,16 +54,16 @@ class HFDecoder(torch.nn.Module):
     def forward(self, ids):
         if ids.shape[1] > self.config.context_length:
             raise ValueError('Input exceeds configured context_length')
-        from ashayllm.execution import attention_context
+        from loomlm.execution import attention_context
         with attention_context(self.config.attention_kernel):
             return self.model(input_ids=ids, use_cache=False).logits
 
 
 def create_model(c, vocab_size):
-    from ashayllm.model import Decoder
+    from loomlm.model import Decoder
     model = HFDecoder(c, vocab_size) if c.backend == 'huggingface' else Decoder(c, vocab_size)
     if c.quantization == 'fp4_fake':
-        from ashayllm.quantization import apply_fake_fp4
+        from loomlm.quantization import apply_fake_fp4
         apply_fake_fp4(model)
     return model
 

@@ -9,10 +9,10 @@ import yaml
 
 pytest.importorskip('pydantic')
 
-from ashayllm.aws_training import build_bundle, training_user_data
-from ashayllm.data_tools import convert_data
-from ashayllm.pretrained import download_model
-from ashayllm.run_config import RunConfig
+from loomlm.aws_training import build_bundle, training_user_data
+from loomlm.data_tools import convert_data
+from loomlm.pretrained import download_model
+from loomlm.run_config import RunConfig
 
 
 def test_converter_is_bounded_and_does_not_overwrite(tmp_path):
@@ -45,8 +45,8 @@ def test_download_plan_pins_revision_and_enforces_cap_before_download(tmp_path, 
 
 
 def test_aws_bundle_allowlists_code_and_declared_data(tmp_path):
-    (tmp_path / 'src/ashayllm').mkdir(parents=True)
-    (tmp_path / 'src/ashayllm/__init__.py').write_text('')
+    (tmp_path / 'src/loomlm').mkdir(parents=True)
+    (tmp_path / 'src/loomlm/__init__.py').write_text('')
     (tmp_path / 'pyproject.toml').write_text('[project]\nname="test"')
     (tmp_path / '.env').write_text('DO_NOT_UPLOAD=secret')
     (tmp_path / 'data.jsonl').write_text('{"text":"Example"}\n')

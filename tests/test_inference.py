@@ -2,11 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from ashayllm.inference import serve_plan, vllm_setup_plan
+from loomlm.inference import serve_plan, vllm_setup_plan
 
 
 def test_shared_install(monkeypatch, tmp_path):
-    monkeypatch.setattr("ashayllm.inference.platform.system", lambda: "Linux")
+    monkeypatch.setattr("loomlm.inference.platform.system", lambda: "Linux")
     plan = vllm_setup_plan(tmp_path, {"backend": "cuda"})
     assert plan["environment"] == str(tmp_path / ".venv")
     assert "vllm==0.31.0" in plan["commands"][0]
@@ -50,7 +50,7 @@ def test_public_serving_requires_tls_and_does_not_print_secrets(exported_model, 
     for filename in ['cert.pem', 'server.key']:
         (tmp_path / filename).write_text('fixture')
     exported_model['inference']['security'] = {'tls_certfile': 'cert.pem', 'tls_keyfile': 'server.key'}
-    monkeypatch.setenv('ASHAYLLM_API_KEY', 'secret' * 10)
+    monkeypatch.setenv('LOOMLM_API_KEY', 'secret' * 10)
     plan = serve_plan(exported_model, tmp_path)
     assert plan['endpoint'].startswith('https://')
     assert 'secret' * 10 not in str(plan)
@@ -70,7 +70,7 @@ def test_invalid_serving_settings(exported_model, tmp_path, key, value):
 @pytest.mark.parametrize('capability,supported', [([8, 9], False), ([10, 0], True)])
 def test_native_fp4_requires_blackwell(exported_model, tmp_path, monkeypatch, capability, supported):
     exported_model['inference']['quantization'] = 'nvfp4_per_token'
-    monkeypatch.setattr('ashayllm.hardware.detect_hardware', lambda: {
+    monkeypatch.setattr('loomlm.hardware.detect_hardware', lambda: {
         'backend': 'cuda', 'compute_capability': capability})
     if supported:
         plan = serve_plan(exported_model, tmp_path)

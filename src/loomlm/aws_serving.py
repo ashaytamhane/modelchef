@@ -8,7 +8,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ashayllm.inference import serve_plan
+from loomlm.inference import serve_plan
 
 
 def validate(settings):
@@ -40,19 +40,19 @@ def bundle(root, settings):
     cap = int(settings.get('max_bundle_bytes', 1_000_000_000))
     if cap <= 0:
         raise ValueError('max_bundle_bytes must be positive')
-    files = {p.relative_to(root).as_posix(): p for p in (root / 'src/ashayllm').glob('*.py')}
+    files = {p.relative_to(root).as_posix(): p for p in (root / 'src/loomlm').glob('*.py')}
     files['pyproject.toml'] = root / 'pyproject.toml'
     for p in model.iterdir():
         if p.is_file() and p.suffix in {'.json', '.safetensors', '.model'}:
             files['model/' + p.name] = p
     if sum(p.stat().st_size for p in files.values()) > cap:
         raise ValueError('Serving source/model exceeds bundle cap')
-    inference['model_path'] = '/opt/ashayllm-serving/model'
+    inference['model_path'] = '/opt/loomlm-serving/model'
     inference['host'] = '0.0.0.0'
     security = dict(inference.get('security', {}))
-    security.update(api_key_env='ASHAYLLM_API_KEY',
-        tls_certfile='/etc/ashayllm-serving/fullchain.pem',
-        tls_keyfile='/etc/ashayllm-serving/server.key')
+    security.update(api_key_env='LOOMLM_API_KEY',
+        tls_certfile='/etc/loomlm-serving/fullchain.pem',
+        tls_keyfile='/etc/loomlm-serving/server.key')
     inference['security'] = security
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode='w:gz', dereference=True) as archive:
@@ -73,48 +73,48 @@ def guest_script(settings, object_key, checksum):
     return f'''#!/bin/bash
 set -euo pipefail
 umask 077
-mkdir -p /opt/ashayllm-serving /etc/ashayllm-serving
-cd /opt/ashayllm-serving
+mkdir -p /opt/loomlm-serving /etc/loomlm-serving
+cd /opt/loomlm-serving
 set +u
 source /opt/pytorch/bin/activate
 set -u
 command -v aws >/dev/null || python -m pip install awscli
-aws s3 cp {source} /tmp/ashayllm-serving.tar.gz --region {region}
-echo '{checksum}  /tmp/ashayllm-serving.tar.gz' | sha256sum -c -
-tar -xzf /tmp/ashayllm-serving.tar.gz
+aws s3 cp {source} /tmp/loomlm-serving.tar.gz --region {region}
+echo '{checksum}  /tmp/loomlm-serving.tar.gz' | sha256sum -c -
+tar -xzf /tmp/loomlm-serving.tar.gz
 python -m venv --system-site-packages .venv
 .venv/bin/python -m pip install '.[inference]'
-id ashayllm-serving >/dev/null 2>&1 || useradd --system --home /opt/ashayllm-serving --shell /usr/sbin/nologin ashayllm-serving
-aws secretsmanager get-secret-value --secret-id {secret} --region {region} --query SecretString --output text > /etc/ashayllm-serving/secret.json
+id loomlm-serving >/dev/null 2>&1 || useradd --system --home /opt/loomlm-serving --shell /usr/sbin/nologin loomlm-serving
+aws secretsmanager get-secret-value --secret-id {secret} --region {region} --query SecretString --output text > /etc/loomlm-serving/secret.json
 .venv/bin/python - <<'PY'
 import json
 from pathlib import Path
-directory = Path('/etc/ashayllm-serving')
+directory = Path('/etc/loomlm-serving')
 secret = json.loads((directory / 'secret.json').read_text())
 token = secret['api_key']
 if len(token) < 32 or any(c.isspace() for c in token) or not token.isascii() or not all(c.isalnum() or c in '-_' for c in token):
     raise ValueError('Secret API key must be a random URL-safe token of at least 32 characters')
 for filename, field in [('fullchain.pem','tls_cert'),('server.key','tls_key')]:
     (directory / filename).write_text(secret[field])
-(directory / 'service.env').write_text('ASHAYLLM_API_KEY=' + token + '\\n')
+(directory / 'service.env').write_text('LOOMLM_API_KEY=' + token + '\\n')
 (directory / 'secret.json').unlink()
 PY
-chown -R ashayllm-serving:ashayllm-serving /opt/ashayllm-serving /etc/ashayllm-serving
-chmod 700 /etc/ashayllm-serving
-cat > /etc/systemd/system/ashayllm-serving.service <<'UNIT'
+chown -R loomlm-serving:loomlm-serving /opt/loomlm-serving /etc/loomlm-serving
+chmod 700 /etc/loomlm-serving
+cat > /etc/systemd/system/loomlm-serving.service <<'UNIT'
 [Unit]
-Description=AshayLLM persistent vLLM API
+Description=LoomLM persistent vLLM API
 After=network-online.target
 Wants=network-online.target
 [Service]
-User=ashayllm-serving
-WorkingDirectory=/opt/ashayllm-serving
-EnvironmentFile=/etc/ashayllm-serving/service.env
+User=loomlm-serving
+WorkingDirectory=/opt/loomlm-serving
+EnvironmentFile=/etc/loomlm-serving/service.env
 Environment=HF_HUB_OFFLINE=1
 Environment=TRANSFORMERS_OFFLINE=1
 Environment=VLLM_NO_USAGE_STATS=1
-Environment=HOME=/opt/ashayllm-serving
-ExecStart=/opt/ashayllm-serving/.venv/bin/python -m ashayllm.cli serve-vllm configs/serving.yaml --run
+Environment=HOME=/opt/loomlm-serving
+ExecStart=/opt/loomlm-serving/.venv/bin/python -m loomlm.cli serve-vllm configs/serving.yaml --run
 Restart=on-failure
 RestartSec=10
 NoNewPrivileges=true
@@ -125,7 +125,7 @@ UMask=0077
 WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
-systemctl enable --now ashayllm-serving
+systemctl enable --now loomlm-serving
 '''
 
 
@@ -154,7 +154,7 @@ class ServingRunner:
         return self.root / 'artifacts/aws-serving' / (deployment + '.json')
 
     def deploy(self):
-        from ashayllm.aws_runner import local_preflight
+        from loomlm.aws_runner import local_preflight
         payload = bundle(self.root, self.settings)
         local_preflight(self.root)
         image = self.ec2.describe_images(ImageIds=[self.settings['ami_id']])['Images'][0]
@@ -168,7 +168,7 @@ class ServingRunner:
             raise ValueError('storage_gb is smaller than the AMI root volume')
         deployment = 'hosting-' + uuid.uuid4().hex
         record = {'deployment_id': deployment, 'region': self.settings['region'],
-                  'state': 'launching', 'object_key': f'ashayllm-serving/{deployment}/source.tar.gz'}
+                  'state': 'launching', 'object_key': f'loomlm-serving/{deployment}/source.tar.gz'}
         path = self._path(deployment)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(record, indent=2))
@@ -186,7 +186,7 @@ class ServingRunner:
                 'VolumeSize': int(s.get('storage_gb', 100)), 'VolumeType': 'gp3',
                 'Encrypted': True, 'DeleteOnTermination': True}}],
             TagSpecifications=[{'ResourceType': kind, 'Tags': [
-                {'Key': 'Project', 'Value': 'AshayLLM'}, {'Key': 'DeploymentId', 'Value': deployment},
+                {'Key': 'Project', 'Value': 'LoomLM'}, {'Key': 'DeploymentId', 'Value': deployment},
                 {'Key': 'Lifecycle', 'Value': 'persistent-serving'}]} for kind in ['instance', 'volume']],
             UserData=guest_script(s, record['object_key'], hashlib.sha256(payload).hexdigest()))
         record['instance_id'] = response['Instances'][0]['InstanceId']
@@ -205,7 +205,7 @@ class ServingRunner:
             raise ValueError('Expected one journaled hosting instance; inspect AWS before retrying deploy')
         instance = found[0]
         tags = {t['Key']: t['Value'] for t in instance.get('Tags', [])}
-        if tags.get('Project') != 'AshayLLM' or tags.get('Lifecycle') != 'persistent-serving' or tags.get('DeploymentId') != deployment:
+        if tags.get('Project') != 'LoomLM' or tags.get('Lifecycle') != 'persistent-serving' or tags.get('DeploymentId') != deployment:
             raise ValueError('Instance ownership tags do not match deployment')
         return instance
 
@@ -218,7 +218,7 @@ class ServingRunner:
             return {'instance_id': identifier, 'requested': action, 'confirmed': False}
         if action == 'logs':
             return self.ssm.send_command(InstanceIds=[identifier], DocumentName='AWS-RunShellScript',
-                Parameters={'commands': ['systemctl status ashayllm-serving --no-pager; journalctl -u ashayllm-serving -n 100 --no-pager']})['Command']
+                Parameters={'commands': ['systemctl status loomlm-serving --no-pager; journalctl -u loomlm-serving -n 100 --no-pager']})['Command']
         age = max(0, (datetime.now(UTC) - instance['LaunchTime']).total_seconds() / 3600)
         estimate = age * float(self.settings['hourly_estimate_usd'])
         return {'instance_id': identifier, 'state': instance['State']['Name'],

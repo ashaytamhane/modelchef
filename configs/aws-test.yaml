@@ -1,5 +1,5 @@
 aws_test:
-  profile: ashayllm
+  profile: loomlm
   region: us-east-1
   instance_type: g4dn.xlarge
   total_budget_usd: '10.00'

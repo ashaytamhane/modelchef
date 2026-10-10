@@ -13,12 +13,12 @@ import torch
 import torch.nn.functional as F
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
-from ashayllm.benchmarks import acquire_benchmark, evaluate_choices, select_benchmark
-from ashayllm.corpus import acquire, digest, process
-from ashayllm.engines import create_model, load_parent, load_tokenizer
-from ashayllm.execution import check_custom_kernel, configure_execution, plugin_fingerprint
-from ashayllm.hardware import detect_hardware, resolve_runtime
-from ashayllm.objectives import evaluate_stage, objective, pack_structured, prepare_structured
+from loomlm.benchmarks import acquire_benchmark, evaluate_choices, select_benchmark
+from loomlm.corpus import acquire, digest, process
+from loomlm.engines import create_model, load_parent, load_tokenizer
+from loomlm.execution import check_custom_kernel, configure_execution, plugin_fingerprint
+from loomlm.hardware import detect_hardware, resolve_runtime
+from loomlm.objectives import evaluate_stage, objective, pack_structured, prepare_structured
 
 
 class Narrator:
@@ -94,7 +94,7 @@ def run_pipeline(config, root, resume=None):
     folder = (Path(resume).resolve().parent.parent if resume else
               root / config.output_dir / (config.name + "-" + uuid.uuid4().hex[:12]))
     folder.mkdir(parents=True, exist_ok=True)
-    from ashayllm.run_config import RunConfig
+    from loomlm.run_config import RunConfig
     if resume and RunConfig.model_validate_json((folder / "config.json").read_text()).model_dump(
             mode="json") != recipe:
         raise ValueError("Resume configuration differs; refusing to modify the saved run")
@@ -196,8 +196,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
             "documents only. Later stages retain the parent's vocabulary and special-token identities.")
     parent = None
     if c.stage.kind != 'pretrain':
-        from ashayllm.chat import checkpoint_for
-        from ashayllm.run_config import RunConfig
+        from loomlm.chat import checkpoint_for
+        from loomlm.run_config import RunConfig
         parent_folder = (root / c.stage.parent_run).resolve()
         parent_config = RunConfig.model_validate_json((parent_folder / 'config.json').read_text())
         execution_fields = {'quantization', 'attention_kernel', 'custom_swiglu_path', 'peft'}
@@ -265,8 +265,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
                 for block in network.blocks:
                     block.attention.c = block.attention.c.model_copy(update={'attention_dropout': 0})
     if c.stage.kind == 'distill':
-        from ashayllm.chat import checkpoint_for
-        from ashayllm.run_config import RunConfig
+        from loomlm.chat import checkpoint_for
+        from loomlm.run_config import RunConfig
         teacher_folder = (root / c.stage.teacher_run).resolve()
         if digest((teacher_folder / 'tokenizer.json').read_bytes()) != tokenizer_hash:
             raise ValueError('Token distillation requires identical student/teacher tokenizers')

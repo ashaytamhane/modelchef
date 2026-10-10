@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from ashayllm.run_config import RunConfig
+from loomlm.run_config import RunConfig
 
 
 def build_bundle(root, settings):
@@ -19,7 +19,7 @@ def build_bundle(root, settings):
     if cap <= 0:
         raise ValueError('max_bundle_bytes must be positive')
     files = {}
-    for path in sorted((root / 'src/ashayllm').glob('*.py')):
+    for path in sorted((root / 'src/loomlm').glob('*.py')):
         files[path.relative_to(root).as_posix()] = path.read_bytes()
     files['pyproject.toml'] = (root / 'pyproject.toml').read_bytes()
     recipe = config.model_dump(mode='json')
@@ -79,7 +79,7 @@ def training_user_data(settings):
     if not settings.get('artifact_bucket') or not settings.get('instance_profile_name'):
         raise ValueError('AWS training requires artifact_bucket and instance_profile_name')
     bucket = settings['artifact_bucket']
-    prefix = settings.get('_artifact_prefix', 'ashayllm-training/PLAN')
+    prefix = settings.get('_artifact_prefix', 'loomlm-training/PLAN')
     source = shlex.quote(f's3://{bucket}/{prefix}/source.tar.gz')
     result = shlex.quote(f's3://{bucket}/{prefix}/results.tar.gz')
     minutes = int(settings['max_runtime_minutes'])
@@ -91,18 +91,18 @@ def training_user_data(settings):
         raise ValueError('max_result_bytes must be positive')
     return f'''#!/bin/bash
 set -euo pipefail
-exec > >(tee -a /var/log/ashayllm-training.log /dev/console) 2>&1
-systemd-run --unit=ashayllm-deadline --on-active={minutes}m /sbin/shutdown -h now
+exec > >(tee -a /var/log/loomlm-training.log /dev/console) 2>&1
+systemd-run --unit=loomlm-deadline --on-active={minutes}m /sbin/shutdown -h now
 finish() {{
   code=$?; trap - EXIT; set +e
-  if [ -d /opt/ashayllm-training/artifacts ]; then
-    tar -czf /tmp/results.tar.gz -C /opt/ashayllm-training artifacts
+  if [ -d /opt/loomlm-training/artifacts ]; then
+    tar -czf /tmp/results.tar.gz -C /opt/loomlm-training artifacts
     size=$(stat -c %s /tmp/results.tar.gz)
     if [ "$size" -le {max_result} ]; then
       timeout 45 aws s3 cp /tmp/results.tar.gz {result} --sse AES256 --cli-connect-timeout 5 --cli-read-timeout 10 || code=1
     else code=1; fi
   fi
-  echo "ASHAYLLM_RESULT=$code"
+  echo "LOOMLM_RESULT=$code"
   /sbin/shutdown -h now
 }}
 trap finish EXIT
@@ -110,14 +110,14 @@ set +u
 source /opt/pytorch/bin/activate
 set -u
 command -v aws >/dev/null || python -m pip install awscli
-mkdir -p /opt/ashayllm-training
-cd /opt/ashayllm-training
+mkdir -p /opt/loomlm-training
+cd /opt/loomlm-training
 timeout 60 aws s3 cp {source} /tmp/source.tar.gz --cli-connect-timeout 5 --cli-read-timeout 10
 echo '{checksum}  /tmp/source.tar.gz' | sha256sum -c -
 tar -xzf /tmp/source.tar.gz
 python -m pip install '.[pipeline]'
-python -m ashayllm.cli doctor
-python -m ashayllm.cli pipeline configs/job.yaml --run
+python -m loomlm.cli doctor
+python -m loomlm.cli pipeline configs/job.yaml --run
 '''
 
 
@@ -146,6 +146,6 @@ def training_preflight(root, settings):
     path = root / 'artifacts/aws-training-preflight.yaml'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(config.model_dump(mode='json')), encoding='utf-8')
-    subprocess.run([sys.executable, '-m', 'ashayllm.cli', 'pipeline', str(path), '--run'],
+    subprocess.run([sys.executable, '-m', 'loomlm.cli', 'pipeline', str(path), '--run'],
                    cwd=root, check=True, timeout=300)
     return {'passed': True, 'recipe': str(path), 'steps': 2}

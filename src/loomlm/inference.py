@@ -64,7 +64,7 @@ def serve_plan(config, root):
     security = settings.get('security', {})
     if not isinstance(security, dict):
         raise TypeError('security must be a mapping')
-    key_env = security.get('api_key_env', 'ASHAYLLM_API_KEY')
+    key_env = security.get('api_key_env', 'LOOMLM_API_KEY')
     if not isinstance(key_env, str) or not key_env.isidentifier():
         raise ValueError('api_key_env must be an environment variable name')
     limits = {}
@@ -82,7 +82,7 @@ def serve_plan(config, root):
                "--port", str(port), "--dtype", dtype,
                "--gpu-memory-utilization", str(memory), "--max-model-len", str(length),
                "--max-num-seqs", str(sequences)]
-    command += ['--middleware', 'ashayllm.api_security.SecurityMiddleware',
+    command += ['--middleware', 'loomlm.api_security.SecurityMiddleware',
                 '--disable-fastapi-docs', '--no-enable-log-requests', '--api-server-count', '1']
     if cert:
         for flag, filename in [('--ssl-certfile', cert), ('--ssl-keyfile', key)]:
@@ -96,14 +96,14 @@ def serve_plan(config, root):
     if quantization not in {'none', 'nvfp4_per_token'}:
         raise ValueError('quantization must be none or nvfp4_per_token')
     if quantization != 'none':
-        from ashayllm.hardware import detect_hardware
+        from loomlm.hardware import detect_hardware
         hardware = detect_hardware()
         if hardware['backend'] != 'cuda' or hardware.get('compute_capability', [0])[0] < 10:
             raise ValueError('Native NVFP4 inference requires a supported Blackwell CUDA GPU')
         command += ['--quantization', quantization]
     return {"command": command, "environment": {"HF_HUB_OFFLINE": "1",
             "TRANSFORMERS_OFFLINE": "1", "VLLM_NO_USAGE_STATS": "1",
-            "ASHAYLLM_API_SECURITY": json.dumps(limits),
+            "LOOMLM_API_SECURITY": json.dumps(limits),
             "PYTHONPATH": os.pathsep.join([str(root / 'src'), os.environ.get('PYTHONPATH', '')])},
             "endpoint": f"{'https' if cert else 'http'}://{'[' + host + ']' if ':' in host else host}:{port}/v1",
             "api_key_env": key_env,

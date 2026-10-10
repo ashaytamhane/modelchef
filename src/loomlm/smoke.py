@@ -4,7 +4,7 @@ import tempfile
 from contextlib import nullcontext
 from pathlib import Path
 
-from ashayllm.hardware import detect_hardware, resolve_runtime
+from loomlm.hardware import detect_hardware, resolve_runtime
 
 
 def run_smoke(accelerator="auto", precision="auto"):

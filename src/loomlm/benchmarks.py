@@ -5,7 +5,7 @@ import zipfile
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from ashayllm.corpus import digest
+from loomlm.corpus import digest
 
 REGISTRY = {"general": "hellaswag", "finance": "financial_phrasebank"}
 
@@ -36,7 +36,7 @@ def acquire_benchmark(config, root):
     else:
         url = ("https://huggingface.co/datasets/takala/financial_phrasebank/resolve/main/"
                "data/FinancialPhraseBank-v1.0.zip")
-    with urlopen(Request(url, headers={"User-Agent": "AshayLLM/0.1"}),
+    with urlopen(Request(url, headers={"User-Agent": "LoomLM/0.1"}),
                  timeout=config.data.timeout_seconds) as response:
         payload = response.read(cap + 1)
     if len(payload) > cap:

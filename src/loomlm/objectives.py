@@ -6,7 +6,7 @@ import unicodedata
 import torch
 import torch.nn.functional as F
 
-from ashayllm.corpus import PII, process
+from loomlm.corpus import PII, process
 
 
 def format_prompt(text):

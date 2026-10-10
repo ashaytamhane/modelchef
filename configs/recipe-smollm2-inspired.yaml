@@ -1,4 +1,4 @@
-# Small AshayLLM adaptation, not original model reproduction. See README published recipes.
+# Small LoomLM adaptation, not original model reproduction. See README published recipes.
 schema_version: 1
 name: smollm2-inspired-small
 output_dir: artifacts/training

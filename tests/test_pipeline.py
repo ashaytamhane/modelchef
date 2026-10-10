@@ -5,9 +5,9 @@ import pytest
 
 pytest.importorskip("pydantic")
 
-from ashayllm.benchmarks import select_benchmark
-from ashayllm.corpus import acquire, process
-from ashayllm.run_config import RunConfig
+from loomlm.benchmarks import select_benchmark
+from loomlm.corpus import acquire, process
+from loomlm.run_config import RunConfig
 
 
 def test_strict_recipe_and_domain_benchmarks():
@@ -56,8 +56,8 @@ def test_acquire_enforces_local_byte_budget(tmp_path):
 
 def test_causal_logits_cannot_see_future_tokens():
     torch = pytest.importorskip("torch")
-    from ashayllm.model import Decoder
-    from ashayllm.run_config import Architecture
+    from loomlm.model import Decoder
+    from loomlm.run_config import Architecture
     model = Decoder(Architecture(layers=1, hidden_size=32, attention_heads=4,
                                 kv_heads=2, intermediate_size=64, context_length=16), 300).eval()
     ids = torch.randint(300, (1, 16))
@@ -70,7 +70,7 @@ def test_causal_logits_cannot_see_future_tokens():
 def test_complete_cpu_pipeline_and_exact_resume(tmp_path):
     torch = pytest.importorskip("torch")
     pytest.importorskip("tokenizers")
-    from ashayllm.pipeline import run_pipeline
+    from loomlm.pipeline import run_pipeline
     torch.set_num_threads(1)
     path = tmp_path / "input.jsonl"
     path.write_text("".join(json.dumps({"text":
@@ -96,8 +96,8 @@ def test_complete_cpu_pipeline_and_exact_resume(tmp_path):
     assert result["validation"]["loss"] == resumed["validation"]["loss"]
     transformers = pytest.importorskip("transformers")
     pytest.importorskip("safetensors")
-    from ashayllm.chat import export_model
-    from ashayllm.model import Decoder
+    from loomlm.chat import export_model
+    from loomlm.model import Decoder
     exported = export_model(Path(result["run_dir"]))
     hf_model = transformers.LlamaForCausalLM.from_pretrained(exported).eval()
     native = Decoder(config.model, hf_model.config.vocab_size).eval()

@@ -1,5 +1,5 @@
 inference:
-  model_path: artifacts/exports/ashayllm
+  model_path: artifacts/exports/loomlm
   host: 0.0.0.0
   port: 8443
   dtype: auto
@@ -9,7 +9,7 @@ inference:
   max_num_seqs: 2
   enforce_eager: true
   security:
-    api_key_env: ASHAYLLM_API_KEY
+    api_key_env: LOOMLM_API_KEY
     tls_certfile: artifacts/tls/fullchain.pem
     tls_keyfile: artifacts/tls/server.key
     max_body_bytes: 1048576

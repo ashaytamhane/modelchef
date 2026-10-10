@@ -6,21 +6,30 @@ import subprocess
 import sys
 
 
-def detect_hardware():
+def detect_hardware(progress=None):
+    def announce(message):
+        if progress:
+            progress(message)
+
+    announce('Inspecting Python, operating system and architecture.')
     info = {"python": sys.version.split()[0], "platform": platform.platform(),
             "os": platform.system(), "architecture": platform.machine(),
             "torch_installed": False, "cuda_available": False,
             "mps_available": False, "backend": "cpu", "bf16_supported": False}
     try:
+        announce('Importing PyTorch; the first import can take several seconds.')
         import torch
     except ImportError:
+        announce('PyTorch is not installed; reporting the available environment.')
         return info
     info.update(torch_installed=True, torch_version=torch.__version__,
                 cuda_build=torch.version.cuda, hip_build=torch.version.hip)
+    announce('Checking CUDA/ROCm and Apple MPS availability.')
     info["cuda_available"] = torch.cuda.is_available()
     info["mps_available"] = bool(
         hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
     if info["cuda_available"]:
+        announce('Querying GPU devices, precision support and available memory.')
         info["backend"] = "rocm" if torch.version.hip else "cuda"
         info["bf16_supported"] = torch.cuda.is_bf16_supported()
         info["gpu_count"] = torch.cuda.device_count()
@@ -32,6 +41,7 @@ def detect_hardware():
         info.update(free_memory_bytes=free, total_memory_bytes=total)
     elif info["mps_available"]:
         info["backend"] = "mps"
+    announce(f"Detected backend: {info['backend']}.")
     return info
 
 

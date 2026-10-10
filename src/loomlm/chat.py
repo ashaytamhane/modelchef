@@ -15,7 +15,7 @@ def export_model(folder):
     import torch
     from safetensors.torch import save_file
 
-    from ashayllm.run_config import RunConfig
+    from loomlm.run_config import RunConfig
 
     folder = Path(folder).resolve()
     config = RunConfig.model_validate_json((folder / "config.json").read_text())
@@ -24,14 +24,14 @@ def export_model(folder):
     output = folder / "export"
     output.mkdir(exist_ok=True)
     if c.quantization != 'none':
-        (output / 'ashayllm-quantization.json').write_text(json.dumps({
+        (output / 'loomlm-quantization.json').write_text(json.dumps({
             'training': c.quantization, 'export': 'full_precision_master_weights',
             'note': 'Export does not preserve fake-quantization forward behavior or produce packed FP4 weights.'}),
             encoding='utf-8')
     if c.backend == 'huggingface':
         from transformers import AutoTokenizer
 
-        from ashayllm.engines import create_model, load_tokenizer
+        from loomlm.engines import create_model, load_tokenizer
         tokenizer = load_tokenizer(folder)
         model = create_model(c, tokenizer.get_vocab_size())
         model.load_state_dict(state)
@@ -66,7 +66,7 @@ def export_model(folder):
                                             else c.kv_heads)
                 weights[f"model.layers.{layer}.{target}{suffix}"] = weight.contiguous()
     save_file(weights, str(output / "model.safetensors"), metadata={"format": "pt"})
-    from ashayllm.engines import load_tokenizer
+    from loomlm.engines import load_tokenizer
     tokenizer = load_tokenizer(folder)
     (output / "tokenizer.json").write_bytes((folder / "tokenizer.json").read_bytes())
     hf_config = {"model_type": "llama", "architectures": ["LlamaForCausalLM"],
@@ -92,9 +92,9 @@ def export_model(folder):
 def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, top_k=30):
     import torch
 
-    from ashayllm.engines import create_model, load_tokenizer
-    from ashayllm.hardware import detect_hardware, resolve_runtime
-    from ashayllm.run_config import RunConfig
+    from loomlm.engines import create_model, load_tokenizer
+    from loomlm.hardware import detect_hardware, resolve_runtime
+    from loomlm.run_config import RunConfig
 
     if max_tokens < 1 or temperature <= 0 or top_k < 0:
         raise ValueError("max_tokens/temperature must be positive; top_k must be nonnegative")
@@ -147,7 +147,7 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
           "Short validation runs do not produce a useful assistant.", flush=True)
     if prompt is not None:
         if config.stage.kind in {'sft', 'dpo', 'rlvr', 'distill'}:
-            from ashayllm.objectives import format_prompt
+            from loomlm.objectives import format_prompt
             prompt = format_prompt(prompt)
         print(generate(prompt), flush=True)
         return

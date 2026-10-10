@@ -1,28 +1,32 @@
-# AshayLLM
+# LoomLM
 
-AshayLLM is a configurable platform for language-model development: prepare data, build an LLM from scratch or adapt a pretrained model, evaluate it, and run it through CLI inference or a vLLM API. Use the same Python/PyTorch codebase locally and on AWS, with recipes controlling the model, training objectives, precision and execution kernels. Extend experiments with distillation, optional reasoning supervision, custom CUDA kernels and explicit cloud lifecycle controls.
+**One recipe. From data to a served language model.**
+
+LoomLM is a configurable platform for language-model development: prepare data, build an LLM from scratch or adapt a pretrained model, evaluate it, and run it through CLI inference or a vLLM API. Use the same Python/PyTorch codebase locally and on AWS, with recipes controlling the model, training objectives, precision and execution kernels. Extend experiments with distillation, optional reasoning supervision, custom CUDA kernels and explicit cloud lifecycle controls.
 
 The platform connects these workflows through reusable model/tokenizer adapters, stage recipes, manifests and checkpoints. You choose the starting model, data and objective; a run explains its steps and records its outputs. Hardware detection resolves available devices and precision, while model sizing, dataset suitability and deployment choices remain explicit.
 
 ## Quick Start
 
-The Quick Start examples below run on your current machine. AshayLLM can also launch AWS instances: see [the Spot training example](#run-a-managed-native-training-stage) for a temporary training job that terminates when finished, or [the API hosting example](#persistent-api-hosting-on-ec2) for persistent on-demand serving. AWS launches require configured credentials and explicit execution with `--run`, and incur charges. Start with a small local experiment; the default training run tests the pipeline rather than producing a useful assistant.
+The Quick Start examples below run on your current machine. LoomLM can also launch AWS instances: see [the Spot training example](#run-a-managed-native-training-stage) for a temporary training job that terminates when finished, or [the API hosting example](#persistent-api-hosting-on-ec2) for persistent on-demand serving. AWS launches require configured credentials and explicit execution with `--run`, and incur charges. Start with a small local experiment; the default training run tests the pipeline rather than producing a useful assistant.
 
 ### Set up once
 
 With Git and [uv](https://docs.astral.sh/uv/getting-started/installation/) installed, run these commands in Linux, WSL or macOS Terminal. Windows GPU users should first follow the [WSL setup](#windows-with-an-nvidia-gpu-prepare-wsl2). The repository currently requires GitHub access.
 
 ```bash
-git clone https://github.com/ashaytamhane/ashayllm.git
-cd ashayllm
+git clone https://github.com/ashaytamhane/loomlm.git
+cd loomlm
 uv venv --python 3.12
 source .venv/bin/activate
 uv pip install -e '.[dev,pipeline]'
-python -m ashayllm.cli setup
-python -m ashayllm.cli setup --apply
-python -m ashayllm.cli doctor
-python -m ashayllm.cli smoke
+python -m loomlm.cli setup
+python -m loomlm.cli setup --apply
+python -m loomlm.cli doctor
+python -m loomlm.cli smoke
 ```
+
+CLI commands print immediate progress, elapsed-time updates every 10 seconds during longer operations, and a completion message to stderr. `doctor` explains its Python/PyTorch import, device discovery and GPU calculation checks as they happen. Use `--quiet` to suppress CLI progress; result output remains on stdout. Training retains its recipe-controlled detailed or brief narration.
 
 `setup` previews the PyTorch installation; `--apply` installs it. Review the preview for your hardware. If prerequisites are missing, see [local setup](#local-setup). Package installation requires internet access.
 
@@ -63,13 +67,13 @@ stage:
   kind: pretrain
 ```
 
-This is an edit guide, not a replacement for the complete copied recipe. Validate with `python -m ashayllm.cli pipeline configs/my-run.local.yaml`; add `--run` to execute it. Fields you omit use defaults; some become required when you select another workflow. See [required versus optional](#required-versus-optional). Unsupported fields and incompatible settings fail validation. `*.local.yaml` files stay out of Git. For fine-tuning, use `stage-config` in workflow 3 to generate a recipe matching the parent model instead of manually copying its architecture. See [published recipe patterns](#published-recipes-and-small-scale-adaptations) for starting points and the [complete annotated recipe](#complete-annotated-recipe) for every training field and its alternatives, and [data and recipes](#data-and-recipes) for local-data examples.
+This is an edit guide, not a replacement for the complete copied recipe. Validate with `python -m loomlm.cli pipeline configs/my-run.local.yaml`; add `--run` to execute it. Fields you omit use defaults; some become required when you select another workflow. See [required versus optional](#required-versus-optional). Unsupported fields and incompatible settings fail validation. `*.local.yaml` files stay out of Git. For fine-tuning, use `stage-config` in workflow 3 to generate a recipe matching the parent model instead of manually copying its architecture. See [published recipe patterns](#published-recipes-and-small-scale-adaptations) for starting points and the [complete annotated recipe](#complete-annotated-recipe) for every training field and its alternatives, and [data and recipes](#data-and-recipes) for local-data examples.
 
 ### 1. Train a small model from scratch
 
 ```bash
-python -m ashayllm.cli pipeline configs/pretrain-local.yaml
-python -m ashayllm.cli pipeline configs/pretrain-local.yaml --run
+python -m loomlm.cli pipeline configs/pretrain-local.yaml
+python -m loomlm.cli pipeline configs/pretrain-local.yaml --run
 ```
 
 The first command validates the recipe without downloading anything. The second acquires up to 256 FineWeb-Edu documents within a 16 MB corpus-response cap, runs preprocessing and BPE training, trains an approximately 18.6M-parameter model for 40 steps, and evaluates it on held-out data and a bounded benchmark sample. It explains each stage and prints the completed run directory. Read that directory's `report.json` for results.
@@ -79,9 +83,9 @@ The first command validates the recipe without downloading anything. The second 
 Replace `RUN_DIR` with the completed directory printed by workflow 1:
 
 ```bash
-python -m ashayllm.cli chat RUN_DIR --prompt "Education helps people" --max-tokens 24
-python -m ashayllm.cli chat RUN_DIR
-python -m ashayllm.cli export RUN_DIR
+python -m loomlm.cli chat RUN_DIR --prompt "Education helps people" --max-tokens 24
+python -m loomlm.cli chat RUN_DIR
+python -m loomlm.cli export RUN_DIR
 ```
 
 Interactive mode supports `/reset` and `/exit`. Export creates `RUN_DIR/export/` for compatible inference tools. Expect poor text quality from this short training test. To serve the export to clients, continue with [vLLM API serving](#inference-and-api-serving); remote access requires TLS and authentication.
@@ -92,12 +96,12 @@ Use an existing compatible local Hugging Face model directory and a UTF-8 JSONL 
 
 ```bash
 uv pip install -e '.[pretrained]'
-python -m ashayllm.cli import-model LOCAL_MODEL_DIR --context 128
+python -m loomlm.cli import-model LOCAL_MODEL_DIR --context 128
 # Replace PARENT_RUN with the imported run directory printed above.
-python -m ashayllm.cli stage-config PARENT_RUN --kind sft --data data/raw/sft.jsonl --output configs/sft.local.yaml --steps 40
-python -m ashayllm.cli pipeline configs/sft.local.yaml
-python -m ashayllm.cli pipeline configs/sft.local.yaml --run
-python -m ashayllm.cli chat NEW_RUN_DIR
+python -m loomlm.cli stage-config PARENT_RUN --kind sft --data data/raw/sft.jsonl --output configs/sft.local.yaml --steps 40
+python -m loomlm.cli pipeline configs/sft.local.yaml
+python -m loomlm.cli pipeline configs/sft.local.yaml --run
+python -m loomlm.cli chat NEW_RUN_DIR
 ```
 
 This keeps the pretrained tokenizer and weights and learns from your supplied responses. Import and training use local model files; they do not fetch weights implicitly. Choose a model that fits available memory; this workflow defaults to full-parameter fine-tuning; see [optional LoRA](#parameter-efficient-fine-tuning-with-lora) to train adapters instead. Later sections cover domain midtraining, preferences, verifiable rewards, distillation and AWS execution.
@@ -219,12 +223,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 mkdir -p ~/projects
 cd ~/projects
-git clone https://github.com/ashaytamhane/ashayllm.git
-cd ashayllm
+git clone https://github.com/ashaytamhane/loomlm.git
+cd loomlm
 uv venv --python 3.12
 source .venv/bin/activate
 uv pip install -e '.[dev,pipeline]'
-python -m ashayllm.cli --help
+python -m loomlm.cli --help
 python -m pytest -q
 python -m ruff check .
 ```
@@ -236,12 +240,12 @@ The repository is private, so GitHub authentication is needed to clone it. Keep 
 A Windows controller does not need PyTorch or a GPU to launch AWS tests. With Python 3.12 and Git installed:
 
 ```powershell
-git clone https://github.com/ashaytamhane/ashayllm.git
-cd ashayllm
+git clone https://github.com/ashaytamhane/loomlm.git
+cd loomlm
 py -3.12 -m venv .venv-aws
 .\.venv-aws\Scripts\Activate.ps1
 python -m pip install -e '.[dev,aws]'
-python -m ashayllm.cli --help
+python -m loomlm.cli --help
 python -m pytest -q
 ```
 
@@ -254,31 +258,31 @@ macOS runs the same Python codebase directly; WSL and CUDA are not required. The
 Install Git and `uv` using your preferred method, then run these commands in Terminal. The repository requires GitHub authentication:
 
 ```bash
-git clone https://github.com/ashaytamhane/ashayllm.git
-cd ashayllm
+git clone https://github.com/ashaytamhane/loomlm.git
+cd loomlm
 uv venv --python 3.12
 source .venv/bin/activate
 uv pip install -e '.[dev,pipeline]'
 # Preview the macOS PyTorch installation before applying it.
-python -m ashayllm.cli setup
-python -m ashayllm.cli setup --apply
-python -m ashayllm.cli doctor
-python -m ashayllm.cli smoke --precision fp32
+python -m loomlm.cli setup
+python -m loomlm.cli setup --apply
+python -m loomlm.cli doctor
+python -m loomlm.cli smoke --precision fp32
 python -m pytest -q
 ```
 
 Check `doctor` for `backend: mps` and `mps_available: true` to confirm GPU availability. An Apple Silicon Mac can use MPS when its OS and PyTorch build support it; Intel Macs can use CPU and may expose MPS on supported GPUs. If an operation fails on MPS, verify the CPU path explicitly:
 
 ```bash
-python -m ashayllm.cli smoke --accelerator cpu --precision fp32
+python -m loomlm.cli smoke --accelerator cpu --precision fp32
 ```
 
 To preview and then execute a bounded pretraining run on the Mac itself:
 
 ```bash
-python -m ashayllm.cli pipeline configs/pretrain-local.yaml
+python -m loomlm.cli pipeline configs/pretrain-local.yaml
 # This downloads the configured small corpus/benchmark samples and trains locally.
-python -m ashayllm.cli pipeline configs/pretrain-local.yaml --run
+python -m loomlm.cli pipeline configs/pretrain-local.yaml --run
 ```
 
 The recipe's `training.accelerator: auto` selects the available backend. To force CPU training, copy the recipe and set `training.accelerator: cpu` and `training.precision: fp32`. Reduce model dimensions, context length or microbatch size if memory is insufficient; hardware detection does not automatically resize the model.
@@ -286,7 +290,7 @@ The recipe's `training.accelerator: auto` selects the available backend. To forc
 After training, replace `PATH_TO_COMPLETED_RUN` with the run directory printed by the pipeline:
 
 ```bash
-python -m ashayllm.cli chat PATH_TO_COMPLETED_RUN --backend torch
+python -m loomlm.cli chat PATH_TO_COMPLETED_RUN --backend torch
 ```
 
 The CLI supports `/reset` and `/exit`. A short training test produces limited text quality; SFT support does not make a tiny validation model a useful assistant. Use the PyTorch backend on macOS: the project's automatic vLLM installation targets Linux/WSL with NVIDIA CUDA. A Mac can also act as an AWS controller after installing `.[aws]` and following the AWS section.
@@ -307,19 +311,19 @@ The automatic vLLM installer supports Linux/WSL NVIDIA CUDA only. Backend detect
 Creating the base environment does not install PyTorch. First preview the installation:
 
 ```bash
-python -m ashayllm.cli setup
+python -m loomlm.cli setup
 # Or deliberately choose a CPU-only environment:
-python -m ashayllm.cli setup --backend cpu
+python -m loomlm.cli setup --backend cpu
 ```
 
 Review the detected backend, driver and proposed command. Install into the active environment only when ready:
 
 ```bash
-python -m ashayllm.cli setup --apply
-python -m ashayllm.cli doctor
-python -m ashayllm.cli check-config configs/local.yaml
-python -m ashayllm.cli resolve-runtime configs/local.yaml --output artifacts/environment/resolved-local.json
-python -m ashayllm.cli smoke
+python -m loomlm.cli setup --apply
+python -m loomlm.cli doctor
+python -m loomlm.cli check-config configs/local.yaml
+python -m loomlm.cli resolve-runtime configs/local.yaml --output artifacts/environment/resolved-local.json
+python -m loomlm.cli smoke
 ```
 
 Expected results: `doctor` describes the available backend; on CUDA it also checks matrix multiplication. `smoke` reports `training_step: passed` and `checkpoint_recovery: passed`. These are synthetic checks, not language-model training or throughput measurements.
@@ -345,9 +349,9 @@ Examples:
 
 ```bash
 # Debug checkpoint behavior without using the GPU.
-python -m ashayllm.cli smoke --accelerator cpu --precision fp32
+python -m loomlm.cli smoke --accelerator cpu --precision fp32
 # Check mixed-precision training on your current CUDA machine.
-python -m ashayllm.cli smoke --accelerator cuda --precision fp16
+python -m loomlm.cli smoke --accelerator cuda --precision fp16
 ```
 
 ## Beginner: run and understand the pipeline
@@ -367,11 +371,11 @@ Complete [local setup](#local-setup) and PyTorch installation, then install pipe
 
 ```bash
 uv pip install -e '.[dev,pipeline]'
-python -m ashayllm.cli doctor
+python -m loomlm.cli doctor
 # Validate every recipe section; this command performs no download or training.
-python -m ashayllm.cli pipeline configs/pretrain-local.yaml
+python -m loomlm.cli pipeline configs/pretrain-local.yaml
 # Download the bounded samples and execute on the current machine.
-python -m ashayllm.cli pipeline configs/pretrain-local.yaml --run
+python -m loomlm.cli pipeline configs/pretrain-local.yaml --run
 ```
 
 The default recipe requests at most 256 FineWeb-Edu documents, caps corpus responses at 16 MB and benchmark downloads at 2 MB, and caps packed data at 200,000 tokens. It creates an approximately 18.6M-parameter decoder and runs 40 optimizer steps. This is a pipeline test, not enough training for useful conversation. Dataset access uses the public Hugging Face viewer; no pretrained model weights are downloaded.
@@ -393,7 +397,7 @@ The run separates training, validation and test documents before fitting the tok
 Use the original configuration and a saved checkpoint path:
 
 ```bash
-python -m ashayllm.cli pipeline configs/pretrain-local.yaml --run --resume PATH_TO_CHECKPOINT
+python -m loomlm.cli pipeline configs/pretrain-local.yaml --run --resume PATH_TO_CHECKPOINT
 ```
 
 Resume restores model, optimizer, scaler, sampler and random states and checks configuration/data/tokenizer fingerprints. The configuration must match exactly, and the original data snapshot must remain available. It continues toward the original step target; changing the target or dataset is a new experiment, not checkpoint recovery. CPU tests verify uninterrupted versus resumed weights agree; exact behavior across different hardware/software is not guaranteed.
@@ -410,9 +414,9 @@ Validation and test loss measure next-token prediction on this sample/tokenizer.
 Replace `PATH_TO_COMPLETED_RUN` with the directory printed after successful training:
 
 ```bash
-python -m ashayllm.cli chat PATH_TO_COMPLETED_RUN --backend torch
-python -m ashayllm.cli chat PATH_TO_COMPLETED_RUN --prompt "Education helps people" --max-tokens 24
-python -m ashayllm.cli export PATH_TO_COMPLETED_RUN
+python -m loomlm.cli chat PATH_TO_COMPLETED_RUN --backend torch
+python -m loomlm.cli chat PATH_TO_COMPLETED_RUN --prompt "Education helps people" --max-tokens 24
+python -m loomlm.cli export PATH_TO_COMPLETED_RUN
 ```
 
 Interactive mode supports `/reset` and `/exit`. This is a CLI completion/chat loop with bounded history, not a tool agent. A pretrained base model has not learned instruction following; the tiny test model will mostly produce incoherent text.
@@ -420,7 +424,7 @@ Interactive mode supports `/reset` and `/exit`. This is a CLI completion/chat lo
 Export writes compatible Llama configuration, tokenizer and safetensors weights into the run's `export/` directory. On supported Linux/WSL CUDA hardware, install the optional inference stack using the [intermediate vLLM setup](#install-and-serve-with-vllm), then run:
 
 ```bash
-python -m ashayllm.cli chat PATH_TO_COMPLETED_RUN --backend vllm --max-tokens 24
+python -m loomlm.cli chat PATH_TO_COMPLETED_RUN --backend vllm --max-tokens 24
 ```
 
 The vLLM chat backend exports the trained weights if necessary and loads them locally. For a separate server, copy `configs/inference.yaml` to ignored `configs/inference.local.yaml`, point it at that export and use `serve-vllm`. On macOS or CPU, use the PyTorch chat backend.
@@ -457,8 +461,8 @@ From-scratch experiments use the native causal RoPE decoder with GQA, RMSNorm an
 ### Prepare your own data
 
 ```bash
-python -m ashayllm.cli convert-data documents.txt --format text --output data/raw/documents.jsonl --max-bytes 10000000 --max-documents 1000
-python -m ashayllm.cli convert-data instructions.csv --format csv --output data/raw/sft.jsonl
+python -m loomlm.cli convert-data documents.txt --format text --output data/raw/documents.jsonl --max-bytes 10000000 --max-documents 1000
+python -m loomlm.cli convert-data instructions.csv --format csv --output data/raw/sft.jsonl
 ```
 
 Text conversion treats blank-line-separated paragraphs as documents. CSV headers become JSON field names: use `text` for midtraining or `prompt,response` for SFT. JSONL conversion also exists. Conversion preserves records; training performs objective-specific validation and filtering. PDFs, images, audio and arbitrary schemas require a separate extraction/mapping step. Outputs refuse to overwrite existing files. Choose source licenses and training rights appropriate to your intended use.
@@ -466,8 +470,8 @@ Text conversion treats blank-line-separated paragraphs as documents. CSV headers
 ### Finance-focused experiment
 
 ```bash
-python -m ashayllm.cli pipeline configs/pretrain-finance.yaml
-python -m ashayllm.cli pipeline configs/pretrain-finance.yaml --run
+python -m loomlm.cli pipeline configs/pretrain-finance.yaml
+python -m loomlm.cli pipeline configs/pretrain-finance.yaml --run
 ```
 
 This recipe searches a bounded FineWeb-Edu slice using explicit finance keywords. It is a domain-filtering experiment, not a curated financial corpus. Filtering can leave too few documents; increase the approved sample limit or supply appropriate local data if that occurs.
@@ -504,10 +508,10 @@ Install the optional adapter dependencies alongside your PyTorch environment:
 ```bash
 uv pip install -e '.[pipeline,pretrained]'
 # Metadata-only preview: pins the resolved upstream revision and checks total file size.
-python -m ashayllm.cli download-model HuggingFaceTB/SmolLM2-135M --max-bytes 500000000
+python -m loomlm.cli download-model HuggingFaceTB/SmolLM2-135M --max-bytes 500000000
 # Explicitly execute only after reviewing model license, size and disk/memory requirements.
-python -m ashayllm.cli download-model HuggingFaceTB/SmolLM2-135M --max-bytes 500000000 --run
-python -m ashayllm.cli import-model PATH_TO_DOWNLOADED_MODEL --context 128
+python -m loomlm.cli download-model HuggingFaceTB/SmolLM2-135M --max-bytes 500000000 --run
+python -m loomlm.cli import-model PATH_TO_DOWNLOADED_MODEL --context 128
 ```
 
 Import registers local model weights and tokenizer as a parent run; it does not train them. Use the printed imported run directory as `PATH_TO_PARENT` in the next section. `midtrain` uses your raw text; `sft` uses your instruction/response data; DPO/RLVR use their corresponding formats. This reuses the pretrained tokenizer and weights, rather than starting from random initialization. Models supported by Transformers' causal-language-model auto classes with fast tokenizers can use the adapter; remote model code and implicit model downloads are disabled. Compatibility and memory use still depend on the selected architecture. A local tiny GPT-2 fixture tests import, SFT and export; this is not a claim that every Hub model has been validated.
@@ -525,10 +529,10 @@ These are separate experiment choices, not a mandatory sequence. Full-parameter 
 Use a completed or imported run as the parent. `stage-config` copies its architecture and tokenizer settings, avoiding manual mismatches. Write personal recipes to ignored `configs/*.local.yaml` files:
 
 ```bash
-python -m ashayllm.cli stage-config PATH_TO_PARENT --kind sft --data data/raw/sft.jsonl --output configs/sft.local.yaml --steps 40
-python -m ashayllm.cli pipeline configs/sft.local.yaml
-python -m ashayllm.cli pipeline configs/sft.local.yaml --run
-python -m ashayllm.cli chat PATH_TO_NEW_COMPLETED_RUN
+python -m loomlm.cli stage-config PATH_TO_PARENT --kind sft --data data/raw/sft.jsonl --output configs/sft.local.yaml --steps 40
+python -m loomlm.cli pipeline configs/sft.local.yaml
+python -m loomlm.cli pipeline configs/sft.local.yaml --run
+python -m loomlm.cli chat PATH_TO_NEW_COMPLETED_RUN
 ```
 
 Each stage creates a new run and optimizer; it retains the parent's weights and vocabulary. `--resume` recovers a stage using that stage's own saved optimizer and random states. Parent and teacher checkpoint hashes are recorded and checked during recovery. Parent artifacts must remain available.
@@ -590,18 +594,18 @@ Two methods are available:
 For sequence distillation, create a JSONL file with `prompt` strings:
 
 ```bash
-python -m ashayllm.cli teacher-data PATH_TO_TEACHER --prompts data/raw/prompts.jsonl --output data/raw/teacher-sft.jsonl --max-documents 32 --max-tokens 32
-python -m ashayllm.cli stage-config PATH_TO_STUDENT --kind sft --data data/raw/teacher-sft.jsonl --output configs/sequence-distill.local.yaml
-python -m ashayllm.cli pipeline configs/sequence-distill.local.yaml --run
+python -m loomlm.cli teacher-data PATH_TO_TEACHER --prompts data/raw/prompts.jsonl --output data/raw/teacher-sft.jsonl --max-documents 32 --max-tokens 32
+python -m loomlm.cli stage-config PATH_TO_STUDENT --kind sft --data data/raw/teacher-sft.jsonl --output configs/sequence-distill.local.yaml
+python -m loomlm.cli pipeline configs/sequence-distill.local.yaml --run
 ```
 
-For a new smaller native student, run `python -m ashayllm.cli init-student PATH_TO_TEACHER` first. It creates random weights and copies the teacher vocabulary; use the printed directory as `PATH_TO_STUDENT`. `--architecture FILE` accepts an architecture YAML mapping. A large teacher vocabulary can still dominate student parameter count.
+For a new smaller native student, run `python -m loomlm.cli init-student PATH_TO_TEACHER` first. It creates random weights and copies the teacher vocabulary; use the printed directory as `PATH_TO_STUDENT`. `--architecture FILE` accepts an architecture YAML mapping. A large teacher vocabulary can still dominate student parameter count.
 
 For token distillation:
 
 ```bash
-python -m ashayllm.cli stage-config PATH_TO_STUDENT --kind distill --teacher PATH_TO_TEACHER --data data/raw/sft.jsonl --output configs/distill.local.yaml
-python -m ashayllm.cli pipeline configs/distill.local.yaml --run
+python -m loomlm.cli stage-config PATH_TO_STUDENT --kind distill --teacher PATH_TO_TEACHER --data data/raw/sft.jsonl --output configs/distill.local.yaml
+python -m loomlm.cli pipeline configs/distill.local.yaml --run
 ```
 
 Configure `stage.distillation_temperature` and `stage.distillation_alpha` in the recipe. Alpha weights the soft teacher loss; the remaining weight applies to response cross entropy. A weak teacher can teach poor behavior; a short execution test does not establish distillation benefit.
@@ -615,10 +619,10 @@ Perplexity is the exponentiated mean next-token loss: lower is better on the sam
 After downloading/importing any approved baseline models separately:
 
 ```bash
-python -m ashayllm.cli compare PATH_TO_COMPLETED_RUN --baseline PATH_TO_LOCAL_GPT2 --baseline PATH_TO_LOCAL_PYTHIA --baseline PATH_TO_LOCAL_SMOLLM2 --output artifacts/comparison.json
+python -m loomlm.cli compare PATH_TO_COMPLETED_RUN --baseline PATH_TO_LOCAL_GPT2 --baseline PATH_TO_LOCAL_PYTHIA --baseline PATH_TO_LOCAL_SMOLLM2 --output artifacts/comparison.json
 ```
 
-This uses the run's saved benchmark examples for every candidate, retaining each model's own tokenizer. Baselines can be completed AshayLLM runs or local HF exports. Custom continuation scoring differs from published-suite protocols; tokenizers and context/truncation choices affect comparisons. No baseline weights are fetched by `compare`.
+This uses the run's saved benchmark examples for every candidate, retaining each model's own tokenizer. Baselines can be completed LoomLM runs or local HF exports. Custom continuation scoring differs from published-suite protocols; tokenizers and context/truncation choices affect comparisons. No baseline weights are fetched by `compare`.
 
 ### Inference and API serving
 
@@ -629,8 +633,8 @@ Use the candidate run you evaluated above. Start with the PyTorch CLI to check m
 Use the Linux/WSL `.venv` from local setup, a compatible NVIDIA GPU/driver, and a C compiler:
 
 ```bash
-python -m ashayllm.cli setup-vllm
-python -m ashayllm.cli setup-vllm --apply
+python -m loomlm.cli setup-vllm
+python -m loomlm.cli setup-vllm --apply
 python scripts/vllm_smoke.py
 ```
 
@@ -638,13 +642,13 @@ The installer targets `.venv` in the project root and pins vLLM 0.31.0 with the 
 
 vLLM is an inference engine that manages generation and batching; it does not replace the PyTorch training loop. This setup reuses the project environment.
 
-Set `ASHAYLLM_API_KEY` to a random token of at least 32 non-whitespace characters before starting even a loopback server; it is required at launch.
+Set `LOOMLM_API_KEY` to a random token of at least 32 non-whitespace characters before starting even a loopback server; it is required at launch.
 
 To serve an existing compatible Hugging Face export, set `inference.model_path` in `configs/inference.yaml` to a local directory containing `config.json`, `tokenizer.json` and safetensors or `pytorch_model.bin` weights:
 
 ```bash
-python -m ashayllm.cli serve-vllm configs/inference.yaml
-python -m ashayllm.cli serve-vllm configs/inference.yaml --run
+python -m loomlm.cli serve-vllm configs/inference.yaml
+python -m loomlm.cli serve-vllm configs/inference.yaml --run
 ```
 
 The first command validates files and prints a plan. The second starts foreground serving at `http://127.0.0.1:8000/v1`. Stop it with Ctrl+C. Downloads and remote model code are disabled. A `.pt` checkpoint alone is insufficient; use `export RUN_DIR` to create the compatible model directory. Default memory utilization is 50%, context 2048 and scheduler sequence limit 4; the API boundary separately allows 2 concurrent requests. Set `max_model_len` no higher than your trained context (128 for the local test recipe); adjust for your model, and avoid simultaneous training/serving on a small GPU.
@@ -653,14 +657,14 @@ The first command validates files and prints a plan. The second starts foregroun
 
 Serving runs on the machine where you invoke it: a prepared Linux/WSL CUDA laptop, an existing EC2 host, or another compatible vLLM host. It does not provision a machine. Keep the process running while clients use it; AWS running costs continue for the lifetime of the host.
 
-1. Export a completed run: `python -m ashayllm.cli export RUN_DIR`. Use the printed export directory as `inference.model_path`, and set `max_model_len` to the trained context or less. Install the optional vLLM environment using the [vLLM setup instructions](#install-and-serve-with-vllm).
+1. Export a completed run: `python -m loomlm.cli export RUN_DIR`. Use the printed export directory as `inference.model_path`, and set `max_model_len` to the trained context or less. Install the optional vLLM environment using the [vLLM setup instructions](#install-and-serve-with-vllm).
 2. Obtain a trusted TLS certificate for the hostname clients will use. Keep its full certificate chain and private key outside Git, restrict the private key's file permissions, and put their paths in a copy of `configs/inference-public.yaml`, named `configs/inference-public.local.yaml`. Do not disable certificate verification on clients.
-3. Set `ASHAYLLM_API_KEY` in the serving process environment to a cryptographically random token of at least 32 characters. For example, generate a token with `python -c 'import secrets; print(secrets.token_urlsafe(48))'` and load it through your secret manager or a private environment file. Do not put the token in YAML, shell command arguments, Git or shared logs. All clients holding this token share access; rotate it by changing the environment and restarting the server.
-4. Preview: `python -m ashayllm.cli serve-vllm configs/inference-public.local.yaml`. Then start: `python -m ashayllm.cli serve-vllm configs/inference-public.local.yaml --run`. The default local config binds loopback; the public example binds port 8443 with TLS. A missing token or missing TLS files prevents startup. Plans contain the secret's variable name, never its value.
+3. Set `LOOMLM_API_KEY` in the serving process environment to a cryptographically random token of at least 32 characters. For example, generate a token with `python -c 'import secrets; print(secrets.token_urlsafe(48))'` and load it through your secret manager or a private environment file. Do not put the token in YAML, shell command arguments, Git or shared logs. All clients holding this token share access; rotate it by changing the environment and restarting the server.
+4. Preview: `python -m loomlm.cli serve-vllm configs/inference-public.local.yaml`. Then start: `python -m loomlm.cli serve-vllm configs/inference-public.local.yaml --run`. The default local config binds loopback; the public example binds port 8443 with TLS. A missing token or missing TLS files prevents startup. Plans contain the secret's variable name, never its value.
 5. Allow inbound TCP 8443 only from intended client networks in your host firewall and, on EC2, its security group. For a laptop, WSL/Windows forwarding and your router or VPN must make that port reachable. The code does not open firewall rules or router ports. Prefer a private VPN for a small group.
-6. Clients send `Authorization: Bearer <token>` to `https://YOUR_HOSTNAME:8443/v1/models` or POST text requests to `/v1/completions` and `/v1/chat/completions`. For example, a completions body is `{"model":"artifacts/exports/ashayllm","prompt":"Explain gravity","max_tokens":64}`; use the model ID returned by `/v1/models`. Chat requires a suitable model chat template and instruction training; a base checkpoint can use completions.
+6. Clients send `Authorization: Bearer <token>` to `https://YOUR_HOSTNAME:8443/v1/models` or POST text requests to `/v1/completions` and `/v1/chat/completions`. For example, a completions body is `{"model":"artifacts/exports/loomlm","prompt":"Explain gravity","max_tokens":64}`; use the model ID returned by `/v1/models`. Chat requires a suitable model chat template and instruction training; a base checkpoint can use completions.
 
-The middleware in `src/ashayllm/api_security.py` authenticates every exposed HTTP request and blocks all routes except these three, including administrative routes and alternate inference paths. It enforces bounded request bodies, process-wide rate/concurrency limits, timeouts, and text-only inputs; request prompt logging and interactive API docs are disabled. TLS files and tokens stay local. Native vLLM API keys alone do not cover all routes; see the [vLLM serving security guidance](https://docs.vllm.ai/en/latest/cli/serve/).
+The middleware in `src/loomlm/api_security.py` authenticates every exposed HTTP request and blocks all routes except these three, including administrative routes and alternate inference paths. It enforces bounded request bodies, process-wide rate/concurrency limits, timeouts, and text-only inputs; request prompt logging and interactive API docs are disabled. TLS files and tokens stay local. Native vLLM API keys alone do not cover all routes; see the [vLLM serving security guidance](https://docs.vllm.ai/en/latest/cli/serve/).
 
 These controls are a secure starting point, not a guarantee of complete security. This mode supports one API process and a shared token; it does not provide individual identities, billing quotas, distributed rate limits, or protection against network-level denial of service. For public multi-user production access, place it behind a managed gateway with identity, quotas and network protection, keep the backend private, and review the deployment. No public endpoint is opened automatically.
 
@@ -680,23 +684,23 @@ Supply your own evaluation text through `processing.benchmark_files` and preserv
 
 ### Published recipes and small-scale adaptations
 
-Start with a published training pattern, then size the experiment for your hardware. These are reference recipes, not a universal best configuration or a reconstruction of unpublished proprietary frontier training. Each linked paper describes the original model; the YAML files below are deliberately small **AshayLLM adaptations**, with project-chosen learning rates and budgets.
+Start with a published training pattern, then size the experiment for your hardware. These are reference recipes, not a universal best configuration or a reconstruction of unpublished proprietary frontier training. Each linked paper describes the original model; the YAML files below are deliberately small **LoomLM adaptations**, with project-chosen learning rates and budgets.
 
-| Pattern | Published recipe / original source | What to carry into an experiment | AshayLLM example and limits |
+| Pattern | Published recipe / original source | What to carry into an experiment | LoomLM example and limits |
 | --- | --- | --- | --- |
 | Small, data-focused dense model | [SmolLM2 paper](https://arxiv.org/abs/2502.02737): 1.7B model, approximately 11T tokens, staged web/math/code data curation | Start with clean general text; evaluate, then specialize using curated domain data; finish with instruction examples | [SmolLM2-inspired](configs/recipe-smollm2-inspired.yaml): bounded FineWeb-Edu sample and small native decoder. Later `midtrain`/`sft` runs use separate recipes; this does not reproduce the original mixtures or token budget. |
 | Open, staged foundation training | [OLMo 2 paper](https://arxiv.org/abs/2501.00656), [original Ai2 post](https://allenai.org/blog/olmo2), and [official training recipes](https://github.com/allenai/OLMo-core/tree/main/src/scripts/official/OLMo2) | Broad pretraining followed by curated late training; evaluate domain gains and general capability; use SFT/preferences/verifiable rewards when suitable | [OLMo-inspired](configs/recipe-olmo-inspired.yaml): local curated corpus, then separate stages. Native architecture and cosine schedule differ from OLMo 2; its linear annealing and training infrastructure are not reproduced. |
 | Large dense frontier-scale reference | [The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783): released family includes a 405B model; report describes pretraining and post-training | Decoder with grouped-query attention, careful data quality, staged capability development and instruction/preference training | [Llama-inspired](configs/recipe-llama-inspired.yaml): small RoPE/RMSNorm/SwiGLU/GQA decoder. No distributed frontier-scale training, original tokenizer/data mixture or long-context curriculum reproduction. |
 | Efficient pretrained specialization | [LoRA paper](https://arxiv.org/abs/2106.09685) | Freeze the base and train low-rank updates rather than all weights | Generate an imported-model SFT recipe and enable [LoRA](#parameter-efficient-fine-tuning-with-lora). This is an adaptation method, not a foundation pretraining recipe. |
 
-For frontier architectures beyond dense decoders, the [DeepSeek-V3 technical report](https://arxiv.org/abs/2412.19437) documents MoE, latent attention and multi-token prediction; AshayLLM does not implement those architectures or objectives. The [DeepSeek-R1 paper](https://arxiv.org/abs/2501.12948) provides a reasoning/RL reference. AshayLLM's optional reasoning supervision, distillation and small verifier-based RLVR experiments are learning workflows, not reproductions of R1's training algorithm or capability. These references help identify future extensions without presenting unsupported options as runnable recipes.
+For frontier architectures beyond dense decoders, the [DeepSeek-V3 technical report](https://arxiv.org/abs/2412.19437) documents MoE, latent attention and multi-token prediction; LoomLM does not implement those architectures or objectives. The [DeepSeek-R1 paper](https://arxiv.org/abs/2501.12948) provides a reasoning/RL reference. LoomLM's optional reasoning supervision, distillation and small verifier-based RLVR experiments are learning workflows, not reproductions of R1's training algorithm or capability. These references help identify future extensions without presenting unsupported options as runnable recipes.
 
 **Try a recipe:** copy one to an ignored personal file, inspect its data source and limits, and validate before execution:
 
 ```bash
 cp configs/recipe-smollm2-inspired.yaml configs/my-small-model.local.yaml
-python -m ashayllm.cli pipeline configs/my-small-model.local.yaml
-python -m ashayllm.cli pipeline configs/my-small-model.local.yaml --run
+python -m loomlm.cli pipeline configs/my-small-model.local.yaml
+python -m loomlm.cli pipeline configs/my-small-model.local.yaml --run
 ```
 
 The SmolLM2 example downloads only a bounded sample when executed. The other two use `data/raw/corpus.jsonl`: provide your own JSONL records with a `text` field before execution. Validation does not launch AWS. Use [managed AWS training](#run-a-managed-native-training-stage) for an explicitly configured cloud run; these recipes themselves execute locally.
@@ -728,9 +732,9 @@ All selected values must still satisfy cross-field rules: for example, structure
 
 ```bash
 cp configs/recipe-reference.yaml configs/full-run.local.yaml
-python -m ashayllm.cli pipeline configs/full-run.local.yaml
+python -m loomlm.cli pipeline configs/full-run.local.yaml
 # After reviewing data limits and hardware requirements:
-python -m ashayllm.cli pipeline configs/full-run.local.yaml --run
+python -m loomlm.cli pipeline configs/full-run.local.yaml --run
 ```
 
 ```yaml
@@ -922,7 +926,7 @@ Custom CUDA is opt-in for the native decoder. The included example replaces the 
 3. Run the forward/gradient check before training:
 
    ```bash
-   python -m ashayllm.cli check-cuda-kernel kernels/swiglu
+   python -m loomlm.cli check-cuda-kernel kernels/swiglu
    ```
 
 4. Start with `configs/pretrain-custom-cuda.yaml`, or copy your training recipe and edit the following fields within its existing sections:
@@ -939,9 +943,9 @@ Custom CUDA is opt-in for the native decoder. The included example replaces the 
      allow_tf32: false
    ```
 
-5. Run `python -m ashayllm.cli pipeline configs/YOUR_RECIPE.yaml --run`. Startup validates FP32, FP16 and supported BF16 outputs and gradients against PyTorch before acquiring data. Source hashes are recorded and checked when resuming. Build products stay under ignored `artifacts/cuda-extensions/`.
+5. Run `python -m loomlm.cli pipeline configs/YOUR_RECIPE.yaml --run`. Startup validates FP32, FP16 and supported BF16 outputs and gradients against PyTorch before acquiring data. Source hashes are recorded and checked when resuming. Build products stay under ignored `artifacts/cuda-extensions/`.
 
-`src/ashayllm/execution.py` loads the trusted local plugin and runs checks; `model.py` selects it; `kernels/swiglu/kernel.py` provides the autograd wrapper; `swiglu.cpp` exposes bindings; and `swiglu.cu` implements the CUDA operations. Your own directory must export `swiglu(gate, up)` from `kernel.py` with autograd support. Selecting a plugin executes its local code, so use a source directory you trust. Set `custom_swiglu_path: null` to restore the built-in activation.
+`src/loomlm/execution.py` loads the trusted local plugin and runs checks; `model.py` selects it; `kernels/swiglu/kernel.py` provides the autograd wrapper; `swiglu.cpp` exposes bindings; and `swiglu.cu` implements the CUDA operations. Your own directory must export `swiglu(gate, up)` from `kernel.py` with autograd support. Selecting a plugin executes its local code, so use a source directory you trust. Set `custom_swiglu_path: null` to restore the built-in activation.
 
 Other optional execution controls are `model.attention_kernel: auto|math|flash|efficient|cudnn`, `training.compile`, `compile_backend: inductor|aot_eager|eager`, `compile_mode: default|reduce-overhead|max-autotune`, and `optimizer_kernel: default|fused|foreach`. Explicit optimized attention and fused optimizer selections require a compatible GPU. Measure throughput and memory for your workload; compilation can add startup time. Custom CUDA is currently limited to native-model SwiGLU and prepared hosts; managed `aws-train` packaging rejects it. Native FP4 kernels are a separate capability.
 
@@ -952,8 +956,8 @@ The included kernel has passed FP32, FP16 and BF16 forward/backward checks on an
 For portable software experiments:
 
 ```bash
-python -m ashayllm.cli pipeline configs/pretrain-fp4-fake.yaml
-python -m ashayllm.cli pipeline configs/pretrain-fp4-fake.yaml --run
+python -m loomlm.cli pipeline configs/pretrain-fp4-fake.yaml
+python -m loomlm.cli pipeline configs/pretrain-fp4-fake.yaml --run
 ```
 
 `model.quantization: fp4_fake` applies block-scaled E2M1-style fake quantization to compatible linear weights and activations, using straight-through gradients. It requires linear input dimensions divisible by 16. It can run on the current laptop, but **does not pack checkpoints, accelerate GEMMs or guarantee bitwise parity with NVIDIA's NVFP4 recipes**. Master weights, optimizer state and accumulation remain at the configured higher precision. Chat through PyTorch reproduces fake quantization; HF export writes full-precision master weights and records that distinction.
@@ -966,10 +970,10 @@ For the optional [EleutherAI evaluation harness](https://github.com/EleutherAI/l
 
 ```bash
 uv pip install -e '.[evaluation]'
-python -m ashayllm.cli export PATH_TO_COMPLETED_RUN
-python -m ashayllm.cli evaluate-standard PATH_TO_EXPORT --tasks hellaswag piqa arc_easy --limit 100
+python -m loomlm.cli export PATH_TO_COMPLETED_RUN
+python -m loomlm.cli evaluate-standard PATH_TO_EXPORT --tasks hellaswag piqa arc_easy --limit 100
 # Explicit execution can download benchmark datasets.
-python -m ashayllm.cli evaluate-standard PATH_TO_EXPORT --tasks hellaswag piqa arc_easy --limit 100 --run
+python -m loomlm.cli evaluate-standard PATH_TO_EXPORT --tasks hellaswag piqa arc_easy --limit 100 --run
 ```
 
 The default command only prints a plan. `--limit` caps scored examples, **not dataset download bytes**; obtain approval for large datasets before executing. The harness is an optional external integration: full suite execution and real GPT-2/Pythia/SmolLM2 comparisons have not been run in the bounded local validation. Finance selection in the built-in pipeline uses FinancialPhraseBank; choose additional harness tasks explicitly when needed.
@@ -1007,13 +1011,13 @@ There are two identities:
 | Identity | Responsibility |
 | --- | --- |
 | Your configured CLI profile | Discover images/prices/subnets, provision EC2, monitor results, manage temporary schedules and clean up |
-| `ashayllm-spot-deadline` scheduler role | Permit AWS Scheduler to terminate project-tagged instances at the deadline |
+| `loomlm-spot-deadline` scheduler role | Permit AWS Scheduler to terminate project-tagged instances at the deadline |
 
 Use an IAM administrator for one-time permission setup. Do not use root access keys or put `AdministratorAccess` on the everyday controller just to avoid configuring permissions.
 
 For an IAM user workflow:
 
-1. In AWS Console, open **IAM > Users > Create user** and create a dedicated controller user, such as `ashayllm-controller`. Console access is unnecessary for CLI-only use.
+1. In AWS Console, open **IAM > Users > Create user** and create a dedicated controller user, such as `loomlm-controller`. Console access is unnecessary for CLI-only use.
 2. Generate a baseline permission policy from the current AWS runner rather than relying on a stale copied policy. With uv installed, use the command below. It analyzes code; it does not launch EC2 or attach policies.
 3. Have the administrator review the generated policies, replace wildcard resources where feasible with your account/region/project resources, and validate them in IAM. Static analysis is a starting point: dynamically constructed service clients, paginator/waiter operations and dependent permissions need review.
 4. In **IAM > Policies > Create policy > JSON**, create the reviewed customer-managed policy or policies. Attach them to the controller user (or its group/role). Regenerate/review when AWS runner behavior changes.
@@ -1023,16 +1027,16 @@ From the repository root on Linux/WSL, replace `YOUR_ACCOUNT_ID` with your accou
 
 ```bash
 uvx iam-policy-autopilot@latest generate-policies \
-  "$PWD/src/ashayllm/aws_runner.py" \
+  "$PWD/src/loomlm/aws_runner.py" \
   --region us-east-1 --account YOUR_ACCOUNT_ID \
   --service-hints ec2 iam scheduler ssm sts --pretty
 ```
 
-See [AWS IAM Policy Autopilot](https://github.com/awslabs/iam-policy-autopilot) for supported inputs and policy review guidance. PowerShell uses `(Resolve-Path src/ashayllm/aws_runner.py).Path` for the source path and backticks for line continuation, or place the command on one line.
+See [AWS IAM Policy Autopilot](https://github.com/awslabs/iam-policy-autopilot) for supported inputs and policy review guidance. PowerShell uses `(Resolve-Path src/loomlm/aws_runner.py).Path` for the source path and backticks for line continuation, or place the command on one line.
 
-The administrator must cover EC2 discovery, Spot launch/tagging, security-group creation/deletion, console retrieval and termination, including operations used by waiters. Scheduler access covers the `ashayllm` group and its run schedules. Passing the role needs `iam:PassRole` restricted to `arn:aws:iam::YOUR_ACCOUNT_ID:role/ashayllm-spot-deadline` and `iam:PassedToService = scheduler.amazonaws.com`; see [AWS PassRole guidance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_passrole.html). First-time Spot accounts may also need the EC2 Spot service-linked role created by an administrator.
+The administrator must cover EC2 discovery, Spot launch/tagging, security-group creation/deletion, console retrieval and termination, including operations used by waiters. Scheduler access covers the `loomlm` group and its run schedules. Passing the role needs `iam:PassRole` restricted to `arn:aws:iam::YOUR_ACCOUNT_ID:role/loomlm-spot-deadline` and `iam:PassedToService = scheduler.amazonaws.com`; see [AWS PassRole guidance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_passrole.html). First-time Spot accounts may also need the EC2 Spot service-linked role created by an administrator.
 
-The runner creates the scheduler group/role if missing. Role creation requires the corresponding IAM role creation, tagging, inline-policy and read permissions. Alternatively, an administrator can pre-create `ashayllm-spot-deadline` using the trust and inline-policy definitions in `SpotRunner.prepare_deadline_role` in [aws_runner.py](src/ashayllm/aws_runner.py). Its trust permits `scheduler.amazonaws.com`, restricted to the caller account and the exact regional `schedule-group/ashayllm` ARN. Its policy permits only `ec2:TerminateInstances` on regional account instances tagged `Project=AshayLLM`. The EC2 guest receives no controller keys or instance profile in this recipe. See [Scheduler execution role setup](https://docs.aws.amazon.com/scheduler/latest/UserGuide/setting-up.html).
+The runner creates the scheduler group/role if missing. Role creation requires the corresponding IAM role creation, tagging, inline-policy and read permissions. Alternatively, an administrator can pre-create `loomlm-spot-deadline` using the trust and inline-policy definitions in `SpotRunner.prepare_deadline_role` in [aws_runner.py](src/loomlm/aws_runner.py). Its trust permits `scheduler.amazonaws.com`, restricted to the caller account and the exact regional `schedule-group/loomlm` ARN. Its policy permits only `ec2:TerminateInstances` on regional account instances tagged `Project=LoomLM`. The EC2 guest receives no controller keys or instance profile in this recipe. See [Scheduler execution role setup](https://docs.aws.amazon.com/scheduler/latest/UserGuide/setting-up.html).
 
 An existing scheduler role is reused without repairing its policy. Have the administrator verify it, particularly if switching regions: the current role name is shared but its trust/policy are region-specific.
 
@@ -1041,15 +1045,15 @@ An existing scheduler role is reused without repairing its policy. Have the admi
 If you use IAM user keys, open the user's **Security credentials > Access keys > Create access key** and choose CLI use. Enter the key pair only in your own terminal:
 
 ```bash
-aws configure --profile ashayllm
+aws configure --profile loomlm
 ```
 
-Supply the access key ID, secret access key, default region (for example `us-east-1`) and output format `json`. The CLI stores credentials under your user profile, outside this repository. They are stored as plaintext there, so protect that directory. Never paste keys into chat, YAML, scripts or Git. AWS recommends temporary credentials where available; an IAM Identity Center profile can instead be configured using `aws configure sso --profile ashayllm` and authenticated with `aws sso login --profile ashayllm`. See [AWS credential guidance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html).
+Supply the access key ID, secret access key, default region (for example `us-east-1`) and output format `json`. The CLI stores credentials under your user profile, outside this repository. They are stored as plaintext there, so protect that directory. Never paste keys into chat, YAML, scripts or Git. AWS recommends temporary credentials where available; an IAM Identity Center profile can instead be configured using `aws configure sso --profile loomlm` and authenticated with `aws sso login --profile loomlm`. See [AWS credential guidance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html).
 
 Check identity without launching compute:
 
 ```bash
-aws sts get-caller-identity --profile ashayllm
+aws sts get-caller-identity --profile loomlm
 ```
 
 Already have a differently named profile? Set `aws_test.profile` in your ignored local configuration; no new keys are required.
@@ -1072,7 +1076,7 @@ In PowerShell use `Copy-Item configs/aws-test.yaml configs/aws-test.local.yaml`.
 
 | Field | Template value | What it controls |
 | --- | --- | --- |
-| `profile`, `region` | `ashayllm`, `us-east-1` | Controller credentials and deployment region |
+| `profile`, `region` | `loomlm`, `us-east-1` | Controller credentials and deployment region |
 | `instance_type` | `g4dn.xlarge` | Requested Spot GPU machine |
 | `total_budget_usd` | `10.00` | Total reservation limit for this ledger/account/region |
 | `per_run_budget_usd` | `0.50` | Full amount reserved for every attempt |
@@ -1088,9 +1092,9 @@ In PowerShell use `Copy-Item configs/aws-test.yaml configs/aws-test.local.yaml`.
 Preview first:
 
 ```bash
-python -m ashayllm.cli aws-test configs/aws-test.local.yaml
+python -m loomlm.cli aws-test configs/aws-test.local.yaml
 # Temporary instance-type override without editing YAML:
-python -m ashayllm.cli aws-test configs/aws-test.local.yaml --instance-type g6.xlarge
+python -m loomlm.cli aws-test configs/aws-test.local.yaml --instance-type g6.xlarge
 ```
 
 This prints the selected AMI, subnet, zone, current Spot price and reservation. It uses read-only AWS requests and does not provision resources or run the local test suite. Check rates and budget before launching. Pin `ami_id` from the plan when you need the same image on subsequent runs.
@@ -1102,7 +1106,7 @@ The budget validator includes the requested duration, three extra minutes, confi
 **This command creates billable AWS resources:**
 
 ```bash
-python -m ashayllm.cli aws-test configs/aws-test.local.yaml --run
+python -m loomlm.cli aws-test configs/aws-test.local.yaml --run
 ```
 
 The runner performs this sequence automatically:
@@ -1120,12 +1124,12 @@ The guest timeout starts during bootstrap; the cloud deadline is computed before
 
 #### Recover cloud results and cleanup
 
-A run report under `artifacts/aws-runs/ASHAYLLM_RUN_ID/report.json` records the resolved image, source hash, instance ID, local preflight, console output and status. Look for **both** `test_passed: true` and `terminated: true`. Cloud tests exclude AWS controller tests because the controller is not installed on the guest. Tests may pass while cleanup is still pending.
+A run report under `artifacts/aws-runs/LOOMLM_RUN_ID/report.json` records the resolved image, source hash, instance ID, local preflight, console output and status. Look for **both** `test_passed: true` and `terminated: true`. Cloud tests exclude AWS controller tests because the controller is not installed on the guest. Tests may pass while cleanup is still pending.
 
 If the terminal was interrupted or the termination waiter timed out:
 
 ```bash
-python -m ashayllm.cli aws-reconcile ASHAYLLM_RUN_ID --path configs/aws-test.local.yaml
+python -m loomlm.cli aws-reconcile LOOMLM_RUN_ID --path configs/aws-test.local.yaml
 ```
 
 Use the run ID from the saved ledger/report/error context. Reconciliation queries the journaled instance, saves console/results, and removes its temporary schedule/security group only when already terminated. **It does not terminate a still-running instance or launch anything.** Inspect the `terminated` field; command exit alone does not prove cleanup.
@@ -1133,8 +1137,8 @@ Use the run ID from the saved ledger/report/error context. Reconciliation querie
 If needed, explicitly terminate the instance using its saved ID, then reconcile again:
 
 ```bash
-aws ec2 terminate-instances --profile ashayllm --region us-east-1 --instance-ids INSTANCE_ID
-aws ec2 describe-instances --profile ashayllm --region us-east-1 --instance-ids INSTANCE_ID
+aws ec2 terminate-instances --profile loomlm --region us-east-1 --instance-ids INSTANCE_ID
+aws ec2 describe-instances --profile loomlm --region us-east-1 --instance-ids INSTANCE_ID
 ```
 
 A successful termination request can still report `shutting-down`. Confirm `terminated` and root-volume removal in EC2. The ledger is local and run-ID recovery after an early crash is limited; it is not a distributed job service.
@@ -1151,9 +1155,9 @@ Copy `configs/aws-training.yaml` to ignored `configs/aws-training.local.yaml`. F
 Your controller also needs S3 PutObject/GetObject permissions on that prefix and IAM PassRole for the selected instance role. The EC2 role must trust `ec2.amazonaws.com`; use temporary instance-role credentials rather than placing IAM keys in the bundle. Have your IAM administrator scope permissions to the actual bucket/prefix and role. This workflow does not create the bucket or instance profile.
 
 ```bash
-python -m ashayllm.cli aws-train configs/aws-training.local.yaml
+python -m loomlm.cli aws-train configs/aws-training.local.yaml
 # Explicit provisioning, upload and cloud training:
-python -m ashayllm.cli aws-train configs/aws-training.local.yaml --run
+python -m loomlm.cli aws-train configs/aws-training.local.yaml --run
 ```
 
 Before provisioning, the runner performs local tests/lint and an actual bounded two-step CPU data/training preflight. The controller therefore needs PyTorch and pipeline dependencies for `aws-train`, unlike the lightweight `aws-test` controller. It allowlists source/configuration and declared inputs, checks bundle size, reserves budget, uploads encrypted source, launches one Spot instance and attaches the supplied profile. It packages native pretraining and native parent/teacher stages; the managed bundler currently rejects external pretrained-model paths.
@@ -1172,19 +1176,19 @@ This workflow packages a local compatible export and launches one on-demand NVID
 6. Preview and deploy:
 
    ```bash
-   python -m ashayllm.cli aws-serve configs/aws-serving.local.yaml
-   python -m ashayllm.cli aws-serve configs/aws-serving.local.yaml --run
+   python -m loomlm.cli aws-serve configs/aws-serving.local.yaml
+   python -m loomlm.cli aws-serve configs/aws-serving.local.yaml --run
    ```
 
    Preview checks the local bundle without making service API calls. Deployment runs local tests/lint, uploads source/model with server-side encryption, launches on-demand EC2 with IMDSv2 and encrypted EBS, and records a deployment ID under ignored `artifacts/aws-serving/`. The guest fetches secret material into a protected directory and runs the API as a dedicated user. A successful launch response means provisioned, not API-ready; check the service logs and make an authenticated TLS request before sharing it.
 7. Manage the recorded deployment:
 
    ```bash
-   python -m ashayllm.cli aws-serve configs/aws-serving.local.yaml --action status --deployment HOSTING_ID
-   python -m ashayllm.cli aws-serve configs/aws-serving.local.yaml --action logs --deployment HOSTING_ID --run
-   python -m ashayllm.cli aws-serve configs/aws-serving.local.yaml --action stop --deployment HOSTING_ID --run
-   python -m ashayllm.cli aws-serve configs/aws-serving.local.yaml --action start --deployment HOSTING_ID --run
-   python -m ashayllm.cli aws-serve configs/aws-serving.local.yaml --action delete --deployment HOSTING_ID --run
+   python -m loomlm.cli aws-serve configs/aws-serving.local.yaml --action status --deployment HOSTING_ID
+   python -m loomlm.cli aws-serve configs/aws-serving.local.yaml --action logs --deployment HOSTING_ID --run
+   python -m loomlm.cli aws-serve configs/aws-serving.local.yaml --action stop --deployment HOSTING_ID --run
+   python -m loomlm.cli aws-serve configs/aws-serving.local.yaml --action start --deployment HOSTING_ID --run
+   python -m loomlm.cli aws-serve configs/aws-serving.local.yaml --action delete --deployment HOSTING_ID --run
    ```
 
    Logs returns an SSM command ID; retrieve its output with `aws ssm get-command-invocation --command-id COMMAND_ID --instance-id INSTANCE_ID --profile YOUR_PROFILE --region YOUR_REGION`. Lifecycle commands report the requested transition; poll `status` to confirm it. Stop retains EBS and interrupts the API; start boots the installed service again. Delete terminates the host and deletes its configured root volume. Source objects, secrets and other pre-existing infrastructure remain.
@@ -1299,9 +1303,9 @@ flowchart TD
 | `aws-test [CONFIG] [--instance-type TYPE] [--run]` | Preview or execute a budget-reserved Spot test |
 | `aws-reconcile RUN_ID [--path CONFIG]` | Recover cloud results and finish cleanup after termination |
 
-Use `python -m ashayllm.cli COMMAND --help` for flags.
+Use `python -m loomlm.cli COMMAND --help` for flags.
 
-- `src/ashayllm/`: CLI, corpus processing, tokenizer/model training, benchmarks, inference, hardware policy and AWS runner.
+- `src/loomlm/`: CLI, corpus processing, tokenizer/model training, benchmarks, inference, hardware policy and AWS runner.
 - `configs/`: versioned portable defaults; `*.local.yaml` stays local.
 - `tests/`: unit tests and small integration checks.
 - `scripts/`: optional setup and diagnostic helpers.

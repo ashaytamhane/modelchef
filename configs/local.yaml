@@ -1,5 +1,5 @@
 project:
-  name: ashayllm
+  name: loomlm
   seed: 42
 runtime:
   accelerator: auto  # cpu/cuda/rocm/mps/auto

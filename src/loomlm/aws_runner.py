@@ -96,7 +96,7 @@ def package_source(root):
     """Allowlist code files only: never package .aws, .env, keys, or Git history."""
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-        files = ['src/ashayllm/' + name for name in
+        files = ['src/loomlm/' + name for name in
                  ['__init__.py', 'cli.py', 'hardware.py', 'inference.py', 'smoke.py']]
         files += ['tests/' + name for name in ['test_cli.py', 'test_hardware.py', 'test_inference.py']]
         for filename in files:
@@ -107,7 +107,7 @@ def package_source(root):
 
 def user_data(root, settings):
     if settings.get('pipeline_config'):
-        from ashayllm.aws_training import training_user_data
+        from loomlm.aws_training import training_user_data
         return training_user_data(settings)
     payload = base64.b64encode(package_source(root)).decode()
     minutes = int(settings["max_runtime_minutes"])
@@ -115,23 +115,23 @@ def user_data(root, settings):
     # Arm a guest timer before extraction or installation; poweroff terminates the instance.
     script = f'''#!/bin/bash
 set -euo pipefail
-exec > >(tee -a /var/log/ashayllm-test.log /dev/console) 2>&1
-systemd-run --unit=ashayllm-deadline --on-active={minutes}m /sbin/shutdown -h now
-finish() {{ code=$?; echo "ASHAYLLM_RESULT=$code"; /sbin/shutdown -h now; }}
+exec > >(tee -a /var/log/loomlm-test.log /dev/console) 2>&1
+systemd-run --unit=loomlm-deadline --on-active={minutes}m /sbin/shutdown -h now
+finish() {{ code=$?; echo "LOOMLM_RESULT=$code"; /sbin/shutdown -h now; }}
 trap finish EXIT
-mkdir -p /opt/ashayllm-test
-cd /opt/ashayllm-test
+mkdir -p /opt/loomlm-test
+cd /opt/loomlm-test
 echo {shlex.quote(payload)} | base64 -d | tar -xz
 # The DLAMI activation script references optional unset environment variables.
 set +u
 source /opt/pytorch/bin/activate
 set -u
 python -m pip install 'pyyaml>=6,<7' 'pytest>=8,<10'
-export PYTHONPATH=/opt/ashayllm-test/src
-{inference}python -m ashayllm.cli doctor
+export PYTHONPATH=/opt/loomlm-test/src
+{inference}python -m loomlm.cli doctor
 python -m pytest -q
-python -m ashayllm.cli smoke
-python -m ashayllm.cli smoke --precision fp16
+python -m loomlm.cli smoke
+python -m loomlm.cli smoke --precision fp16
 '''
     if len(script.encode()) > 16384:
         raise ValueError("Allowlisted source exceeds EC2 user-data limit")
@@ -173,14 +173,14 @@ class SpotRunner:
         report["terminated"] = instance["State"]["Name"] == "terminated"
         report["console_output"] = self.ec2.get_console_output(
             InstanceId=instance_id, Latest=True).get("Output", "")
-        report["test_passed"] = "ASHAYLLM_RESULT=0" in report["console_output"]
+        report["test_passed"] = "LOOMLM_RESULT=0" in report["console_output"]
         ledger.record(run_id, "terminated" if report["terminated"] else "cleanup-pending", report)
         out = self.root / "artifacts/aws-runs" / run_id
         out.mkdir(parents=True, exist_ok=True)
         (out / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         if report["terminated"]:
             try:
-                self.scheduler.delete_schedule(Name=run_id, GroupName="ashayllm")
+                self.scheduler.delete_schedule(Name=run_id, GroupName="loomlm")
             except self.scheduler.exceptions.ResourceNotFoundException:
                 pass
             groups = self.ec2.describe_security_groups(Filters=[
@@ -241,10 +241,10 @@ class SpotRunner:
     def prepare_deadline_role(self):
         region = self.settings["region"]
         try:
-            self.scheduler.get_schedule_group(Name="ashayllm")
+            self.scheduler.get_schedule_group(Name="loomlm")
         except self.scheduler.exceptions.ResourceNotFoundException:
-            self.scheduler.create_schedule_group(Name="ashayllm")
-        name = "ashayllm-spot-deadline"
+            self.scheduler.create_schedule_group(Name="loomlm")
+        name = "loomlm-spot-deadline"
         try:
             return self.iam.get_role(RoleName=name)["Role"]["Arn"]
         except self.iam.exceptions.NoSuchEntityException:
@@ -253,14 +253,14 @@ class SpotRunner:
                 "Action": "sts:AssumeRole", "Condition": {
                     "StringEquals": {"aws:SourceAccount": self.account},
                     "ArnEquals": {"aws:SourceArn":
-                        f"arn:aws:scheduler:{region}:{self.account}:schedule-group/ashayllm"}}}]}
+                        f"arn:aws:scheduler:{region}:{self.account}:schedule-group/loomlm"}}}]}
             role = self.iam.create_role(RoleName=name, AssumeRolePolicyDocument=json.dumps(trust),
-                                       Tags=[{"Key": "Project", "Value": "AshayLLM"}])["Role"]
+                                       Tags=[{"Key": "Project", "Value": "LoomLM"}])["Role"]
             policy = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
                 "Action": "ec2:TerminateInstances",
                 "Resource": f"arn:aws:ec2:{region}:{self.account}:instance/*",
-                "Condition": {"StringEquals": {"ec2:ResourceTag/Project": "AshayLLM"}}}]}
-            self.iam.put_role_policy(RoleName=name, PolicyName="terminate-ashayllm-only",
+                "Condition": {"StringEquals": {"ec2:ResourceTag/Project": "LoomLM"}}}]}
+            self.iam.put_role_policy(RoleName=name, PolicyName="terminate-loomlm-only",
                                      PolicyDocument=json.dumps(policy))
             self.iam.get_waiter("role_exists").wait(RoleName=name,
                                                   WaiterConfig={"Delay": 2, "MaxAttempts": 10})
@@ -272,11 +272,11 @@ class SpotRunner:
         preflight = local_preflight(self.root)
         bundle = None
         if s.get('pipeline_config'):
-            from ashayllm.aws_training import build_bundle, training_preflight
+            from loomlm.aws_training import build_bundle, training_preflight
             bundle = build_bundle(self.root, s)
             preflight['training'] = training_preflight(self.root, s)
         plan = self.plan()
-        run_id = "ashayllm-" + uuid.uuid4().hex
+        run_id = "loomlm-" + uuid.uuid4().hex
         ledger = Ledger(self.root / s["ledger_path"])
         scope = f"{self.account}:{s['region']}"
         ledger.reserve(run_id, scope, budget_reservation(s), s["total_budget_usd"])
@@ -290,7 +290,7 @@ class SpotRunner:
         terminated = False
         try:
             if bundle is not None:
-                prefix = s.get('artifact_prefix', 'ashayllm-training').strip('/') + '/' + run_id
+                prefix = s.get('artifact_prefix', 'loomlm-training').strip('/') + '/' + run_id
                 self.s3.put_object(Bucket=s['artifact_bucket'], Key=prefix + '/source.tar.gz',
                     Body=bundle, ServerSideEncryption='AES256')
                 report.update(artifact_bucket=s['artifact_bucket'], artifact_prefix=prefix,
@@ -299,7 +299,7 @@ class SpotRunner:
                                                          '_bundle_sha256': report['bundle_sha256']})
             role = self.prepare_deadline_role()
             security_group = self.ec2.create_security_group(
-                GroupName=run_id, Description="AshayLLM outbound-only test",
+                GroupName=run_id, Description="LoomLM outbound-only test",
                 VpcId=plan["vpc_id"])["GroupId"]
             deadline = datetime.now(UTC) + timedelta(minutes=s["max_runtime_minutes"])
             profile = ({'IamInstanceProfile': {'Name': s['instance_profile_name']}}
@@ -319,12 +319,12 @@ class SpotRunner:
                     "VolumeSize": s["storage_gb"], "VolumeType": "gp3", "Encrypted": True,
                     "DeleteOnTermination": True}}],
                 TagSpecifications=[{"ResourceType": kind, "Tags": [
-                    {"Key": "Project", "Value": "AshayLLM"},
+                    {"Key": "Project", "Value": "LoomLM"},
                     {"Key": "RunId", "Value": run_id}]} for kind in ["instance", "volume"]])
             instance_id = launch["Instances"][0]["InstanceId"]
             report["instance_id"] = instance_id
             ledger.record(run_id, "launched", report)
-            self.scheduler.create_schedule(Name=run_id, GroupName="ashayllm",
+            self.scheduler.create_schedule(Name=run_id, GroupName="loomlm",
                 ScheduleExpression="at(" + deadline.strftime("%Y-%m-%dT%H:%M:%S") + ")",
                 ScheduleExpressionTimezone="UTC", FlexibleTimeWindow={"Mode": "OFF"},
                 ActionAfterCompletion="DELETE", Target={
@@ -372,14 +372,14 @@ class SpotRunner:
             if instance_id:
                 console = self.ec2.get_console_output(InstanceId=instance_id, Latest=True)
                 report["console_output"] = console.get("Output", "")
-                report["test_passed"] = "ASHAYLLM_RESULT=0" in report["console_output"]
+                report["test_passed"] = "LOOMLM_RESULT=0" in report["console_output"]
             ledger.record(run_id, "terminated" if terminated else "no-instance", report)
             out = self.root / "artifacts/aws-runs" / run_id
             out.mkdir(parents=True, exist_ok=True)
             (out / "report.json").write_text(json.dumps(report, indent=2, default=str))
             if terminated and schedule_created:
                 try:
-                    self.scheduler.delete_schedule(Name=run_id, GroupName="ashayllm")
+                    self.scheduler.delete_schedule(Name=run_id, GroupName="loomlm")
                 except self.scheduler.exceptions.ResourceNotFoundException:
                     pass
             if security_group and (terminated or not instance_id):

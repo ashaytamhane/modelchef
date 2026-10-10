@@ -7,9 +7,9 @@ torch = pytest.importorskip('torch')
 pytest.importorskip('pydantic')
 pytest.importorskip('tokenizers')
 
-from ashayllm.objectives import dpo_loss, group_advantages, grpo_loss, verified_reward
-from ashayllm.pipeline import run_pipeline
-from ashayllm.run_config import RunConfig
+from loomlm.objectives import dpo_loss, group_advantages, grpo_loss, verified_reward
+from loomlm.pipeline import run_pipeline
+from loomlm.run_config import RunConfig
 
 
 @pytest.fixture
@@ -79,7 +79,7 @@ def test_posttraining_checkpoint_recovery_and_parent_is_unchanged(parent, tmp_pa
 
 
 def test_fp4_simulation_preserves_gradient_and_zero_values():
-    from ashayllm.quantization import fake_nvfp4
+    from loomlm.quantization import fake_nvfp4
     value = torch.linspace(-6, 6, 32).reshape(2, 16).requires_grad_()
     quantized = fake_nvfp4(value)
     assert torch.isfinite(quantized).all()
@@ -92,8 +92,8 @@ def test_fp4_simulation_preserves_gradient_and_zero_values():
 def test_local_pretrained_import_and_sft(parent, tmp_path, lora):
     transformers = pytest.importorskip('transformers')
     pytest.importorskip('safetensors')
-    from ashayllm.chat import export_model
-    from ashayllm.pretrained import register_model, stage_config
+    from loomlm.chat import export_model
+    from loomlm.pretrained import register_model, stage_config
     config, base = parent
     hf = tmp_path / 'hf-model'
     tokenizer = transformers.PreTrainedTokenizerFast(tokenizer_file=str(
@@ -118,7 +118,7 @@ def test_local_pretrained_import_and_sft(parent, tmp_path, lora):
         pytest.importorskip('peft')
         config.model.peft.method = 'lora'
         config.model.peft.target_modules = ['c_attn']
-        from ashayllm.engines import create_model, load_parent
+        from loomlm.engines import create_model, load_parent
         initial = create_model(config.model, len(tokenizer))
         parent_weights = torch.load(Path(imported) / 'checkpoints/step-000000.pt', weights_only=True)['model']
         parent_config = RunConfig.model_validate_json((Path(imported) / 'config.json').read_text())
@@ -150,7 +150,7 @@ def test_local_pretrained_import_and_sft(parent, tmp_path, lora):
 
 
 def test_reasoning_is_optional_and_student_can_share_teacher_vocabulary(parent, tmp_path):
-    from ashayllm.pretrained import initialize_student
+    from loomlm.pretrained import initialize_student
     _, base = parent
     student = initialize_student(base['run_dir'], tmp_path, architecture={
         'layers': 1, 'hidden_size': 16, 'attention_heads': 2, 'kv_heads': 1,
@@ -188,7 +188,7 @@ def test_math_attention_and_compile_preserve_checkpoint_names(parent, tmp_path):
 
 
 def test_custom_cuda_probe_preserves_rng_and_rejects_cpu(monkeypatch):
-    from ashayllm import execution
+    from loomlm import execution
     before = torch.get_rng_state().clone()
     def probe(path):
         torch.manual_seed(42)
