@@ -5,7 +5,7 @@ name: tinystories-scratch
 output_dir: artifacts/training
 explain: detailed
 data:
-  provider: hf_rows
+  provider: hf_parquet
   dataset: roneneldan/TinyStories
   subset: default
   split: train

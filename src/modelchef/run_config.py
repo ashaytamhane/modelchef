@@ -9,7 +9,7 @@ class Section(BaseModel):
 
 
 class Data(Section):
-    provider: Literal["hf_rows", "local_jsonl"] = "hf_rows"
+    provider: Literal["hf_rows", "hf_parquet", "local_jsonl"] = "hf_rows"
     dataset: str = "HuggingFaceFW/fineweb-edu"
     subset: str = "sample-10BT"
     split: str = "train"

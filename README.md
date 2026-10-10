@@ -906,7 +906,7 @@ multimodal pipeline tags.
 
 ### Data: audit the experiment inputs
 
-Choose sampling and licenses deliberately. The current built-in acquisition paths are bounded viewer rows and local JSONL; additional corpora require compatible viewer settings or external extraction to local data. Keyword filtering is a simple domain proxy, not a semantic classifier. Near-deduplication compares word shingles and is intended for small samples, not distributed corpus processing.
+Choose sampling and licenses deliberately. The built-in acquisition paths are bounded viewer rows (`hf_rows`), cached bulk Parquet shards (`hf_parquet`), and local JSONL. TinyStories uses bulk shards to avoid repeated 100-row requests; see the [download and laptop setup guide](docs/SCRATCH_TRAINING.md#update-an-existing-laptop-recipe). Additional corpora require compatible source settings or external extraction to local data. Keyword filtering is a simple domain proxy, not a semantic classifier. Near-deduplication compares word shingles and is intended for small samples, not distributed corpus processing.
 
 Supply your own evaluation text through `processing.benchmark_files` and preserve run snapshots. Automatic decontamination covers only the selected benchmark sample, and regex PII filtering is incomplete. For larger experiments, assess these limitations before treating a saved manifest as evidence of data quality. A manifest identifies bytes; it does not certify the corpus.
 
@@ -998,7 +998,7 @@ name: full-reference  # OPTIONAL: Used as the run-directory prefix; each executi
 output_dir: artifacts/training  # OPTIONAL: defaults are supplied when omitted.
 explain: detailed  # OPTIONAL: detailed | brief; event logs are retained in either mode.
 data:  # OPTIONAL: defaults are supplied when omitted.
-  provider: hf_rows  # OPTIONAL: hf_rows | local_jsonl; structured stages require local_jsonl.
+  provider: hf_rows  # OPTIONAL: hf_rows | hf_parquet | local_jsonl; structured stages require local_jsonl.
   dataset: HuggingFaceFW/fineweb-edu  # OPTIONAL: Viewer dataset ID; no full Parquet corpus download.
   subset: sample-10BT  # OPTIONAL: Dataset configuration name, not a random sampling strategy.
   split: train  # OPTIONAL: defaults are supplied when omitted.

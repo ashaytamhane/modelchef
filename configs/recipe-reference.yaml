@@ -3,7 +3,7 @@ name: full-reference  # OPTIONAL: Used as the run-directory prefix; each executi
 output_dir: artifacts/training  # OPTIONAL: defaults are supplied when omitted.
 explain: detailed  # OPTIONAL: detailed | brief; event logs are retained in either mode.
 data:  # OPTIONAL: defaults are supplied when omitted.
-  provider: hf_rows  # OPTIONAL: hf_rows | local_jsonl; structured stages require local_jsonl.
+  provider: hf_rows  # OPTIONAL: hf_rows | hf_parquet | local_jsonl; structured stages require local_jsonl.
   dataset: HuggingFaceFW/fineweb-edu  # OPTIONAL: Viewer dataset ID; no full Parquet corpus download.
   subset: sample-10BT  # OPTIONAL: Dataset configuration name, not a random sampling strategy.
   split: train  # OPTIONAL: defaults are supplied when omitted.

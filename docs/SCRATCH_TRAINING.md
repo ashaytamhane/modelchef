@@ -19,7 +19,7 @@ ordered slice, not the full corpus or a representative random sample.
 | [workflow-tinystories.yaml](../configs/workflow-tinystories.yaml) | Runs that stage and exports its trained weights |
 | [aws-tinystories.yaml](../configs/aws-tinystories.yaml) | G6 Spot resources with $8 per-run / $10 overall reservations and six-hour deadline |
 
-The training recipe requests up to 100,000 stories within a 1 GB response cap, and packs
+The training recipe requests up to 100,000 stories within a 1 GB compressed-file and metadata cap, and packs
 up to 64M tokens. All weights and the 8,192-token BPE vocabulary start from scratch.
 It requests 12,000 optimizer updates, microbatch 8 and accumulation 4: up to
 `12000 × 8 × 4 × 512 = 196,608,000` token positions processed. This repeats sampled
@@ -50,16 +50,36 @@ recipes or manifests. Authentication does not guarantee faster viewer responses 
 remove rate limits. See [Hub rate limits](https://huggingface.co/docs/hub/rate-limits);
 Hub file-download limits should not be assumed to equal viewer endpoint limits.
 
-Viewer pages are paced two seconds apart. HTTP 429 and selected transient server errors
-retry the same page up to six times with backoff and `Retry-After` handling. Messages
-explain the actual cooldown. A server cooldown over five minutes stops instead of
-retrying early. If acquisition ultimately fails, rerun after the cooldown: incomplete
-acquisition is not yet resumable, so it starts again; `--resume` is for training
-checkpoints. Only a complete acquisition is cached for subsequent reuse.
+The TinyStories recipe uses `data.provider: hf_parquet`: one metadata request resolves
+bulk files, then ModelChef downloads complete Parquet shards and selects the requested
+rows locally. This avoids thousands of 100-row viewer requests. The cap includes full
+compressed shards, including rows outside the selected sample. Selected text is still
+processed in memory; this is not a corpus-scale streaming training path.
 
-Credentials on your laptop are not forwarded to AWS guests. Public TinyStories can be
-acquired anonymously there with the same retry/pacing logic; private datasets require
-separately managed guest credentials or a prepared local input bundle.
+Completed shard files are cached and verified by SHA256 before reuse. If acquisition
+fails, rerun the command: completed shards can be reused, but an interrupted shard is
+downloaded again. Byte-range resume is not implemented. `--resume` refers to training
+checkpoints. Metadata requests retry HTTP 429 and selected transient server errors;
+a failed file transfer reports its error and requires a rerun.
+
+The `hf_rows` provider remains available for small samples. Its pages are paced two
+seconds apart and use bounded retries with `Retry-After` handling. Authentication does
+not remove service rate limits. Laptop credentials are not forwarded to AWS guests;
+public TinyStories can be acquired anonymously there.
+
+### Update an existing laptop recipe
+
+```bash
+git pull --ff-only
+uv pip install -e '.[dev,pipeline]'
+```
+
+The pipeline extra installs PyArrow for bulk reading. If you previously copied the
+TinyStories stage into a personal recipe, change its `data.provider` to `hf_parquet`.
+Keep your laptop batch size and accumulation settings. Rerun your existing workflow
+with `cook YOUR_WORKFLOW.yaml --run`; a workflow references its stage recipe, so edit
+the file it actually references. The included TinyStories stage already uses bulk
+acquisition. Do not expect partial 100-row downloads from older runs to be reusable.
 
 ### Configure cloud execution
 

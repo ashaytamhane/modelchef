@@ -132,6 +132,9 @@ def acquire(config, root, explain):
                     break
                 index += 1
         origin = {"provider": "local_jsonl", "path": str(path), "paths": [str(p) for p in paths]}
+    elif c.provider == 'hf_parquet':
+        from modelchef.bulk_data import acquire_parquet
+        records, downloaded, origin = acquire_parquet(c, cache, explain)
     else:
         headers = viewer_headers()
         explain('Using authenticated dataset viewer requests.' if 'Authorization' in headers

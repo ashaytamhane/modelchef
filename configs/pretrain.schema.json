@@ -207,6 +207,7 @@
           "default": "hf_rows",
           "enum": [
             "hf_rows",
+            "hf_parquet",
             "local_jsonl"
           ],
           "title": "Provider",
