@@ -62,7 +62,7 @@ model:  # OPTIONAL: defaults are supplied when omitted.
   pretrained_config_sha256: null  # OPTIONAL: Filled by import-model; validates the original HF config on loading.
   quantization: none  # OPTIONAL: none | fp4_fake | nvfp4; nvfp4 requires native dense Blackwell integration.
   attention_kernel: auto  # OPTIONAL: auto | math | flash | efficient | cudnn; explicit optimized choices require a compatible GPU.
-  custom_swiglu_path: null  # OPTIONAL: Native CUDA only: set kernels/swiglu after correctness checks; rejected by managed aws-train.
+  custom_swiglu_path: null  # OPTIONAL: Native CUDA only; managed AWS bundles declared sources and installs the matching compiler.
   type: decoder_rope  # OPTIONAL: decoder_rope | decoder_moe; applies to native architecture.
   num_experts: 4  # OPTIONAL: MoE expert count.
   experts_per_token: 2  # OPTIONAL: MoE top-k; <= num_experts.

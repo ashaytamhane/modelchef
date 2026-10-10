@@ -11,9 +11,12 @@ import yaml
 from modelchef.run_config import RunConfig
 
 
-def build_bundle(root, settings):
+def build_bundle(root, settings, *, raw_override=None, linked_stage=False):
     root = Path(root).resolve()
-    raw = yaml.safe_load((root / settings['pipeline_config']).read_text())
+    raw = raw_override if raw_override is not None else yaml.safe_load((root / settings['pipeline_config']).read_text())
+    if 'stages' in raw:
+        from modelchef.aws_workflow import build_workflow_bundle
+        return build_workflow_bundle(root, settings)
     if 'modality' in raw:
         return build_multimodal_bundle(root, settings, raw)
     config = RunConfig.model_validate(raw)
@@ -107,6 +110,8 @@ def build_bundle(root, settings):
         recipe['data'].update(local_path='inputs/data.jsonl', local_paths=[], offset=0)
     for field in ['parent_run', 'teacher_run']:
         if not getattr(config.stage, field):
+            continue
+        if linked_stage and getattr(config.stage, field) == 'resolved-at-execution':
             continue
         parent = (root / getattr(config.stage, field)).resolve()
         saved = RunConfig.model_validate_json((parent / 'config.json').read_text())
@@ -250,6 +255,9 @@ def training_preflight(root, settings):
     import sys
     root = Path(root)
     raw = yaml.safe_load((root / settings['pipeline_config']).read_text())
+    if 'stages' in raw:
+        from modelchef.aws_workflow import workflow_preflight
+        return workflow_preflight(root, settings)
     if 'modality' in raw:
         return multimodal_preflight(root, raw)
     config = RunConfig.model_validate(raw)

@@ -6,6 +6,14 @@ from pathlib import Path
 from modelchef.progress import report as progress
 
 
+def require_run_folder(folder):
+    folder = Path(folder).resolve()
+    if not (folder / 'config.json').is_file():
+        raise ValueError('Provide the completed run directory printed by pipeline or cook. '
+                         'RUN_DIR is a placeholder to replace, not a directory name.')
+    return folder
+
+
 def checkpoint_for(folder):
     report = json.loads((folder / "report.json").read_text())
     if report["status"] != "completed":
@@ -14,6 +22,7 @@ def checkpoint_for(folder):
 
 
 def export_model(folder):
+    folder = require_run_folder(folder)
     progress('Loading the completed checkpoint for inference-compatible export.')
     import torch
     from safetensors.torch import save_file
@@ -121,6 +130,7 @@ def export_model(folder):
 
 
 def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, top_k=30):
+    folder = require_run_folder(folder)
     import torch
 
     from modelchef.engines import create_model, load_tokenizer

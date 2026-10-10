@@ -1,0 +1,6 @@
+schema_version: 1
+name: tinystories-menu
+stages:
+- name: stories
+  recipe: configs/pretrain-tinystories.yaml
+export: true

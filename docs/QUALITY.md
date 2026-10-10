@@ -15,6 +15,11 @@ a hardware simulation, a measured speedup and a capable trained model are differ
 
 ## Reproduce the software checks
 
+The [execution tutorial](EXECUTION.md) describes `pipeline`/`cook` target selection.
+AWS workflow tests run relocated bundles through real local training and export, and
+simulate cloud dispatch/guest launch. This verifies recipe links and packaging; it
+does not establish live Spot availability, cloud bootstrap or termination reliability.
+
 Use a Python 3.11 or 3.12 environment with the documented platform dependencies:
 
 ```bash

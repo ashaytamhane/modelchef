@@ -21,10 +21,54 @@ def _settings(path, section):
     return config[section]
 
 
+def confirm_cloud(plan, settings, yes=False):
+    """Show bounded spending assumptions before any billable training launch."""
+    print(f"AWS launch review: {plan['instance_type']}; current Spot price "
+          f"${plan['spot_price_usd_hour']}/hour; deadline {settings['max_runtime_minutes']} minutes; "
+          f"budget reservation ${plan['reserved_usd']}; overall configured limit "
+          f"${settings['total_budget_usd']}. Reservation is a conservative allowance, "
+          "not an exact bill. Retained storage can incur additional charges.", file=sys.stderr, flush=True)
+    if yes:
+        return
+    print('Launch this billable AWS job? Type yes to continue: ', end='', file=sys.stderr, flush=True)
+    try:
+        answer = input()
+    except EOFError:
+        raise ValueError('AWS launch requires confirmation; preview first, then use --yes for automation') from None
+    if answer.strip().lower() != 'yes':
+        raise ValueError('AWS launch cancelled; no instance launched')
+
+
+def cloud_job(path, aws_config, execute=False, command='pipeline', yes=False):
+    """Use the same recipe with the established budgeted Spot lifecycle."""
+    from modelchef.aws_runner import SpotRunner
+    from modelchef.aws_training import build_bundle
+
+    raw = yaml.safe_load(path.read_text(encoding='utf-8'))
+    if not isinstance(raw, dict):
+        raise TypeError('Recipe must contain a mapping')
+    if command == 'pipeline':
+        from modelchef.run_config import RunConfig
+        RunConfig.model_validate(raw).validate_execution()
+    elif 'stages' not in raw:
+        raise ValueError('cook requires a workflow recipe with stages')
+    settings = {**_settings(aws_config, 'aws_test'), 'pipeline_config': str(path.resolve())}
+    # Validate and bound all declared inputs before AWS client construction or requests.
+    build_bundle(Path.cwd(), settings)
+    runner = SpotRunner(settings, Path.cwd())
+    plan = runner.plan()
+    if execute:
+        confirm_cloud(plan, settings, yes)
+    result = runner.run() if execute else plan
+    result.pop('user_data', None)
+    return {**result, 'target': 'aws', 'command': command, 'recipe': str(path),
+            'lifecycle': 'One temporary Spot instance; termination after completion or deadline.'}
+
+
 def _main() -> None:
     parser = argparse.ArgumentParser(prog="modelchef")
     command = parser.add_subparsers(dest="command", required=True)
-    workflow_parser = command.add_parser('cook', help='Plan/run a sequence of local stage recipes')
+    workflow_parser = command.add_parser('cook', help='Plan/run ordered stage recipes locally or on AWS')
     workflow_parser.add_argument('path', type=Path)
     workflow_parser.add_argument('--run', action='store_true')
     multimodal = command.add_parser('multimodal', help='Plan/train local vision-language or speech recipes')
@@ -78,10 +122,20 @@ def _main() -> None:
     aws_reconcile = command.add_parser("aws-reconcile", help="Recover reports/cleanup for a saved run")
     aws_reconcile.add_argument("run_id")
     aws_reconcile.add_argument("--path", type=Path, default=Path("configs/aws-test.yaml"))
-    pipeline = command.add_parser("pipeline", help="Plan/run bounded end-to-end pretraining")
+    pipeline = command.add_parser("pipeline", help="Plan/run a training stage locally or on AWS")
     pipeline.add_argument("path", type=Path)
     pipeline.add_argument("--run", action="store_true")
     pipeline.add_argument("--resume", type=Path)
+    for targeted in [pipeline, workflow_parser]:
+        targeted.add_argument('--target', choices=['local', 'aws'], default='local',
+                              help='Execution location; local is the default')
+        targeted.add_argument('--aws-config', type=Path,
+                              help='AWS resource/budget configuration required for --target aws')
+        targeted.add_argument('--yes', action='store_true',
+                              help='Explicitly approve AWS launch without an interactive prompt; budgets still apply')
+    for cloud_parser in [aws_test, aws_train]:
+        cloud_parser.add_argument('--yes', action='store_true',
+                                  help='Approve the reviewed AWS launch without an interactive prompt')
     chat_parser = command.add_parser("chat", help="Interact with a trained run locally")
     chat_parser.add_argument("run_dir", type=Path)
     chat_parser.add_argument("--backend", choices=["torch", "vllm"], default="torch")
@@ -144,7 +198,18 @@ def _main() -> None:
                                help="Hide CLI progress on stderr")
     args = parser.parse_args()
     with operation(args.command, args.quiet):
-        if args.command == 'publish-model':
+        if args.command in {'pipeline', 'cook'} and args.target == 'aws':
+            if not args.aws_config:
+                raise ValueError('--target aws requires --aws-config')
+            if getattr(args, 'resume', None):
+                raise ValueError('Cloud --resume is not supported; recover the saved results and resume locally')
+            result = cloud_job(args.path, args.aws_config, args.run, args.command, args.yes)
+            print(json.dumps(result, indent=2, default=str))
+            if args.run and not result.get('test_passed'):
+                parser.exit(1, 'Cloud job success was not confirmed; inspect the run report and termination status.\n')
+        elif args.command in {'pipeline', 'cook'} and args.aws_config:
+            raise ValueError('--aws-config requires --target aws')
+        elif args.command == 'publish-model':
             from modelchef.publishing import PublishConfig, publish
             config = PublishConfig.model_validate(yaml.safe_load(args.path.read_text(encoding='utf-8')))
             print(json.dumps(publish(config, Path.cwd(), args.run), indent=2))
@@ -241,6 +306,7 @@ def _main() -> None:
             if args.command == "aws-reconcile":
                 result = runner.reconcile(args.run_id)
             elif args.run:
+                confirm_cloud(runner.plan(), settings, args.yes)
                 result = runner.run()
             else:
                 result = runner.plan()

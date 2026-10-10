@@ -1,3 +1,6 @@
+# Resource settings for pipeline/cook --target aws --aws-config THIS_FILE.
+# The CLI recipe overrides pipeline_config; aws-train uses pipeline_config directly.
+# One deadline/budget reservation covers every stage in a cook workflow.
 aws_test:
   profile: modelchef
   region: us-east-1

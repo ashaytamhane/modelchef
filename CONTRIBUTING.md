@@ -4,6 +4,11 @@ Start with the [offline starter recipe](configs/pretrain-demo.yaml). It exercise
 
 ## Prepare the environment
 
+See [execution targets](docs/EXECUTION.md) for local and AWS command routing. Cloud tests
+must use mocked clients; validate complete workflow bundles and CPU stage links locally
+before a separately authorized live launch. An AWS target must retain budget/deadline
+and result/termination safeguards across the whole job.
+
 From the repository root, follow the README's hardware setup, then install the checks and any feature extras you need:
 
 ```bash

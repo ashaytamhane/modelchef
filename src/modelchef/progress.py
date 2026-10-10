@@ -7,13 +7,13 @@ from contextlib import contextmanager
 _state = threading.local()
 
 _activities = {
-    'cook': 'Planning or executing the configured sequence of local training-stage recipes.',
+    'cook': 'Reading the ordered training-stage recipes and selected execution target.',
     'doctor': 'Checking Python, PyTorch, hardware availability and GPU arithmetic.',
     'setup': 'Inspecting hardware and preparing the requested PyTorch installation.',
     'setup-vllm': 'Checking inference prerequisites and preparing the vLLM installation.',
     'serve-vllm': 'Validating serving configuration; execution starts the API server.',
     'smoke': 'Testing device selection, forward/backward training and checkpoint recovery.',
-    'pipeline': 'Validating the recipe; execution prepares data, trains and evaluates the model.',
+    'pipeline': 'Reading the training recipe and selected execution target before preparing data or compute.',
     'multimodal': 'Checking bounded image/audio inputs and local model files; execution fine-tunes and exports.',
     'predict-media': 'Loading the local multimodal model and processor to generate text from media.',
     'publish-model': 'Checking export files and model card; only --run creates a Hugging Face commit.',
