@@ -1,13 +1,16 @@
 # AshayLLM
 
-AshayLLM is a Python/PyTorch project for building a small language model from random initialization, with one codebase for local development and AWS GPU experiments. Develop and debug cheaply on your own computer; explicitly launch a budget-controlled AWS Spot test when you need to check a cloud GPU.
+AshayLLM is a configurable language-model experimentation workbench: acquire bounded corpus samples, prepare data, train a custom tokenizer, pretrain a decoder-only transformer, evaluate it and interact with its trained checkpoints. One Python/PyTorch codebase supports local development and cloud execution, with a separate budget-controlled EC2 Spot smoke-test runner.
 
-**Current scope:** hardware-aware installation plans, runtime/precision selection, synthetic training and checkpoint checks, optional vLLM inference setup, and an automated EC2 Spot smoke-test runner. Corpus processing, tokenizer training, the actual transformer, pretraining, midtraining, SFT, DPO/RLVR and model benchmarks are planned. There is no `train` command yet.
+**Implemented:** hardware-aware setup, bounded data acquisition, filtering/deduplication/PII heuristics, sampled benchmark decontamination, custom byte-level BPE, from-scratch pretraining, checkpoint recovery, domain-selected sample benchmarks, Hugging Face-compatible export, CLI inference through PyTorch or optional vLLM, and EC2 Spot smoke tests. **Next stages:** midtraining, SFT, optional DPO/RLVR, full benchmark comparisons and automated AWS pretraining orchestration. These later stages are not executable features yet.
 
 ## Choose where to run
 
 | Goal | Where execution happens | What to run | AWS required? |
 | --- | --- | --- | --- |
+| Pretrain on a bounded corpus sample | Current machine (local or an existing EC2 host) | `pipeline CONFIG --run` | No automatic provisioning |
+| Talk to a trained checkpoint | Current machine | `chat RUN_DIR` | No |
+| Export trained weights | Current machine | `export RUN_DIR` | No |
 | Check your laptop/desktop GPU | Current machine | `doctor`, `resolve-runtime`, `smoke` | No |
 | Develop code and run unit tests | Current machine | `python -m pytest -q`, `python -m ruff check .` | No |
 | Install PyTorch or vLLM | Current machine | `setup --apply`, `setup-vllm --apply` | No |
@@ -71,7 +74,7 @@ git clone https://github.com/ashaytamhane/ashayllm.git
 cd ashayllm
 uv venv --python 3.12
 source .venv/bin/activate
-uv pip install -e '.[dev]'
+uv pip install -e '.[dev,pipeline]'
 python -m ashayllm.cli --help
 python -m pytest -q
 python -m ruff check .
@@ -94,6 +97,61 @@ python -m pytest -q
 ```
 
 If PowerShell activation is unavailable, invoke `.\.venv-aws\Scripts\python.exe` directly instead of `python`. Local GPU inference through the automatic vLLM setup requires Linux/WSL NVIDIA CUDA.
+
+### macOS: Apple Silicon or Intel MacBook
+
+macOS runs the same Python codebase directly; WSL and CUDA are not required. The hardware detector selects PyTorch's MPS backend when available, otherwise CPU. Automatic precision selection uses FP32 on both. macOS setup paths exist, but a complete run has **not yet been validated on a real MacBook**.
+
+Install Git and `uv` using your preferred method, then run these commands in Terminal. The repository requires GitHub authentication:
+
+```bash
+git clone https://github.com/ashaytamhane/ashayllm.git
+cd ashayllm
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -e '.[dev,pipeline]'
+# Preview the macOS PyTorch installation before applying it.
+python -m ashayllm.cli setup
+python -m ashayllm.cli setup --apply
+python -m ashayllm.cli doctor
+python -m ashayllm.cli smoke --precision fp32
+python -m pytest -q
+```
+
+Check `doctor` for `backend: mps` and `mps_available: true` to confirm GPU availability. An Apple Silicon Mac can use MPS when its OS and PyTorch build support it; Intel Macs can use CPU and may expose MPS on supported GPUs. If an operation fails on MPS, verify the CPU path explicitly:
+
+```bash
+python -m ashayllm.cli smoke --accelerator cpu --precision fp32
+```
+
+To preview and then execute a bounded pretraining run on the Mac itself:
+
+```bash
+python -m ashayllm.cli pipeline configs/pretrain-local.yaml
+# This downloads the configured small corpus/benchmark samples and trains locally.
+python -m ashayllm.cli pipeline configs/pretrain-local.yaml --run
+```
+
+The recipe's `training.accelerator: auto` selects the available backend. To force CPU training, copy the recipe and set `training.accelerator: cpu` and `training.precision: fp32`. Reduce model dimensions, context length or microbatch size if memory is insufficient; hardware detection does not automatically resize the model.
+
+After training, replace `PATH_TO_COMPLETED_RUN` with the run directory printed by the pipeline:
+
+```bash
+python -m ashayllm.cli chat PATH_TO_COMPLETED_RUN --backend torch
+```
+
+The CLI supports `/reset` and `/exit`. A short pretraining test produces a base model with limited text quality, not an instruction-tuned assistant. Use the PyTorch backend on macOS: the project's automatic vLLM installation targets Linux/WSL with NVIDIA CUDA. A Mac can also act as an AWS controller after installing `.[aws]` and following the AWS sections below.
+
+### Hardware support and validation
+
+| Environment | Training / PyTorch CLI inference | Automatic precision | Validation status |
+| --- | --- | --- | --- |
+| NVIDIA CUDA on Linux/WSL | CUDA | BF16 when reported supported; otherwise FP32 | Local CUDA pretraining and checkpoint/inference checks exercised |
+| macOS with available MPS | Apple GPU through MPS | FP32 | Detection/setup implemented; real MacBook validation pending |
+| CPU, including Intel Macs | CPU | FP32 | Small CPU pipeline and checkpoint tests exercised; not validated on macOS hardware |
+| Compatible AMD GPU on Linux | ROCm | BF16 when reported supported; otherwise FP32 | Detection/setup implemented; real-device validation pending |
+
+The automatic vLLM installer supports Linux/WSL NVIDIA CUDA only. Backend detection establishes availability, not compatibility of every operation or a guarantee that the configured model fits in memory.
 
 ## 2. Select and verify local hardware
 
@@ -331,22 +389,120 @@ A successful termination request can still report `shutting-down`. Confirm `term
 | vLLM export missing | Provide local config/tokenizer/weights; a checkpoint alone cannot be served |
 | Termination timeout | Check EC2 state; use reconciliation after termination and retain the AWS deadline |
 
-## Use cases and next stages
+## Training tutorial: choose your scenario
 
-**Today: laptop development.** Install the base development environment, preview/install the appropriate PyTorch build, run unit tests and synthetic smoke checks without AWS. Use CPU FP32 when a GPU is unavailable.
+### First local end-to-end run
 
-**Today: cloud readiness check.** Keep a lightweight local controller, preview a small G-series Spot machine, then use `aws-test --run` to validate the same core code on a cloud GPU with a declared budget and cleanup safeguards.
+Complete local setup and PyTorch installation above, then install pipeline dependencies in the same environment:
 
-**Today: offline inference plumbing.** On Linux CUDA, install optional vLLM and serve an existing supported local model export. This does not produce a trained AshayLLM model.
+```bash
+uv pip install -e '.[dev,pipeline]'
+python -m ashayllm.cli doctor
+# Validate every recipe section; this command performs no download or training.
+python -m ashayllm.cli pipeline configs/pretrain-local.yaml
+# Download the bounded samples and execute on the current machine.
+python -m ashayllm.cli pipeline configs/pretrain-local.yaml --run
+```
 
-**Planned: foundation-model training.** Acquire approved public corpora using SmolLM2/OLMo recipes as references, build versioned manifests, quality/deduplication/PII/decontamination stages, train BPE and a decoder-only transformer from random initialization, then add midtraining, SFT and optional DPO/RLVR. Evaluate against GPT-2, Pythia, SmolLM2 and standard suites. FineWeb-Edu, DCLM, Stack-Edu, FineMath, Cosmopedia, Dolma and public reference corpora are candidate inputs, not automatic downloads.
+The default recipe requests at most 256 FineWeb-Edu documents, caps corpus responses at 16 MB and benchmark downloads at 2 MB, and caps packed data at 200,000 tokens. It creates an approximately 18.6M-parameter decoder and runs 40 optimizer steps. This is a pipeline test, not enough training for useful conversation. Dataset access uses the public Hugging Face viewer; no pretrained model weights are downloaded.
 
-**Planned: inexpensive data preflight.** Use deterministic samples identified by manifest/version and seed, with document/byte/token limits; test format, filtering, tokenization and a tiny training step locally before a separately approved cloud job. Sampling does not replace full-corpus quality/decontamination checks. `max_sample_documents` and model targets in the current YAML are planning fields, not implemented download/training controls.
+The pipeline explains each stage on screen: configuration/hardware, acquisition, benchmark selection, cleaning and document splits, BPE training, token packing, model construction, optimization, held-out evaluation and generation. `explain: brief` reduces console detail; the event log remains saved.
+
+Each invocation creates its own directory under `artifacts/training/`. Inspect `report.json`, `processing.json`, source/benchmark manifests, `metrics.jsonl`, `environment.json`, tokenizer and checkpoints there. Data snapshots are cached under `data/cache/`. All run outputs and data caches stay excluded from Git.
+
+### Understand and customize the recipe
+
+Copy a provided YAML recipe before editing it. The strict schema rejects unsupported fields and incompatible settings; `configs/pretrain.schema.json` describes the full structure. Run `pipeline YOUR_CONFIG` to validate before executing.
+
+| Section | Controls |
+| --- | --- |
+| Run settings | Name, output directory, detailed/brief explanations |
+| `data` | Source, subset, split, offset, document/byte/token caps, domain and keyword filter |
+| `processing` | Unicode/HTML handling, quality limits, exact/near deduplication, PII policy, benchmark n-grams and document split fractions |
+| `tokenizer` | Byte-level BPE vocabulary, minimum frequency, special tokens, BOS/EOS insertion |
+| `model` | Layers, width, attention/KV heads, intermediate width, context, RoPE, RMSNorm, dropout, tied embeddings and gradient checkpointing |
+| `training` | Device, precision, seed, determinism, optimizer steps, microbatch, accumulation, AdamW, schedule, clipping, checkpoints and runtime cap |
+| `evaluation` | Benchmark selection/sample/download cap, loss batches and generation controls |
+
+Currently the executable architecture is a causal RoPE decoder with GQA, RMSNorm and SwiGLU; the tokenizer algorithm is byte-level BPE. Other architecture or tokenizer names are rejected. The runtime limit is checked between training steps, not a deadline for the entire acquisition/evaluation workflow. Hardware detection does not automatically choose a model size that fits memory.
+
+### Finance-focused experiment
+
+```bash
+python -m ashayllm.cli pipeline configs/pretrain-finance.yaml
+python -m ashayllm.cli pipeline configs/pretrain-finance.yaml --run
+```
+
+This recipe searches a bounded FineWeb-Edu slice using explicit finance keywords. It is a domain-filtering experiment, not a curated financial corpus. Filtering can leave too few documents; increase the approved sample limit or supply appropriate local data if that occurs.
+
+Automatic evaluation maps `general` to a small HellaSwag sample and `finance` to FinancialPhraseBank sentiment examples. Other domains require an explicit benchmark override or `benchmark: none`. Respect source licenses: [FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu), [HellaSwag](https://huggingface.co/datasets/Rowan/hellaswag), and [FinancialPhraseBank](https://huggingface.co/datasets/takala/financial_phrasebank), whose license includes noncommercial and share-alike restrictions.
+
+Scores use this project's custom zero-shot continuation-scoring protocol, not official lm-evaluation-harness scores. A handful of examples tests evaluation wiring; it cannot establish model quality. Only the evaluated sample is automatically included in benchmark decontamination.
+
+### Train on your own local documents
+
+Place JSONL data under ignored `data/raw/`, with one object per line containing a `text` field. Copy the local recipe and change:
+
+```yaml
+data:
+  provider: local_jsonl
+  local_path: data/raw/documents.jsonl
+  text_field: text
+  domain: general
+  max_documents: 256
+  max_download_bytes: 16000000
+  max_tokens: 200000
+evaluation:
+  benchmark: none
+```
+
+Edit these sections in the copied complete recipe; keep the other settings. `benchmark: none` avoids benchmark network access. Install dependencies beforehand for an offline run. Supply enough distinct documents for filtering and all three splits, and enough tokens to form context blocks. Tokenizer merges are learned only from the training split.
+
+Regex PII removal and lexical deduplication are limited heuristics. Preserve the cached raw snapshot and its SHA256 for replay: the viewer API is mutable, and the manifest does not pin an upstream Git revision. Initial slices are bounded samples, not representative random samples of the full corpus.
+
+### Recover an interrupted training run
+
+Use the original configuration and a saved checkpoint path:
+
+```bash
+python -m ashayllm.cli pipeline configs/pretrain-local.yaml --run --resume PATH_TO_CHECKPOINT
+```
+
+Resume restores model, optimizer, scaler, sampler and random states and checks configuration/data/tokenizer fingerprints. The configuration must match exactly, and the original data snapshot must remain available. It continues toward the original step target; changing the target or dataset is a new experiment, not checkpoint recovery. CPU tests verify uninterrupted versus resumed weights agree; exact behavior across different hardware/software is not guaranteed.
+
+### Interact with or export the trained model
+
+Replace `PATH_TO_COMPLETED_RUN` with the directory printed after successful training:
+
+```bash
+python -m ashayllm.cli chat PATH_TO_COMPLETED_RUN --backend torch
+python -m ashayllm.cli chat PATH_TO_COMPLETED_RUN --prompt "Education helps people" --max-tokens 24
+python -m ashayllm.cli export PATH_TO_COMPLETED_RUN
+```
+
+Interactive mode supports `/reset` and `/exit`. This is a CLI completion/chat loop with bounded history, not a tool agent. A pretrained base model has not learned instruction following; the tiny test model will mostly produce incoherent text.
+
+Export writes compatible Llama configuration, tokenizer and safetensors weights into the run's `export/` directory. On supported Linux/WSL CUDA hardware, install the optional inference stack using section 3, then run:
+
+```bash
+python -m ashayllm.cli chat PATH_TO_COMPLETED_RUN --backend vllm --max-tokens 24
+```
+
+The vLLM chat backend exports the trained weights if necessary and loads them locally. For a separate server, copy `configs/inference.yaml` to ignored `configs/inference.local.yaml`, point it at that export and use `serve-vllm`. On macOS or CPU, use the PyTorch chat backend.
+
+### AWS experiments and subsequent stages
+
+Use the AWS tutorial above for a budget-controlled GPU readiness test. `aws-test --run` currently runs synthetic smoke checks, not this complete training recipe. On an already provisioned EC2 machine, install the same package and run `pipeline CONFIG --run` there; that command itself does not provision or terminate EC2. Automated Spot deployment of the full pipeline remains a subsequent implementation step.
+
+The next model stages are continued pretraining/midtraining on domain data, supervised fine-tuning on prompt/response examples, and optional DPO with preference pairs or RLVR with verifiable rewards. These require their own objectives, data formats, tests and evaluation; they are not enabled by the current pretraining command. Broader corpora and comparisons against GPT-2, Pythia and SmolLM2 will follow the bounded local validation workflow.
 
 ## CLI reference and repository layout
 
 | Command | Purpose |
 | --- | --- |
+| `pipeline CONFIG [--run] [--resume CHECKPOINT]` | Strict recipe validation or narrated local pretraining |
+| `chat RUN_DIR [--backend torch\|vllm]` | CLI inference from a completed training run |
+| `export RUN_DIR` | Export trained model/tokenizer for HF-compatible inference |
 | `doctor` | Inspect current hardware and PyTorch/CUDA |
 | `setup [--apply]` | Plan/install hardware-aware PyTorch packages |
 | `check-config CONFIG` | Validate required top-level project/runtime sections; not full schema validation |
@@ -359,7 +515,7 @@ A successful termination request can still report `shutting-down`. Confirm `term
 
 Use `python -m ashayllm.cli COMMAND --help` for flags.
 
-- `src/ashayllm/`: CLI, hardware policy, smoke checks, inference and AWS runner.
+- `src/ashayllm/`: CLI, corpus processing, tokenizer/model training, benchmarks, inference, hardware policy and AWS runner.
 - `configs/`: versioned portable defaults; `*.local.yaml` stays local.
 - `tests/`: unit tests and small integration checks.
 - `scripts/`: optional setup and diagnostic helpers.

@@ -61,8 +61,38 @@ def main() -> None:
     aws_reconcile = command.add_parser("aws-reconcile", help="Recover reports/cleanup for a saved run")
     aws_reconcile.add_argument("run_id")
     aws_reconcile.add_argument("--path", type=Path, default=Path("configs/aws-test.yaml"))
+    pipeline = command.add_parser("pipeline", help="Plan/run bounded end-to-end pretraining")
+    pipeline.add_argument("path", type=Path)
+    pipeline.add_argument("--run", action="store_true")
+    pipeline.add_argument("--resume", type=Path)
+    chat_parser = command.add_parser("chat", help="Interact with a trained run locally")
+    chat_parser.add_argument("run_dir", type=Path)
+    chat_parser.add_argument("--backend", choices=["torch", "vllm"], default="torch")
+    chat_parser.add_argument("--prompt")
+    chat_parser.add_argument("--max-tokens", type=int, default=32)
+    chat_parser.add_argument("--temperature", type=float, default=0.8)
+    chat_parser.add_argument("--top-k", type=int, default=30)
+    export_parser = command.add_parser("export", help="Export a trained run for HF/vLLM")
+    export_parser.add_argument("run_dir", type=Path)
     args = parser.parse_args()
-    if args.command in {"aws-test", "aws-reconcile"}:
+    if args.command == "chat":
+        from ashayllm.chat import chat
+        chat(args.run_dir, args.backend, args.prompt, args.max_tokens, args.temperature, args.top_k)
+    elif args.command == "export":
+        from ashayllm.chat import export_model
+        print(export_model(args.run_dir))
+    elif args.command == "pipeline":
+        from ashayllm.run_config import RunConfig
+        with args.path.open(encoding="utf-8") as stream:
+            config = RunConfig.model_validate(yaml.safe_load(stream))
+        if args.run:
+            from ashayllm.pipeline import run_pipeline
+            run_pipeline(config, Path.cwd(), args.resume)
+        else:
+            print("Validated plan only: no dataset download, training or AWS launch. "
+                  "Add --run to execute on this machine.")
+            print(json.dumps(config.model_dump(mode="json"), indent=2))
+    elif args.command in {"aws-test", "aws-reconcile"}:
         from ashayllm.aws_runner import SpotRunner
         with args.path.open(encoding="utf-8") as stream:
             settings = yaml.safe_load(stream)["aws_test"]

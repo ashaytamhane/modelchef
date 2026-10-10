@@ -93,7 +93,9 @@ def package_source(root):
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         for folder in ["src/ashayllm", "tests"]:
             for path in sorted((root / folder).glob("*.py")):
-                if path.name in {"aws_runner.py", "test_aws_runner.py"}:
+                if path.name in {"aws_runner.py", "test_aws_runner.py", "pipeline.py",
+                                 "model.py", "run_config.py", "corpus.py", "benchmarks.py", "chat.py",
+                                 "test_pipeline.py"}:
                     continue
                 archive.add(path, arcname=str(path.relative_to(root)), recursive=False)
     return buffer.getvalue()

@@ -1,0 +1,630 @@
+{
+  "$defs": {
+    "Architecture": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "decoder_rope",
+          "default": "decoder_rope",
+          "title": "Type",
+          "type": "string"
+        },
+        "layers": {
+          "default": 6,
+          "maximum": 48,
+          "minimum": 1,
+          "title": "Layers",
+          "type": "integer"
+        },
+        "hidden_size": {
+          "default": 512,
+          "exclusiveMinimum": 0,
+          "title": "Hidden Size",
+          "type": "integer"
+        },
+        "attention_heads": {
+          "default": 8,
+          "exclusiveMinimum": 0,
+          "title": "Attention Heads",
+          "type": "integer"
+        },
+        "kv_heads": {
+          "default": 2,
+          "exclusiveMinimum": 0,
+          "title": "Kv Heads",
+          "type": "integer"
+        },
+        "intermediate_size": {
+          "default": 1360,
+          "exclusiveMinimum": 0,
+          "title": "Intermediate Size",
+          "type": "integer"
+        },
+        "context_length": {
+          "default": 128,
+          "minimum": 8,
+          "title": "Context Length",
+          "type": "integer"
+        },
+        "norm": {
+          "const": "rmsnorm",
+          "default": "rmsnorm",
+          "title": "Norm",
+          "type": "string"
+        },
+        "norm_eps": {
+          "default": 1e-05,
+          "exclusiveMinimum": 0,
+          "title": "Norm Eps",
+          "type": "number"
+        },
+        "activation": {
+          "const": "swiglu",
+          "default": "swiglu",
+          "title": "Activation",
+          "type": "string"
+        },
+        "rope_theta": {
+          "default": 10000,
+          "exclusiveMinimum": 0,
+          "title": "Rope Theta",
+          "type": "number"
+        },
+        "attention_dropout": {
+          "default": 0,
+          "exclusiveMaximum": 1,
+          "minimum": 0,
+          "title": "Attention Dropout",
+          "type": "number"
+        },
+        "residual_dropout": {
+          "default": 0,
+          "exclusiveMaximum": 1,
+          "minimum": 0,
+          "title": "Residual Dropout",
+          "type": "number"
+        },
+        "bias": {
+          "default": false,
+          "title": "Bias",
+          "type": "boolean"
+        },
+        "tie_embeddings": {
+          "default": true,
+          "title": "Tie Embeddings",
+          "type": "boolean"
+        },
+        "init_std": {
+          "default": 0.02,
+          "exclusiveMinimum": 0,
+          "title": "Init Std",
+          "type": "number"
+        },
+        "gradient_checkpointing": {
+          "default": false,
+          "title": "Gradient Checkpointing",
+          "type": "boolean"
+        }
+      },
+      "title": "Architecture",
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "default": "hf_rows",
+          "enum": [
+            "hf_rows",
+            "local_jsonl"
+          ],
+          "title": "Provider",
+          "type": "string"
+        },
+        "dataset": {
+          "default": "HuggingFaceFW/fineweb-edu",
+          "title": "Dataset",
+          "type": "string"
+        },
+        "subset": {
+          "default": "sample-10BT",
+          "title": "Subset",
+          "type": "string"
+        },
+        "split": {
+          "default": "train",
+          "title": "Split",
+          "type": "string"
+        },
+        "text_field": {
+          "default": "text",
+          "title": "Text Field",
+          "type": "string"
+        },
+        "local_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Path"
+        },
+        "offset": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "max_documents": {
+          "default": 256,
+          "maximum": 10000,
+          "minimum": 3,
+          "title": "Max Documents",
+          "type": "integer"
+        },
+        "page_size": {
+          "default": 50,
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Page Size",
+          "type": "integer"
+        },
+        "max_download_bytes": {
+          "default": 16000000,
+          "exclusiveMinimum": 0,
+          "title": "Max Download Bytes",
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "default": 30,
+          "exclusiveMinimum": 0,
+          "maximum": 120,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "max_tokens": {
+          "default": 200000,
+          "exclusiveMinimum": 0,
+          "title": "Max Tokens",
+          "type": "integer"
+        },
+        "domain": {
+          "default": "general",
+          "title": "Domain",
+          "type": "string"
+        },
+        "domain_keywords": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Domain Keywords",
+          "type": "array"
+        }
+      },
+      "title": "Data",
+      "type": "object"
+    },
+    "Evaluation": {
+      "additionalProperties": false,
+      "properties": {
+        "benchmark": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "none",
+            "hellaswag",
+            "financial_phrasebank"
+          ],
+          "title": "Benchmark",
+          "type": "string"
+        },
+        "benchmark_examples": {
+          "default": 8,
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Benchmark Examples",
+          "type": "integer"
+        },
+        "benchmark_max_download_bytes": {
+          "default": 2000000,
+          "exclusiveMinimum": 0,
+          "title": "Benchmark Max Download Bytes",
+          "type": "integer"
+        },
+        "batches": {
+          "default": 4,
+          "exclusiveMinimum": 0,
+          "title": "Batches",
+          "type": "integer"
+        },
+        "prompt": {
+          "default": "Education helps people",
+          "title": "Prompt",
+          "type": "string"
+        },
+        "generate_tokens": {
+          "default": 24,
+          "minimum": 1,
+          "title": "Generate Tokens",
+          "type": "integer"
+        },
+        "temperature": {
+          "default": 0.8,
+          "exclusiveMinimum": 0,
+          "title": "Temperature",
+          "type": "number"
+        },
+        "top_k": {
+          "default": 30,
+          "minimum": 0,
+          "title": "Top K",
+          "type": "integer"
+        }
+      },
+      "title": "Evaluation",
+      "type": "object"
+    },
+    "Processing": {
+      "additionalProperties": false,
+      "properties": {
+        "unicode_normalization": {
+          "default": "NFKC",
+          "enum": [
+            "NFC",
+            "NFKC"
+          ],
+          "title": "Unicode Normalization",
+          "type": "string"
+        },
+        "strip_html": {
+          "default": true,
+          "title": "Strip Html",
+          "type": "boolean"
+        },
+        "min_chars": {
+          "default": 200,
+          "exclusiveMinimum": 0,
+          "title": "Min Chars",
+          "type": "integer"
+        },
+        "max_chars": {
+          "default": 20000,
+          "exclusiveMinimum": 0,
+          "title": "Max Chars",
+          "type": "integer"
+        },
+        "min_alnum_fraction": {
+          "default": 0.5,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Min Alnum Fraction",
+          "type": "number"
+        },
+        "max_repeated_line_fraction": {
+          "default": 0.4,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Max Repeated Line Fraction",
+          "type": "number"
+        },
+        "exact_dedup": {
+          "default": true,
+          "title": "Exact Dedup",
+          "type": "boolean"
+        },
+        "near_dedup": {
+          "default": true,
+          "title": "Near Dedup",
+          "type": "boolean"
+        },
+        "near_dedup_jaccard": {
+          "default": 0.9,
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Near Dedup Jaccard",
+          "type": "number"
+        },
+        "dedup_ngram_words": {
+          "default": 5,
+          "exclusiveMinimum": 0,
+          "title": "Dedup Ngram Words",
+          "type": "integer"
+        },
+        "pii": {
+          "default": "redact",
+          "enum": [
+            "redact",
+            "drop",
+            "off"
+          ],
+          "title": "Pii",
+          "type": "string"
+        },
+        "benchmark_files": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Benchmark Files",
+          "type": "array"
+        },
+        "decontamination_ngram_words": {
+          "default": 13,
+          "exclusiveMinimum": 0,
+          "title": "Decontamination Ngram Words",
+          "type": "integer"
+        },
+        "validation_fraction": {
+          "default": 0.1,
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "Validation Fraction",
+          "type": "number"
+        },
+        "test_fraction": {
+          "default": 0.1,
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "Test Fraction",
+          "type": "number"
+        }
+      },
+      "title": "Processing",
+      "type": "object"
+    },
+    "Tokenization": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "const": "byte_bpe",
+          "default": "byte_bpe",
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "vocab_size": {
+          "default": 4096,
+          "maximum": 65536,
+          "minimum": 260,
+          "title": "Vocab Size",
+          "type": "integer"
+        },
+        "min_frequency": {
+          "default": 2,
+          "exclusiveMinimum": 0,
+          "title": "Min Frequency",
+          "type": "integer"
+        },
+        "special_tokens": {
+          "default": [
+            "<pad>",
+            "<unk>",
+            "<bos>",
+            "<eos>"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "title": "Special Tokens",
+          "type": "array"
+        },
+        "add_bos": {
+          "default": false,
+          "title": "Add Bos",
+          "type": "boolean"
+        },
+        "append_eos": {
+          "default": true,
+          "title": "Append Eos",
+          "type": "boolean"
+        }
+      },
+      "title": "Tokenization",
+      "type": "object"
+    },
+    "Training": {
+      "additionalProperties": false,
+      "properties": {
+        "accelerator": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "cpu",
+            "cuda",
+            "rocm",
+            "mps"
+          ],
+          "title": "Accelerator",
+          "type": "string"
+        },
+        "precision": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "fp32",
+            "bf16",
+            "fp16"
+          ],
+          "title": "Precision",
+          "type": "string"
+        },
+        "seed": {
+          "default": 42,
+          "minimum": 0,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "deterministic": {
+          "default": true,
+          "title": "Deterministic",
+          "type": "boolean"
+        },
+        "steps": {
+          "default": 40,
+          "exclusiveMinimum": 0,
+          "title": "Steps",
+          "type": "integer"
+        },
+        "micro_batch_size": {
+          "default": 2,
+          "exclusiveMinimum": 0,
+          "title": "Micro Batch Size",
+          "type": "integer"
+        },
+        "gradient_accumulation": {
+          "default": 2,
+          "exclusiveMinimum": 0,
+          "title": "Gradient Accumulation",
+          "type": "integer"
+        },
+        "optimizer": {
+          "const": "adamw",
+          "default": "adamw",
+          "title": "Optimizer",
+          "type": "string"
+        },
+        "learning_rate": {
+          "default": 0.0005,
+          "exclusiveMinimum": 0,
+          "title": "Learning Rate",
+          "type": "number"
+        },
+        "min_learning_rate_ratio": {
+          "default": 0.1,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Min Learning Rate Ratio",
+          "type": "number"
+        },
+        "betas": {
+          "default": [
+            0.9,
+            0.95
+          ],
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Betas",
+          "type": "array"
+        },
+        "weight_decay": {
+          "default": 0.1,
+          "minimum": 0,
+          "title": "Weight Decay",
+          "type": "number"
+        },
+        "optimizer_eps": {
+          "default": 1e-08,
+          "exclusiveMinimum": 0,
+          "title": "Optimizer Eps",
+          "type": "number"
+        },
+        "schedule": {
+          "default": "cosine",
+          "enum": [
+            "cosine",
+            "constant"
+          ],
+          "title": "Schedule",
+          "type": "string"
+        },
+        "warmup_steps": {
+          "default": 4,
+          "minimum": 0,
+          "title": "Warmup Steps",
+          "type": "integer"
+        },
+        "gradient_clip_norm": {
+          "default": 1,
+          "exclusiveMinimum": 0,
+          "title": "Gradient Clip Norm",
+          "type": "number"
+        },
+        "checkpoint_every": {
+          "default": 20,
+          "exclusiveMinimum": 0,
+          "title": "Checkpoint Every",
+          "type": "integer"
+        },
+        "evaluate_every": {
+          "default": 10,
+          "exclusiveMinimum": 0,
+          "title": "Evaluate Every",
+          "type": "integer"
+        },
+        "log_every": {
+          "default": 5,
+          "exclusiveMinimum": 0,
+          "title": "Log Every",
+          "type": "integer"
+        },
+        "max_runtime_seconds": {
+          "default": 600,
+          "exclusiveMinimum": 0,
+          "title": "Max Runtime Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "Training",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "name": {
+      "default": "first-local",
+      "pattern": "^[a-zA-Z0-9_-]+$",
+      "title": "Name",
+      "type": "string"
+    },
+    "output_dir": {
+      "default": "artifacts/training",
+      "title": "Output Dir",
+      "type": "string"
+    },
+    "explain": {
+      "default": "detailed",
+      "enum": [
+        "detailed",
+        "brief"
+      ],
+      "title": "Explain",
+      "type": "string"
+    },
+    "data": {
+      "$ref": "#/$defs/Data"
+    },
+    "processing": {
+      "$ref": "#/$defs/Processing"
+    },
+    "tokenizer": {
+      "$ref": "#/$defs/Tokenization"
+    },
+    "model": {
+      "$ref": "#/$defs/Architecture"
+    },
+    "training": {
+      "$ref": "#/$defs/Training"
+    },
+    "evaluation": {
+      "$ref": "#/$defs/Evaluation"
+    }
+  },
+  "title": "RunConfig",
+  "type": "object"
+}
