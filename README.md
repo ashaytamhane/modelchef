@@ -26,6 +26,10 @@ python -m ashayllm.cli smoke
 
 `setup` previews the PyTorch installation; `--apply` installs it. Review the preview for your hardware. If prerequisites are missing, see [local setup](#local-setup). Package installation requires internet access.
 
+`doctor` inspects Python/PyTorch versions, available accelerators and GPU memory. On CUDA, it also checks a small matrix multiplication. Use its output to confirm that the environment sees the device you intend to use.
+
+`smoke` performs one training update on a tiny synthetic model, saves a temporary checkpoint, and verifies that model weights and optimizer state reload correctly. Look for `training_step: passed` and `checkpoint_recovery: passed`. Run it after `doctor` to verify that training and checkpointing work before starting a language-model experiment. Neither command downloads datasets or launches AWS resources.
+
 ### Write your run recipe
 
 A recipe is a YAML file describing the data, preprocessing, tokenizer, model, training settings, evaluation and training stage. Start from a complete example:
