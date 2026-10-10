@@ -71,16 +71,19 @@ stage:
 
 This is an edit guide, not a replacement for the complete copied recipe. Validate with `python -m modelchef.cli pipeline configs/my-run.local.yaml`; add `--run` to execute it. Fields you omit use defaults; some become required when you select another workflow. See [required versus optional](#required-versus-optional). Unsupported fields and incompatible settings fail validation. `*.local.yaml` files stay out of Git. For fine-tuning, use `stage-config` in workflow 3 to generate a recipe matching the parent model instead of manually copying its architecture. See [published recipe patterns](#published-recipes-and-small-scale-adaptations) for starting points and the [complete annotated recipe](#complete-annotated-recipe) for every training field and its alternatives, and [data and recipes](#data-and-recipes) for local-data examples.
 
-### Combine recipes into one cook
+### Pick a published starting point
 
-A training recipe controls one stage. A workflow recipe connects stages and exports the final model, so you do not have to copy run paths by hand:
+The included recipes also let you explore familiar training patterns at a manageable scale:
 
-```bash
-python -m modelchef.cli cook configs/workflow-local.yaml
-python -m modelchef.cli cook configs/workflow-local.yaml --run
-```
+| Start with | When to choose it | Ingredients needed |
+| --- | --- | --- |
+| [Offline demo](configs/pretrain-demo.yaml) | First run: learn the commands and inspect artifacts | Included text; no data download |
+| [SmolLM2-inspired](configs/recipe-smollm2-inspired.yaml) | Small-model pretraining with a bounded public corpus | FineWeb-Edu sample downloaded only with `--run` |
+| [OLMo 2-inspired](configs/recipe-olmo-inspired.yaml) | Explore curated text and later domain stages | Your local `data/raw/corpus.jsonl` |
+| [Llama 3-inspired](configs/recipe-llama-inspired.yaml) | Explore a small decoder using modern dense-model building blocks | Your local `data/raw/corpus.jsonl` |
+| [Frontier-model patterns](#frontier-model-patterns-what-can-be-reproduced) | Combine dense/MoE training, instruction data, preferences or verifiable rewards | Separate datasets and recipes for each stage; published references and inferred choices are distinguished |
 
-Inspect the provided workflow and supply its local instruction dataset before executing it. The first command validates stage configurations and shows the plan; `--run` trains them in order. `cook` runs locally and can acquire data allowed by its recipes; it does not launch AWS or start an API. See [compose a complete workflow](#compose-a-complete-workflow) for the stage links and pretrained starting point.
+These are small adaptations, not reproductions of the original models. Copy a recipe to `configs/*.local.yaml`, adjust its inputs and limits, and preview it with `pipeline CONFIG`. The [published recipe guide](#published-recipes-and-small-scale-adaptations) links the original papers and explains what each adaptation preserves and changes. Choose the offline demo below if you are starting today.
 
 ### 1. Cook from scratch: try the included ingredients
 
@@ -132,9 +135,20 @@ This keeps the pretrained tokenizer and weights and learns from your supplied re
 
 For images and speech, continue with the [multimodal tutorial](docs/MULTIMODAL.md). To share a completed export, follow the [Hugging Face publishing tutorial](docs/PUBLISHING.md). Both workflows use explicit recipes; publishing previews are offline and uploads require `--run`.
 
+### Combine recipes into one cook
+
+A training recipe controls one stage. A workflow recipe connects stages and exports the final model, so you do not have to copy run paths by hand:
+
+```bash
+python -m modelchef.cli cook configs/workflow-local.yaml
+python -m modelchef.cli cook configs/workflow-local.yaml --run
+```
+
+Inspect the provided workflow and supply its local instruction dataset before executing it. The first command validates stage configurations and shows the plan; `--run` trains them in order. `cook` runs locally and can acquire data allowed by its recipes; it does not launch AWS or start an API. See [compose a complete workflow](#compose-a-complete-workflow) for the stage links and pretrained starting point.
+
 ## The platform at a glance
 
-The central workflow is a YAML recipe executed by `pipeline`: acquire a bounded sample, prepare and split documents, train or reuse a tokenizer, initialize or load a model, optimize it, evaluate it, and save a reproducible run. The script explains each step on screen and records the same explanations alongside the artifacts.
+For text training, the central workflow is a YAML recipe executed by `pipeline`: acquire a bounded sample, prepare and split documents, train or reuse a tokenizer, initialize or load a model, optimize it, evaluate it, and save a reproducible run. The script explains each step on screen and records the same explanations alongside the artifacts. Vision and speech use `multimodal` with their own recipes and pretrained processors.
 
 There are two starting points. **From scratch** learns both the tokenizer and model weights from your corpus. **From a pretrained model** retains its tokenizer and weights so you can specialize it with much less training. Both can lead to later training stages, evaluation, CLI inference and export for vLLM.
 
@@ -146,7 +160,11 @@ There are two starting points. **From scratch** learns both the tokenizer and mo
 | Train from preferred answers | Existing model and chosen/rejected pairs | Direct preference optimization (DPO) |
 | Train with automatically checkable answers | Existing model and a verifier | Experimental reinforcement learning with verifiable rewards (RLVR) |
 | Transfer behavior to a smaller model | Teacher and student | Sequence or token distillation |
-| Share a trained model | Compatible local export | Authenticated vLLM API; TLS for remote access |
+| Adapt a model to images or speech | Local vision-language or Whisper model and paired media/text | Multimodal fine-tuning, held-out evaluation and media inference |
+| Share model weights | Complete local export and a model card | Preview, then publish to a private or public Hugging Face repository |
+| Let clients call a text model | Compatible local export | Authenticated vLLM API; TLS for remote access |
+| Increase execution control | A working baseline recipe | Compilation, attention kernels, custom CUDA, precision, MoE or single-host DDP |
+| Move compute to AWS | Explicit cloud recipe and credentials | Temporary Spot training or persistent on-demand API hosting |
 
 Start with the local pipeline test before increasing data, model size or cloud spend. A successful short run establishes that the software works; it does not produce a capable assistant or establish benchmark quality. Local CPU/CUDA paths, native LoRA objectives, CUDA QLoRA recovery/export, CPU DDP dense/MoE recovery and the example CUDA kernel have been exercised. Real-device macOS/ROCm, live managed AWS training, full standard suites and native Blackwell FP4 need separate validation.
 
@@ -161,6 +179,25 @@ All three paths follow **data → model/tokenizer → training → evaluation �
 | [Advanced](#advanced-control-execution-and-deployment) | Use the full recipe, audit data assumptions, experiment with precision/kernels, run standard suites and manage cloud training/hosting | Reproducible experiments with deeper execution and lifecycle control |
 
 Read [local setup](#local-setup) once. Follow one path or progress through all three. Use the [complete annotated recipe](#complete-annotated-recipe), [code architecture](#code-architecture), [troubleshooting](#troubleshooting) and [CLI reference](#cli-reference-and-repository-layout) as references rather than prerequisites.
+
+### Know which recipe you are editing
+
+Recipes describe different jobs; they are not interchangeable. Paths in the examples assume you run commands from the repository root. `RUN_DIR` is a completed experiment directory, while `CONFIG` is a YAML file.
+
+| Recipe family | Example | Command | What it controls |
+| --- | --- | --- | --- |
+| Text training stage | `configs/pretrain-demo.yaml` | `pipeline CONFIG` | Data through evaluation for one pretrain, midtrain or post-training stage |
+| Multi-stage text workflow | `configs/workflow-demo.yaml` | `cook CONFIG` | Stage order, parent/teacher links and final export |
+| Vision or speech training | `configs/multimodal-vision.yaml` | `multimodal CONFIG` | Local paired media, pretrained model, training and evaluation |
+| Runtime planning | `configs/local.yaml` | `resolve-runtime CONFIG` | Hardware and precision planning; does not train or provision |
+| Local text API | `configs/inference.yaml` | `serve-vllm CONFIG` | Model export, generation settings and API security |
+| Managed cloud training | `configs/aws-training.yaml` | `aws-train CONFIG` | Training recipe reference, resources, transfer limits and budget |
+| Persistent cloud API | `configs/aws-serving.yaml` | `aws-serve CONFIG` | Serving recipe reference and explicit EC2 lifecycle |
+| Model publication | `configs/publish-model.yaml` | `publish-model CONFIG` | Export files, Hub visibility and model-card information |
+
+The commands above preview or resolve settings; add `--run` only to execution commands after reviewing the plan. `setup` uses `--apply` for installation. Other commands such as `chat`, `export`, `convert-data` and `predict-media` perform their work directly; do not assume every command is a dry run. Previews are not uniformly offline: model acquisition and Spot readiness previews can query remote metadata or AWS without downloading weights or launching compute.
+
+**Progress at your own pace:** first complete an offline run and reload it; next change the data or objective and compare results; then export, publish or serve the model. Finally, measure an optimization against that working baseline or move the same job to AWS. You can start directly with pretrained or multimodal fine-tuning when that matches your goal.
 
 
 ## Execution and architecture
@@ -470,7 +507,9 @@ The vLLM chat backend exports the trained weights if necessary and loads them lo
 
 ### Data and recipes
 
-### Understand and customize the recipe
+Start with the recipe structure, then supply a small local dataset. Domain filtering and larger-corpus storage are optional next steps.
+
+#### Understand and customize the recipe
 
 Copy a provided YAML recipe to an ignored `configs/*.local.yaml` file before editing it. `configs/local.yaml` and `configs/aws.yaml` are runtime-planning configs; `configs/pretrain-*.yaml` and `configs/posttrain-*.yaml` are complete training recipes. `check-config CONFIG` validates runtime configs, training recipes and workflow recipes; `pipeline CONFIG` previews a training recipe. The strict schema rejects unsupported fields and incompatible settings; `configs/pretrain.schema.json` describes the full structure. Run `pipeline YOUR_CONFIG` to validate before executing.
 
@@ -490,32 +529,6 @@ Change one family of settings at a time. Document and byte caps control acquisit
 From-scratch experiments use the native causal RoPE decoder with GQA, RMSNorm and SwiGLU, plus a trained byte-level BPE tokenizer. Imported Hugging Face models use their original architecture and tokenizer through the local pretrained adapter. Optional reasoning supervision, execution kernels and stage objectives are configured in the same recipe. The runtime limit is checked between training steps, not a deadline for the entire acquisition/evaluation workflow. Hardware detection does not automatically choose a model size that fits memory.
 
 ### Prepare your own ingredients: data
-
-For larger local corpora, copy a complete pretraining recipe and change its `data`
-section as follows (these are overrides, not a standalone recipe):
-
-```yaml
-data:
-  provider: local_jsonl
-  local_path: null
-  local_paths: [data/train-000.jsonl, data/train-001.jsonl]
-  storage: disk
-  max_documents: 100000
-  max_download_bytes: 1000000000
-  max_record_bytes: 4000000
-  max_tokens: 10000000
-```
-
-Shard order and offset define the selected snapshot. Disk mode streams records through
-SQLite deduplication, writes deterministic disjoint splits and stores uint32 tokens in
-memory-mapped files. Training allocates only selected token batches; resume verifies the
-mapped files before using them. It supports local JSONL pretraining/midtraining and DDP.
-Use `storage: memory` for structured post-training objectives. Near deduplication uses
-approximate LSH candidate search; tokenizer learning and benchmark indexes still use RAM.
-Set byte/token/runtime limits deliberately and allow disk space for snapshots and indexes.
-Managed AWS training carries these settings into the guest, with the additional bundle cap.
-See [quality and acceptance criteria](docs/QUALITY.md) for scale and hardware validation boundaries.
-
 
 ```bash
 python -m modelchef.cli convert-data documents.txt --format text --output data/raw/documents.jsonl --max-bytes 10000000 --max-documents 1000
@@ -557,6 +570,34 @@ evaluation:
 Edit these sections in the copied complete recipe; keep the other settings. `benchmark: none` avoids benchmark network access. Install dependencies beforehand for an offline run. Supply enough distinct documents for filtering and all three splits, and enough tokens to form context blocks. Tokenizer merges are learned only from the training split.
 
 Regex PII removal and lexical deduplication are limited heuristics. Preserve the cached raw snapshot and its SHA256 for replay: the viewer API is mutable, and the manifest does not pin an upstream Git revision. Initial slices are bounded samples, not representative random samples of the full corpus.
+
+### Scale your local corpus
+
+For larger local corpora, copy a complete pretraining recipe and change its `data`
+section as follows (these are overrides, not a standalone recipe):
+
+```yaml
+data:
+  provider: local_jsonl
+  local_path: null
+  local_paths: [data/train-000.jsonl, data/train-001.jsonl]
+  storage: disk
+  max_documents: 100000
+  max_download_bytes: 1000000000
+  max_record_bytes: 4000000
+  max_tokens: 10000000
+```
+
+Shard order and offset define the selected snapshot. Disk mode streams records through
+SQLite deduplication, writes deterministic disjoint splits and stores uint32 tokens in
+memory-mapped files. Training allocates only selected token batches; resume verifies the
+mapped files before using them. It supports local JSONL pretraining/midtraining and DDP.
+Use `storage: memory` for structured post-training objectives. Near deduplication uses
+approximate LSH candidate search; tokenizer learning and benchmark indexes still use RAM.
+Set byte/token/runtime limits deliberately and allow disk space for snapshots and indexes.
+Managed AWS training carries these settings into the guest, with the additional bundle cap.
+See [quality and acceptance criteria](docs/QUALITY.md) for scale and hardware validation boundaries.
+
 
 ### Start from a pretrained model
 
@@ -831,6 +872,32 @@ Start with a published training pattern, then size the experiment for your hardw
 | Efficient pretrained specialization | [LoRA paper](https://arxiv.org/abs/2106.09685) | Freeze the base and train low-rank updates rather than all weights | Generate an imported-model SFT recipe and enable [LoRA](#parameter-efficient-fine-tuning-with-lora). This is an adaptation method, not a foundation pretraining recipe. |
 
 For frontier architectures beyond dense decoders, the [DeepSeek-V3 technical report](https://arxiv.org/abs/2412.19437) documents MoE, latent attention and multi-token prediction; ModelChef implements a small Mixtral-like MoE, but does not reproduce DeepSeek-style latent attention, multi-token prediction or expert-parallel training. The [DeepSeek-R1 paper](https://arxiv.org/abs/2501.12948) provides a reasoning/RL reference. ModelChef's optional reasoning supervision, distillation and small verifier-based RLVR experiments are learning workflows, not reproductions of R1's training algorithm or capability. These references help identify future extensions without presenting unsupported options as runnable recipes.
+
+#### Frontier-model patterns: what can be reproduced
+
+Use these as experiment designs, not claims to reproduce frontier capability. A **published pattern** comes from an original report; a **ModelChef adaptation** selects the supported pieces and supplies small-scale hyperparameters. The **inferred assistant pattern** below is a plausible starting point, not a disclosed recipe for GPT, Claude or any other proprietary model. Actual data mixtures, budgets and training algorithms remain unknown where they have not been published.
+
+| Pattern and evidence | Recipe sequence to explore | ModelChef starting point | Difference from the original |
+| --- | --- | --- | --- |
+| Dense instruction model — [Llama 3 report](https://arxiv.org/abs/2407.21783) | Broad pretraining → instruction SFT → preference optimization → evaluate/export | [Small dense recipe](configs/recipe-llama-inspired.yaml), then `stage-config --kind sft` and `--kind dpo` | No original data mixture, rejection-sampling system, frontier scale or long-context curriculum |
+| Sparse expert model — [DeepSeek-V3 report](https://arxiv.org/abs/2412.19437) | MoE pretraining → curated continuation → instruction/preference stages | Copy the dense recipe; set `model.type: decoder_moe`, `num_experts: 4`, `experts_per_token: 2`; derive later stages from its completed run | Uses ModelChef's Mixtral-like MoE; no DeepSeek latent attention, auxiliary-loss-free routing, multi-token prediction or expert parallelism |
+| Verifiable reasoning — [DeepSeek-R1 paper](https://arxiv.org/abs/2501.12948) | Capable base → optional reasoning SFT → verifiable-reward experiment; optionally distill outputs to a student | `stage-config --kind sft --reasoning think_answer`, then `--kind rlvr`; see [distillation](#distillation) for a smaller student | Experimental local verifier and rollout objective, not an implementation of the complete R1/GRPO training recipe |
+| General assistant — **inferred design** based on the published staged patterns above | Capable pretrained base → domain midtraining if needed → instruction SFT → DPO → general/domain regression checks | Import a compatible local model, derive separate `midtrain`, `sft` and `dpo` recipes | No claim about proprietary architectures, reward models, data or hyperparameters; stage order is an experiment choice |
+
+For a first dense assistant experiment, train the Llama-inspired base or import a suitable existing model, then derive the next recipe:
+
+```bash
+python -m modelchef.cli stage-config BASE_RUN --kind sft --data data/raw/sft.jsonl --output configs/assistant-sft.local.yaml --steps 40
+python -m modelchef.cli pipeline configs/assistant-sft.local.yaml
+python -m modelchef.cli pipeline configs/assistant-sft.local.yaml --run
+# Use the newly completed SFT run as the parent, not BASE_RUN.
+python -m modelchef.cli stage-config SFT_RUN --kind dpo --data data/raw/preferences.jsonl --output configs/assistant-dpo.local.yaml --steps 40
+python -m modelchef.cli pipeline configs/assistant-dpo.local.yaml
+```
+
+SFT needs `prompt,response` records; DPO needs `prompt,chosen,rejected`. For reasoning SFT, use the [optional reasoning format](#optional-reasoning-supervision); for RLVR, supply the verifier-compatible records described in [continued training](#refine-your-model-continue-training). These stages need separate data: raw documents are not preference pairs or verified answers. Forty steps test the wiring, not the recipe's effectiveness. Evaluate after each stage and keep the earlier checkpoint if a later stage regresses. Use `cook` once the individual stages work; its workflow recipe links their parents automatically.
+
+Start with ordinary precision and a supported baseline. MoE does not make every run smaller or faster: all experts still occupy storage and routing adds overhead. FP4, custom kernels and DDP are execution choices, not required ingredients of a frontier-inspired recipe. The [compatible-combination table](#choose-a-compatible-combination) explains current restrictions.
 
 **Try a recipe:** copy one to an ignored personal file, inspect its data source and limits, and validate before execution:
 
@@ -1420,6 +1487,9 @@ flowchart TD
 | `diagnostics.py`, `guest_cli.py` | Shared environment checks and minimal EC2 readiness command entry point |
 | `hardware.py`, `engines.py` | Backend selection and native/local pretrained model adapters |
 | `corpus.py` | Bounded source snapshots, quality/PII/dedup/decontamination heuristics and document splits |
+| `disk_data.py` | Bounded JSONL shards, SQLite/LSH indexes and memory-mapped token batches |
+| `multimodal_config.py`, `multimodal_data.py`, `multimodal.py` | Strict media recipes, bounded assets, vision/Whisper training, recovery, evaluation and inference |
+| `publishing.py` | Offline export/card preview and explicit authenticated Hugging Face publication |
 | `workflow.py` | Ordered `cook` stages, parent/teacher links, reports and final export |
 | `distributed.py` | CPU/GPU DDP synchronization and per-rank checkpoint recovery |
 | `adapters.py`, `low_precision.py` | Native LoRA and optional CUDA QLoRA/NVFP4 integration |
@@ -1436,6 +1506,7 @@ flowchart TD
 | `chat.py`, `inference.py` | Checkpoint inference, exports and optional vLLM serving |
 | `aws_runner.py` | Local preflight, conservative budget reservations, Spot lifecycle and shutdown safeguards |
 | `aws_training.py` | Allowlisted training bundles, local data/training preflight, source verification and bounded result upload |
+| `aws_guest.py` | Recipe-selected guest dependencies, CUDA toolchain and single-host training/DDP launch |
 | `aws_serving.py` | Persistent on-demand deployment, bounded model bundle, systemd bootstrap and explicit stop/start/delete |
 | `tests/` | Small unit/integration tests; hardware availability determines device coverage |
 
