@@ -38,7 +38,14 @@ Routine input and dependency errors give concise messages; add `--debug` to show
 
 ### Choose your recipe
 
-A recipe is a YAML file describing the data, preprocessing, tokenizer, model, training settings, evaluation and training stage. Start from a complete example:
+ModelChef uses **two levels of training recipe**:
+
+- **Workflow recipe:** the overall training plan. It lists stages in order, references their recipe files, connects checkpoints and optionally exports the final model. Run it with `cook`.
+- **Stage recipe:** the detailed settings for one stage: data, preprocessing, tokenizer/model, optimizer and evaluation. Its `stage.kind` selects `pretrain`, `midtrain`, `sft`, `dpo`, `rlvr` or `distill`. Run it individually with `pipeline`, or let `cook` run it as part of a workflow.
+
+Prepare the files once; you do not edit a configuration between stages while `cook` is running. For a first experiment, start with one stage as shown below. For a complete training sequence, use [the workflow example](#combine-recipes-into-one-cook).
+
+Copy a complete stage recipe:
 
 ```bash
 cp configs/pretrain-local.yaml configs/my-run.local.yaml
@@ -137,7 +144,16 @@ For images and speech, continue with the [multimodal tutorial](docs/MULTIMODAL.m
 
 ### Combine recipes into one cook
 
-A training recipe controls one stage. A workflow recipe connects stages and exports the final model, so you do not have to copy run paths by hand:
+**The workflow YAML is your overall training recipe; the referenced stage YAML files hold the details.** For example, the included local workflow connects these files:
+
+```text
+configs/workflow-local.yaml             ← overall plan, run with cook
+├── configs/pretrain-local.yaml         ← foundation stage: stage.kind = pretrain
+└── configs/sft-recipe.yaml             ← instruction stage: stage.kind = sft
+    └── final model export
+```
+
+`cook` passes the foundation checkpoint to the instruction stage automatically. Each stage retains its own dataset and training settings. You prepare the workflow and stage files before starting, then one command runs the sequence:
 
 ```bash
 python -m modelchef.cli cook configs/workflow-local.yaml
@@ -145,6 +161,8 @@ python -m modelchef.cli cook configs/workflow-local.yaml --run
 ```
 
 Inspect the provided workflow and supply its local instruction dataset before executing it. The first command validates stage configurations and shows the plan; `--run` trains them in order. `cook` runs locally and can acquire data allowed by its recipes; it does not launch AWS or start an API. See [compose a complete workflow](#compose-a-complete-workflow) for the stage links and pretrained starting point.
+
+The overall recipe currently covers **text training stages, their evaluation and final export**. Hugging Face publishing, API serving and AWS provisioning use separate configurations and commands. Vision/speech training also uses its separate `multimodal` recipe rather than `cook`.
 
 ## The platform at a glance
 
@@ -731,7 +749,9 @@ KL divergence measures the mismatch between the student's and teacher's token di
 
 ### Compose a complete workflow
 
-`cook` joins independently reviewable stage recipes. Paths are relative to the project root. A stage normally inherits the preceding model geometry and tokenizer, while explicit adapter and execution choices can override inherited settings. Here is the composition shape; use the checked-in example for execution:
+The workflow is the overall recipe; each `stages[].recipe` points to a detailed stage recipe. Add stage entries to extend the sequence, and set the objective and dataset in the referenced files. You do not put one global `stage.kind` in the workflow: each stage file has its own. `cook` joins these independently reviewable recipes and connects their resulting runs automatically.
+
+Paths are relative to the project root. A stage normally inherits the preceding model geometry and tokenizer, while explicit adapter and execution choices can override inherited settings. Here is the composition shape; use the checked-in example for execution:
 
 ```yaml
 schema_version: 1               # OPTIONAL: only version 1.
