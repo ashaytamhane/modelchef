@@ -2,6 +2,7 @@
 import json
 import uuid
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import Field, model_validator
@@ -18,7 +19,7 @@ class WorkflowStage(Section):
 
 
 class Workflow(Section):
-    schema_version: int = 1
+    schema_version: Literal[1] = 1
     name: str = Field(default='cook', pattern=r'^[a-zA-Z0-9_-]+$')
     output_dir: str = 'artifacts/workflows'
     imported_model: str | None = None
@@ -45,13 +46,18 @@ def cook(path, root, execute=False):
     root, path = Path(root).resolve(), Path(path).resolve()
     config = Workflow.model_validate(yaml.safe_load(path.read_text()))
     recipes, previews = {}, {}
-    previous_preview = RunConfig(model={'backend': 'huggingface',
-        'pretrained_path': config.imported_model}) if config.imported_model else None
+    previous_preview = None
+    if config.imported_model:
+        from modelchef.pretrained import inspect_model
+        previous_preview, _, _ = inspect_model(root / config.imported_model, config.imported_context)
     for stage in config.stages:
         # Recipe paths are project-root relative, matching ordinary pipeline commands.
         recipes[stage.name] = yaml.safe_load((root / stage.recipe).read_text())
         if not isinstance(recipes[stage.name], dict):
             raise TypeError('Stage recipe must contain a mapping')
+        for section in ['training', 'stage', 'model', 'tokenizer']:
+            if section in recipes[stage.name] and not isinstance(recipes[stage.name][section], dict):
+                raise ValueError(f'Stage {stage.name}: {section} must be a mapping')
         if recipes[stage.name].get('training', {}).get('distributed', 'none') != 'none':
             raise ValueError('Run distributed stages separately with torchrun; cook is a single controller')
         # Substitute placeholders for links that execution will resolve, then validate every stage.
@@ -73,10 +79,11 @@ def cook(path, root, execute=False):
             raise ValueError('A pretraining stage cannot reference a parent or teacher stage')
         if stage.teacher_stage:
             preview['stage']['teacher_run'] = 'resolved-at-execution'
-        previous_preview = RunConfig.model_validate(preview)
+        previous_preview = RunConfig.model_validate(preview).validate_execution()
         previews[stage.name] = previous_preview
     plan = {'name': config.name, 'mode': 'local', 'stages': config.model_dump()['stages'],
             'imported_model': config.imported_model, 'export': config.export,
+            'resolved_recipes': {name: preview.model_dump(mode='json') for name, preview in previews.items()},
             'note': 'Plan only; --run executes stage recipes in order. This does not launch AWS or serve an API.'}
     if not execute:
         return plan
@@ -113,7 +120,11 @@ def cook(path, root, execute=False):
             report(f'Cooking stage {stage.name}: {kind}.')
             recipe['name'] = config.name + '-' + stage.name
             result['stages'][stage.name] = run_pipeline(RunConfig.model_validate(recipe), root)
-            previous = result['stages'][stage.name]['run_dir']
+            stage_result = result['stages'][stage.name]
+            if stage_result.get('status') != 'completed':
+                raise ValueError(f"Stage {stage.name} ended with status {stage_result.get('status')}; "
+                                 "later stages were not started. Inspect its saved report before resuming.")
+            previous = stage_result['run_dir']
             (folder / 'report.json').write_text(json.dumps(result, indent=2))
         result.update(status='completed', final_run=str(previous))
         if config.export:

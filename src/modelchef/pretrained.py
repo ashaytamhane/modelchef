@@ -3,7 +3,7 @@ import json
 import uuid
 from pathlib import Path
 
-from modelchef.corpus import digest
+from modelchef.corpus import digest, file_digest
 
 
 def download_model(repo, root, revision='main', max_bytes=500_000_000, run=False):
@@ -28,16 +28,15 @@ def download_model(repo, root, revision='main', max_bytes=500_000_000, run=False
         if actual > max_bytes:
             raise ValueError('Downloaded bytes exceed cap')
         plan.update(downloaded=True, path=str(output.resolve()),
-                    sha256={name: digest((output / name).read_bytes()) for name in plan['files']})
+                    sha256={name: file_digest(output / name) for name in plan['files']})
         (output / 'acquisition-manifest.json').write_text(json.dumps(plan, indent=2), encoding='utf-8')
     return plan
 
 
-def register_model(path, root, context=128):
-    import torch
+def inspect_model(path, context=128):
+    """Validate local HF metadata without loading weights or creating run artifacts."""
     from transformers import AutoConfig, AutoTokenizer
 
-    from modelchef.engines import create_model
     from modelchef.run_config import RunConfig
 
     path = Path(path).resolve()
@@ -60,13 +59,31 @@ def register_model(path, root, context=128):
         'kv_heads': getattr(hf, 'num_key_value_heads', heads), 'layers': layers,
         'intermediate_size': getattr(hf, 'intermediate_size', width * 4) or width * 4,
         'context_length': context}, evaluation={'benchmark': 'none'})
-    folder = Path(root) / 'artifacts/training' / ('pretrained-' + uuid.uuid4().hex[:12])
-    folder.mkdir(parents=True)
-    tokenizer.backend_tokenizer.save(str(folder / 'tokenizer.json'))
     roles = {'<eos>': tokenizer.eos_token_id,
              '<bos>': tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id,
              '<pad>': tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
              '<unk>': tokenizer.unk_token_id if tokenizer.unk_token_id is not None else tokenizer.eos_token_id}
+    if not any(path.glob('*.safetensors')) and not any(path.glob('*.bin')):
+        raise ValueError('Pretrained model directory requires local weight files')
+    for index_path in path.glob('*.index.json'):
+        index = json.loads(index_path.read_text(encoding='utf-8'))
+        for name in set(index.get('weight_map', {}).values()):
+            shard = (path / name).resolve()
+            if not shard.is_relative_to(path) or not shard.is_file():
+                raise ValueError('Pretrained model index has a missing or invalid weight shard')
+    return config, tokenizer, roles
+
+
+def register_model(path, root, context=128):
+    import torch
+
+    from modelchef.engines import create_model
+
+    path = Path(path).resolve()
+    config, tokenizer, roles = inspect_model(path, context)
+    folder = Path(root) / 'artifacts/training' / ('pretrained-' + uuid.uuid4().hex[:12])
+    folder.mkdir(parents=True)
+    tokenizer.backend_tokenizer.save(str(folder / 'tokenizer.json'))
     (folder / 'tokenizer-roles.json').write_text(json.dumps(roles), encoding='utf-8')
     (folder / 'config.json').write_text(config.model_dump_json(indent=2), encoding='utf-8')
     model = create_model(config.model, tokenizer.backend_tokenizer.get_vocab_size())
@@ -131,5 +148,8 @@ def stage_config(parent, kind, data, output, steps=40, teacher=None, reasoning='
     recipe['training'].update(steps=steps, warmup_steps=min(4, steps - 1), learning_rate=0.00005)
     recipe['evaluation'].update(benchmark='none')
     validated = RunConfig.model_validate(recipe)
-    Path(output).write_text(yaml.safe_dump(validated.model_dump(mode='json'), sort_keys=False), encoding='utf-8')
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open('x', encoding='utf-8') as handle:
+        handle.write(yaml.safe_dump(validated.model_dump(mode='json'), sort_keys=False))
     return str(output)

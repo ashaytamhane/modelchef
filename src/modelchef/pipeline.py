@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
 from modelchef.benchmarks import acquire_benchmark, evaluate_choices, select_benchmark
-from modelchef.corpus import acquire, digest, process
+from modelchef.corpus import acquire, digest, file_digest, process
 from modelchef.engines import create_model, load_parent, load_tokenizer
 from modelchef.execution import check_custom_kernel, configure_execution, plugin_fingerprint
 from modelchef.hardware import detect_hardware, resolve_runtime
@@ -88,6 +88,7 @@ def evaluate(model, blocks, batches, batch_size, device, amp):
 
 
 def run_pipeline(config, root, resume=None, prepare_only=False):
+    config.validate_execution()
     root = Path(root).resolve()
     if config.training.distributed == 'ddp' and not prepare_only:
         from modelchef.distributed import run_distributed
@@ -126,6 +127,31 @@ def run_pipeline(config, root, resume=None, prepare_only=False):
 def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False):
     if c.model.backend == 'huggingface' and c.stage.kind == 'pretrain':
         raise ValueError('Import the pretrained model, then choose a continuation/post-training stage')
+    saved = None
+    if resume:
+        saved = torch.load(resume, map_location='cpu', weights_only=True)
+        required = ['raw.jsonl', 'source-manifest.json', 'benchmark-examples.json',
+                    'benchmark-manifest.json', 'tokenizer.json', 'tokens.pt']
+        missing = [name for name in required if not (folder / name).is_file()]
+        if missing:
+            raise ValueError('Resume requires the saved run snapshots; missing: ' + ', '.join(missing))
+        if saved['tokenizer_sha256'] != digest((folder / 'tokenizer.json').read_bytes()):
+            raise ValueError('Saved tokenizer checksum changed')
+        roles_path = folder / 'tokenizer-roles.json'
+        roles_hash = digest(roles_path.read_bytes()) if roles_path.exists() else None
+        if 'tokenizer_roles_sha256' in saved and saved['tokenizer_roles_sha256'] != roles_hash:
+            raise ValueError('Saved tokenizer special-token identities changed')
+        if saved.get('tokens_file_sha256') and saved['tokens_file_sha256'] != file_digest(
+                folder / 'tokens.pt'):
+            raise ValueError('Saved token file checksum changed')
+    processing_sources = {str((root / path).resolve()): file_digest(root / path)
+                          for path in c.processing.benchmark_files}
+    processing_manifest = folder / 'processing-sources.json'
+    if resume and processing_manifest.exists():
+        if json.loads(processing_manifest.read_text()) != processing_sources:
+            raise ValueError('Configured benchmark decontamination files changed since this run started')
+    elif not resume:
+        processing_manifest.write_text(json.dumps(processing_sources, indent=2), encoding='utf-8')
     n.stage("1. Configuration and hardware", "Validate the complete recipe before data access. "
             "Detect this machine's accelerator; no AWS instance is launched by this command.")
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
@@ -155,14 +181,21 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     def amp():
         return (nullcontext() if dtype == torch.float32 else
                 torch.autocast(device_type=device, dtype=dtype))
-    (folder / "environment.json").write_text(json.dumps(runtime, indent=2), encoding="utf-8")
+    from modelchef.provenance import environment_provenance
+    environment = {**runtime, **environment_provenance(root)}
+    report['environment'] = environment
+    if resume:
+        with (folder / 'resume-environments.jsonl').open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps({'time': time.time(), **environment}) + '\n')
+    else:
+        (folder / 'environment.json').write_text(json.dumps(environment, indent=2), encoding='utf-8')
     n.say(f"Device={device}, precision={runtime['precision']}, seed={c.training.seed}.")
 
     n.stage("2. Acquire a bounded corpus snapshot", f"Source={c.data.dataset}, domain={c.data.domain}. "
             f"Limits: {c.data.max_documents} documents and {c.data.max_download_bytes:,} bytes. "
             "The saved SHA256 identifies the exact sample; raw text is never committed to Git.")
     snapshot = folder / 'raw.jsonl'
-    if resume and snapshot.exists():
+    if resume:
         records = [json.loads(line) for line in snapshot.read_text(encoding='utf-8').splitlines()]
         source = json.loads((folder / 'source-manifest.json').read_text())
         if digest(snapshot.read_bytes()) != source['raw_sha256']:
@@ -171,27 +204,35 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         records, source = acquire(c, root, lambda message: n.say(message, detail=True))
         snapshot.write_bytes(b''.join((json.dumps(row, ensure_ascii=False) + '\n').encode()
                                      for row in records))
-    (folder / "source-manifest.json").write_text(json.dumps(source, indent=2), encoding="utf-8")
+    if not resume:
+        (folder / "source-manifest.json").write_text(json.dumps(source, indent=2), encoding="utf-8")
 
     n.stage("2b. Select domain benchmarks", f"Domain '{c.data.domain}' selects "
             f"'{select_benchmark(c)}'. Download only the configured small evaluation sample. "
             "These examples are excluded from tokenizer/training inputs and used only for evaluation.")
     benchmark_snapshot = folder / 'benchmark-examples.json'
-    if resume and benchmark_snapshot.exists():
+    if resume:
         benchmark_source = json.loads((folder / 'benchmark-manifest.json').read_text())
         if benchmark_source.get('sha256') and digest(benchmark_snapshot.read_bytes()) != benchmark_source['sha256']:
             raise ValueError('Saved benchmark sample checksum changed')
         examples = json.loads(benchmark_snapshot.read_text())
+        if benchmark_source.get('name') == 'none' and examples:
+            raise ValueError('Disabled benchmark snapshot must be empty')
     else:
         examples, benchmark_source = acquire_benchmark(c, root)
         benchmark_snapshot.write_text(json.dumps(examples), encoding='utf-8')
-    (folder / "benchmark-manifest.json").write_text(
-        json.dumps(benchmark_source, indent=2), encoding="utf-8")
+        benchmark_source['sha256'] = digest(benchmark_snapshot.read_bytes())
+        (folder / "benchmark-manifest.json").write_text(
+            json.dumps(benchmark_source, indent=2), encoding="utf-8")
     processing_config = c.model_copy(deep=True)
     if examples:
         benchmark_path = folder / "benchmark-text.txt"
-        benchmark_path.write_text("\n".join(e["decontamination_text"] for e in examples),
-                                  encoding="utf-8")
+        if not resume:
+            benchmark_path.write_text("\n".join(e["decontamination_text"] for e in examples),
+                                      encoding="utf-8")
+        elif not benchmark_path.is_file() or benchmark_path.read_text(encoding='utf-8') != '\n'.join(
+                e['decontamination_text'] for e in examples):
+            raise ValueError('Saved benchmark decontamination text changed')
         processing_config.processing.benchmark_files.append(str(benchmark_path))
 
     n.stage("3. Clean, filter, deduplicate and split", "Normalize Unicode/HTML/whitespace, reject "
@@ -201,10 +242,11 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     structured = c.stage.kind in {'sft', 'dpo', 'rlvr', 'distill'}
     splits, processing = (prepare_structured(records, processing_config, root) if structured else
                           process(records, processing_config, root))
-    for name, rows in splits.items():
-        (folder / f"{name}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows),
-                                           encoding="utf-8")
-    (folder / "processing.json").write_text(json.dumps(processing, indent=2), encoding="utf-8")
+    if not resume:
+        for name, rows in splits.items():
+            (folder / f"{name}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows),
+                                               encoding="utf-8")
+        (folder / "processing.json").write_text(json.dumps(processing, indent=2), encoding="utf-8")
     n.say(f"Filter counts: {processing['counts']}; document splits: {processing['split_documents']}.")
     n.say(f"Benchmark decontamination: {processing['decontamination']}. "
           "PII/dedup checks are limited heuristics, not complete guarantees.")
@@ -227,19 +269,24 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         tokenizer = load_tokenizer(parent_folder)
         parent_path = checkpoint_for(parent_folder)
         parent = torch.load(parent_path, map_location='cpu', weights_only=True)['model']
-        report['parent'] = {'checkpoint_sha256': digest(parent_path.read_bytes()),
+        report['parent'] = {'checkpoint_sha256': file_digest(parent_path),
                             'tokenizer_sha256': digest((parent_folder / 'tokenizer.json').read_bytes())}
         parent_manifest = folder / 'parent-manifest.json'
         if resume and json.loads(parent_manifest.read_text()) != report['parent']:
             raise ValueError('Parent checkpoint/tokenizer changed since this stage started')
         parent_manifest.write_text(json.dumps(report['parent']), encoding='utf-8')
         n.say(f'Reuse parent vocabulary and weights for {c.stage.kind}; no vocabulary retraining.')
+    elif resume:
+        tokenizer = load_tokenizer(folder)
     else:
         tokenizer = train_tokenizer(splits["train"], c.tokenizer)
-    tokenizer.save(str(folder / "tokenizer.json"))
-    if parent is not None and hasattr(tokenizer, 'roles'):
+    if not resume:
+        tokenizer.save(str(folder / "tokenizer.json"))
+    if not resume and parent is not None and hasattr(tokenizer, 'roles'):
         (folder / 'tokenizer-roles.json').write_text(json.dumps(tokenizer.roles), encoding='utf-8')
     tokenizer_hash = digest((folder / "tokenizer.json").read_bytes())
+    roles_path = folder / 'tokenizer-roles.json'
+    roles_hash = digest(roles_path.read_bytes()) if roles_path.exists() else None
     n.say(f"BPE vocabulary={tokenizer.get_vocab_size()} (requested {c.tokenizer.vocab_size}).")
 
     n.stage("5. Tokenize and pack next-token examples", "Encode each split separately, insert configured "
@@ -252,11 +299,16 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         limit = int(c.data.max_tokens * fractions[name])
         blocks[name], token_counts[name] = (pack_structured(rows, tokenizer, c, limit) if structured
             else pack(rows, tokenizer, c.tokenizer, c.model.context_length, limit))
-    torch.save(blocks, folder / "tokens.pt")
-    token_hash = digest((folder / "tokens.pt").read_bytes())
     # Logical data identity is independent of torch ZIP container metadata.
     data_hash = hashlib.sha256(b"".join(part.numpy().tobytes() for name in sorted(blocks)
                                        for part in blocks[name])).hexdigest()
+    if resume:
+        if (saved['config_sha256'], saved['data_sha256'], saved['tokenizer_sha256']) != (
+                fingerprint, data_hash, tokenizer_hash):
+            raise ValueError('Resume recipe/data/tokenizer differs from checkpoint')
+    else:
+        torch.save(blocks, folder / 'tokens.pt')
+    token_hash = file_digest(folder / 'tokens.pt')
     n.say(f"Token counts: {token_counts}; context={c.model.context_length}. "
           "This is bounded pretraining data, not a full corpus download.")
 
@@ -299,7 +351,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         teacher_path = checkpoint_for(teacher_folder)
         reference.load_state_dict(torch.load(teacher_path, map_location='cpu', weights_only=True)['model'])
         reference.requires_grad_(False).eval()
-        report['teacher_checkpoint_sha256'] = digest(teacher_path.read_bytes())
+        report['teacher_checkpoint_sha256'] = file_digest(teacher_path)
         teacher_manifest = folder / 'teacher-manifest.json'
         if resume and teacher_manifest.read_text() != report['teacher_checkpoint_sha256']:
             raise ValueError('Teacher checkpoint changed since this stage started')
@@ -320,14 +372,10 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                                   eps=t.optimizer_eps, **optimizer_options)
     scaler = torch.amp.GradScaler("cuda", enabled=runtime["requires_grad_scaler"])
     generator = torch.Generator().manual_seed(t.seed)
-    step, consumed = 0, 0
+    step, consumed, skipped_updates = 0, 0, 0
     checkpoints = folder / "checkpoints"
     checkpoints.mkdir(exist_ok=True)
     if resume:
-        saved = torch.load(resume, map_location="cpu", weights_only=True)
-        if (saved["config_sha256"], saved["data_sha256"], saved["tokenizer_sha256"]) != (
-                fingerprint, data_hash, tokenizer_hash):
-            raise ValueError("Resume recipe/data/tokenizer differs from checkpoint")
         model.load_state_dict(saved["model"])
         optimizer.load_state_dict(saved["optimizer"])
         scaler.load_state_dict(saved["scaler"])
@@ -337,6 +385,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         if device == "cuda":
             torch.cuda.set_rng_state_all(saved["cuda_rng"])
         step, consumed = saved["step"], saved["tokens_seen"]
+        skipped_updates = saved.get('skipped_optimizer_updates', 0)
         n.say(f"Restored model, optimizer, scaler and random states at optimizer step {step}.")
 
     def save_checkpoint(index):
@@ -344,11 +393,15 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         temp = path.with_suffix(".tmp")
         torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
                     "scaler": scaler.state_dict(), "step": index, "tokens_seen": consumed,
+                    "skipped_optimizer_updates": skipped_updates,
                     "config_sha256": fingerprint, "data_sha256": data_hash,
-                    "tokenizer_sha256": tokenizer_hash, "sampler_rng": generator.get_state(),
+                    "tokenizer_sha256": tokenizer_hash, "tokenizer_roles_sha256": roles_hash,
+                    "tokens_file_sha256": token_hash,
+                    "sampler_rng": generator.get_state(),
                     "torch_rng": torch.get_rng_state(), "python_rng": random.getstate(),
                     "cuda_rng": torch.cuda.get_rng_state_all() if device == "cuda" else []}, temp)
         temp.replace(path)
+        report['checkpoint'] = str(path)
         n.say(f"Checkpoint saved at step {index}: {path.name}", detail=True)
         return path
 
@@ -388,7 +441,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         for group in optimizer.param_groups:
             group["lr"] = lr
         optimizer.zero_grad(set_to_none=True)
-        train_loss, auxiliary = 0, {}
+        train_loss, step_tokens, auxiliary = 0, 0, {}
         for _ in range(t.gradient_accumulation):
             indices = torch.randint(len(blocks["train"][0]), (t.micro_batch_size,), generator=generator)
             parts = tuple(part[indices].to(device) for part in blocks["train"])
@@ -403,15 +456,27 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                 raise FloatingPointError("Non-finite training loss")
             scaler.scale(loss / t.gradient_accumulation).backward()
             train_loss += loss.item() / t.gradient_accumulation
-            consumed += sum((part != -100).sum().item() for part in parts[1::2])
+            step_tokens += sum((part != -100).sum().item() for part in parts[1::2])
         scaler.unscale_(optimizer)
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), t.gradient_clip_norm,
-                                              error_if_nonfinite=True)
+                                              error_if_nonfinite=False)
+        if not torch.isfinite(norm):
+            if not scaler.is_enabled():
+                raise FloatingPointError('Non-finite training gradient norm')
+            # FP16 overflow is expected while GradScaler discovers a safe scale.
+            # Skip this update rather than applying corrupted clipped gradients.
+            scaler.update(new_scale=scaler.get_scale() * scaler.get_backoff_factor())
+            skipped_updates += 1
+            n.say(f'FP16 gradient overflow: skipped update and reduced loss scale to '
+                  f'{scaler.get_scale():g}; retrying optimizer step {step + 1}.')
+            continue
         scaler.step(optimizer)
         scaler.update()
         step += 1
+        consumed += step_tokens
         metrics = {"step": step, "training_loss": train_loss, "learning_rate": lr,
                    "gradient_norm": norm.item(), "tokens_seen": consumed,
+                   "skipped_optimizer_updates": skipped_updates,
                    "tokens_per_second": (step - initial_step) * t.micro_batch_size *
                    t.gradient_accumulation * c.model.context_length / (time.monotonic() - started)}
         metrics.update(auxiliary)
@@ -476,6 +541,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                 break
     sample = tokenizer.decode(generated[0].tolist())
     report.update(status="completed", stage=c.stage.kind, parameters=parameters, optimizer_steps=step,
+                  skipped_optimizer_updates=skipped_updates,
                   tokens_seen=consumed, token_counts=token_counts,
                   initial_validation=baseline, validation=validation, test=test,
                   checkpoint_recovery="passed", checkpoint=str(checkpoint_path),

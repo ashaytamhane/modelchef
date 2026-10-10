@@ -28,7 +28,7 @@ python -m modelchef.cli doctor
 python -m modelchef.cli smoke
 ```
 
-CLI commands print immediate progress, elapsed-time updates every 10 seconds during longer operations, and a completion message to stderr. `doctor` explains its Python/PyTorch import, device discovery and GPU calculation checks as they happen. Use `--quiet` to suppress CLI progress; result output remains on stdout. Training retains its recipe-controlled detailed or brief narration.
+Routine input and dependency errors give concise messages; add `--debug` to show a traceback. `check-config` validates runtime settings, training recipes or linked workflow recipes without executing them. CLI commands print immediate progress, elapsed-time updates every 10 seconds during longer operations, and a completion message to stderr. `doctor` explains its Python/PyTorch import, device discovery and GPU calculation checks as they happen. Use `--quiet` to suppress CLI progress; result output remains on stdout. Training retains its recipe-controlled detailed or brief narration.
 
 `setup` previews the PyTorch installation; `--apply` installs it. Review the preview for your hardware. If prerequisites are missing, see [local setup](#local-setup). Package installation requires internet access.
 
@@ -82,14 +82,25 @@ python -m modelchef.cli cook configs/workflow-local.yaml --run
 
 Inspect the provided workflow and supply its local instruction dataset before executing it. The first command validates stage configurations and shows the plan; `--run` trains them in order. `cook` runs locally and can acquire data allowed by its recipes; it does not launch AWS or start an API. See [compose a complete workflow](#compose-a-complete-workflow) for the stage links and pretrained starting point.
 
-### 1. Cook from scratch: train a small model
+### 1. Cook from scratch: try the included ingredients
+
+```bash
+python -m modelchef.cli check-config configs/pretrain-demo.yaml
+python -m modelchef.cli pipeline configs/pretrain-demo.yaml --run
+# Or pretrain, instruction-tune and export in one cook:
+python -m modelchef.cli cook configs/workflow-demo.yaml --run
+```
+
+After installing dependencies, these examples work offline: they use [included, self-authored text and instruction pairs](examples/starter/README.md), a tiny two-layer CPU/FP32 model, four updates per stage and no external benchmark. They do not download datasets/models or launch AWS. The pipeline explains each step and prints the run directory; inspect `report.json` for evaluation and checkpoint-recovery results. This is a software demonstration, not a useful assistant.
+
+For your next experiment, use the larger public-data recipe:
 
 ```bash
 python -m modelchef.cli pipeline configs/pretrain-local.yaml
 python -m modelchef.cli pipeline configs/pretrain-local.yaml --run
 ```
 
-The first command validates the recipe without downloading anything. The second acquires up to 256 FineWeb-Edu documents within a 16 MB corpus-response cap, runs preprocessing and BPE training, trains an approximately 18.6M-parameter model for 40 steps, and evaluates it on held-out data and a bounded benchmark sample. It explains each stage and prints the completed run directory. Read that directory's `report.json` for results.
+This acquires up to 256 FineWeb-Edu documents within a 16 MB corpus-response cap, trains BPE and an approximately 18.6M-parameter decoder for 40 steps, and evaluates a bounded benchmark sample. The first command previews; `--run` permits the configured downloads and training.
 
 ### 2. Taste the result: try your checkpoint
 
@@ -105,7 +116,7 @@ Interactive mode supports `/reset` and `/exit`. Export creates `RUN_DIR/export/`
 
 ### 3. Refine an existing model: fine-tune on your data
 
-Use an existing compatible local Hugging Face model directory and a UTF-8 JSONL file containing `prompt` and `response` strings. Supply at least ten distinct accepted examples, with answers short enough for the configured context. [Data preparation](#prepare-your-own-ingredients-data) covers text/CSV conversion; [pretrained acquisition](#start-from-a-pretrained-model) covers an explicit capped download if you do not already have a model.
+Use an existing compatible local Hugging Face model directory and a UTF-8 JSONL file containing `prompt` and `response` strings. Supply at least three distinct accepted examples (prefer more for useful split coverage), with answers short enough for the configured context. [Data preparation](#prepare-your-own-ingredients-data) covers text/CSV conversion; [pretrained acquisition](#start-from-a-pretrained-model) covers an explicit capped download if you do not already have a model.
 
 ```bash
 uv pip install -e '.[pretrained]'
@@ -268,7 +279,7 @@ If PowerShell activation is unavailable, invoke `.\.venv-aws\Scripts\python.exe`
 
 macOS runs the same Python codebase directly; WSL and CUDA are not required. The hardware detector selects PyTorch's MPS backend when available, otherwise CPU. Automatic precision selection uses FP32 on both. macOS setup paths exist, but a complete run has **not yet been validated on a real MacBook**.
 
-Install Git and `uv` using your preferred method, then run these commands in Terminal. The repository requires GitHub authentication:
+On Apple Silicon, install Git and `uv` using your preferred method, then run these commands in Terminal. The repository requires GitHub authentication:
 
 ```bash
 git clone https://github.com/ashaytamhane/modelchef.git
@@ -284,7 +295,7 @@ python -m modelchef.cli smoke --precision fp32
 python -m pytest -q
 ```
 
-Check `doctor` for `backend: mps` and `mps_available: true` to confirm GPU availability. An Apple Silicon Mac can use MPS when its OS and PyTorch build support it; Intel Macs can use CPU and may expose MPS on supported GPUs. If an operation fails on MPS, verify the CPU path explicitly:
+Check `doctor` for `backend: mps` and `mps_available: true` to confirm GPU availability. An Apple Silicon Mac can use MPS when its OS and PyTorch build support it; The automatic installer targets Apple Silicon. Official modern PyTorch wheels are unavailable for Intel macOS; an Intel Mac can use an existing compatible source/community build for CPU training, or serve as a lightweight AWS controller. ModelChef does not reject an otherwise compatible existing Intel environment. See the [upstream Intel macOS announcement](https://dev-discuss.pytorch.org/t/pytorch-macos-x86-builds-deprecation-starting-january-2024/1690). If an operation fails on MPS, verify the CPU path explicitly:
 
 ```bash
 python -m modelchef.cli smoke --accelerator cpu --precision fp32
@@ -456,7 +467,7 @@ The vLLM chat backend exports the trained weights if necessary and loads them lo
 
 ### Understand and customize the recipe
 
-Copy a provided YAML recipe to an ignored `configs/*.local.yaml` file before editing it. `configs/local.yaml` and `configs/aws.yaml` are runtime-planning configs; `configs/pretrain-*.yaml` and `configs/posttrain-*.yaml` are complete training recipes. `check-config` checks the former; `pipeline CONFIG` validates the latter. The strict schema rejects unsupported fields and incompatible settings; `configs/pretrain.schema.json` describes the full structure. Run `pipeline YOUR_CONFIG` to validate before executing.
+Copy a provided YAML recipe to an ignored `configs/*.local.yaml` file before editing it. `configs/local.yaml` and `configs/aws.yaml` are runtime-planning configs; `configs/pretrain-*.yaml` and `configs/posttrain-*.yaml` are complete training recipes. `check-config CONFIG` validates runtime configs, training recipes and workflow recipes; `pipeline CONFIG` previews a training recipe. The strict schema rejects unsupported fields and incompatible settings; `configs/pretrain.schema.json` describes the full structure. Run `pipeline YOUR_CONFIG` to validate before executing.
 
 Change one family of settings at a time. Document and byte caps control acquisition; the token cap controls packed data; optimizer steps control how often that data is sampled for updates. They are independent limits, so increasing steps can repeatedly train on the same small sample. For a single-device run, effective batch size is `micro_batch_size * gradient_accumulation`. Gradient checkpointing trades extra computation for lower activation memory; it does not reduce model or optimizer-state storage.
 
@@ -568,7 +579,7 @@ Examples, one per JSONL line:
 {"prompt":"What is 2 plus 3?","answer":"5"}
 ```
 
-Keep separate files for each format. At least ten distinct accepted records are required to form document splits. Structured stages use `User: ...` / `Assistant:` formatting. They reject overlong examples rather than silently truncate answers. Duplicate prompts are removed before splitting. Existing PII/quality/decontamination heuristics still apply; provide benchmark files for your evaluation data.
+Keep separate files for each format. At least three distinct accepted records are required to form document splits. Structured stages use `User: ...` / `Assistant:` formatting. They reject overlong examples rather than silently truncate answers. Duplicate prompts are removed before splitting. Existing PII/quality/decontamination heuristics still apply; provide benchmark files for your evaluation data.
 
 Copy `configs/posttrain-*.yaml` for full native defaults, or prefer `stage-config` for the actual parent. Edit `stage.dpo_beta`, reward/verifier, group size, rollout cap, KL coefficient and optimizer settings deliberately. RLVR is a small GRPO-inspired implementation with one update per sampled group, not a distributed production RL system. Equal rewards give zero policy advantage; mostly wrong samples may provide no useful learning signal. The integer verifier accepts a complete signed integer response, not arbitrary reasoning text or executable code. The DPO and group-relative objectives follow the ideas in [DPO](https://arxiv.org/abs/2305.18290) and [DeepSeekMath](https://arxiv.org/abs/2402.03300).
 
@@ -750,7 +761,7 @@ Start with a published training pattern, then size the experiment for your hardw
 | Large dense frontier-scale reference | [The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783): released family includes a 405B model; report describes pretraining and post-training | Decoder with grouped-query attention, careful data quality, staged capability development and instruction/preference training | [Llama-inspired](configs/recipe-llama-inspired.yaml): small RoPE/RMSNorm/SwiGLU/GQA decoder. No distributed frontier-scale training, original tokenizer/data mixture or long-context curriculum reproduction. |
 | Efficient pretrained specialization | [LoRA paper](https://arxiv.org/abs/2106.09685) | Freeze the base and train low-rank updates rather than all weights | Generate an imported-model SFT recipe and enable [LoRA](#parameter-efficient-fine-tuning-with-lora). This is an adaptation method, not a foundation pretraining recipe. |
 
-For frontier architectures beyond dense decoders, the [DeepSeek-V3 technical report](https://arxiv.org/abs/2412.19437) documents MoE, latent attention and multi-token prediction; ModelChef does not implement those architectures or objectives. The [DeepSeek-R1 paper](https://arxiv.org/abs/2501.12948) provides a reasoning/RL reference. ModelChef's optional reasoning supervision, distillation and small verifier-based RLVR experiments are learning workflows, not reproductions of R1's training algorithm or capability. These references help identify future extensions without presenting unsupported options as runnable recipes.
+For frontier architectures beyond dense decoders, the [DeepSeek-V3 technical report](https://arxiv.org/abs/2412.19437) documents MoE, latent attention and multi-token prediction; ModelChef implements a small Mixtral-like MoE, but does not reproduce DeepSeek-style latent attention, multi-token prediction or expert-parallel training. The [DeepSeek-R1 paper](https://arxiv.org/abs/2501.12948) provides a reasoning/RL reference. ModelChef's optional reasoning supervision, distillation and small verifier-based RLVR experiments are learning workflows, not reproductions of R1's training algorithm or capability. These references help identify future extensions without presenting unsupported options as runnable recipes.
 
 **Try a recipe:** copy one to an ignored personal file, inspect its data source and limits, and validate before execution:
 
@@ -1009,7 +1020,7 @@ Custom CUDA is opt-in for the native decoder. The included example replaces the 
 
 5. Run `python -m modelchef.cli pipeline configs/YOUR_RECIPE.yaml --run`. Startup validates FP32, FP16 and supported BF16 outputs and gradients against PyTorch before acquiring data. Source hashes are recorded and checked when resuming. Build products stay under ignored `artifacts/cuda-extensions/`.
 
-`src/modelchef/execution.py` loads the trusted local plugin and runs checks; `model.py` selects it; `kernels/swiglu/kernel.py` provides the autograd wrapper; `swiglu.cpp` exposes bindings; and `swiglu.cu` implements the CUDA operations. Your own directory must export `swiglu(gate, up)` from `kernel.py` with autograd support. Selecting a plugin executes its local code, so use a source directory you trust. Set `custom_swiglu_path: null` to restore the built-in activation.
+`src/modelchef/execution.py` loads the trusted local plugin and runs checks; `model.py` selects it; `kernels/swiglu/kernel.py` provides the autograd wrapper; `swiglu.cpp` exposes bindings; and `swiglu.cu` implements the CUDA operations. Custom SwiGLU currently applies to the native dense decoder, not MoE or the Hugging Face backend. Your own directory must export `swiglu(gate, up)` from `kernel.py` with autograd support. Selecting a plugin executes its local code, so use a source directory you trust. Set `custom_swiglu_path: null` to restore the built-in activation.
 
 Other optional execution controls are `model.attention_kernel: auto|math|flash|efficient|cudnn`, `training.compile`, `compile_backend: inductor|aot_eager|eager`, `compile_mode: default|reduce-overhead|max-autotune`, and `optimizer_kernel: default|fused|foreach`. Explicit optimized attention and fused optimizer selections require a compatible GPU. Measure throughput and memory for your workload; compilation can add startup time. Custom CUDA is currently limited to native-model SwiGLU and prepared hosts; managed `aws-train` packaging rejects it. Native FP4 kernels are a separate capability.
 
@@ -1349,6 +1360,26 @@ flowchart TD
 | `aws_training.py` | Allowlisted training bundles, local data/training preflight, source verification and bounded result upload |
 | `aws_serving.py` | Persistent on-demand deployment, bounded model bundle, systemd bootstrap and explicit stop/start/delete |
 | `tests/` | Small unit/integration tests; hardware availability determines device coverage |
+
+## Verification and project boundaries
+
+Run the checks used for changes to the platform:
+
+```bash
+python -m ruff check src tests scripts/check_docs.py
+python scripts/check_docs.py
+python -m pytest -q
+```
+
+GitHub CI checks CPU workflows on Python 3.11/3.12 and the Windows controller. The documentation check verifies local links, CLI examples, example recipes, complete annotated fields and generated schemas. Hardware-specific tests skip when their prerequisites are unavailable; a skipped test does not establish support on a real device. See [contributing](CONTRIBUTING.md) and [security boundaries](SECURITY.md).
+
+Runs record package versions, the source-code fingerprint and available Git revision/dirty state in `environment.json`. Resume preserves that original evidence and appends current runtime provenance to `resume-environments.jsonl`. Comparison reports identify checkpoint/model and tokenizer bytes. Resume requires saved snapshots and matching identities; missing or changed inputs stop the run instead of silently downloading replacements. A timeout is an incomplete run, produces a nonzero CLI exit, and prevents `cook` from starting later stages.
+
+PII filtering changes processed training inputs. Original text remains in raw run snapshots and download caches; filtering does not scrub those originals. Choose access controls and retention appropriate to your data. Small sampled benchmarks and regex filters support experiments, not certifications of data quality or model safety.
+
+API serving limits output tokens, batch size and number of completions through `inference.security.max_output_tokens`, `max_batch_size` and `max_choices`. Defaults are at most 256 output tokens (bounded by context), one prompt and one completion. Requests exceeding these limits are rejected; omitted output limits receive the configured default. TLS/shared-token controls do not replace per-user identity or production traffic protection.
+
+AWS launch journals are saved before provisioning steps so interrupted/lost launch responses can be reconciled. Training preflight requires a completed local report. Managed `aws-train` uses a single-process guest and currently excludes DDP and native NVFP4; run those on prepared hosts using `torchrun` or the documented Blackwell dependencies. This is a launcher limitation; compatible local/prepared environments remain usable.
 
 ## Troubleshooting
 

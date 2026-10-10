@@ -52,6 +52,52 @@ def test_preference_and_reward_objectives_have_correct_direction():
     assert policy.grad[0].item() > 0 and policy.grad[1].item() < 0
 
 
+def test_structured_token_budget_counts_the_actual_sequence_once():
+    from tokenizers import Tokenizer, models, pre_tokenizers
+
+    from modelchef.objectives import format_prompt, pack_structured
+    tokenizer = Tokenizer(models.WordLevel({
+        '<unk>': 0, 'User': 1, ':': 2, 'Assistant': 3, 'Q': 4, '1': 5,
+        '<pad>': 6, '<eos>': 7}, unk_token='<unk>'))
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    config = RunConfig(stage={'kind': 'sft', 'parent_run': 'parent'},
+        data={'provider': 'local_jsonl', 'local_path': 'data.jsonl'}, model={'context_length': 8})
+    row = {'prompt': 'Q', 'response': '1'}
+    size = len(tokenizer.encode(format_prompt(row['prompt'])).ids) + len(
+        tokenizer.encode(' ' + row['response']).ids) + 1
+    (x, y), used = pack_structured([row], tokenizer, config, size)
+    assert used == size and x.shape == y.shape == (1, 8)
+    assert (y != -100).sum() == 2  # Response and EOS, with prompt/padding masked.
+    with pytest.raises(ValueError, match='token budget'):
+        pack_structured([row], tokenizer, config, size - 1)
+
+
+def test_dpo_accuracy_uses_reference_adjusted_rewards(monkeypatch):
+    from contextlib import nullcontext
+
+    from modelchef import objectives
+
+    class Model:
+        def __init__(self, chosen):
+            self.chosen = chosen
+
+        def eval(self):
+            return self
+
+    policy, reference = Model(2.0), Model(3.0)
+    monkeypatch.setattr(objectives, 'sequence_logps', lambda model, x, y:
+                        torch.tensor([model.chosen if x[0, 0] == 1 else 1.0]))
+    config = RunConfig(stage={'kind': 'dpo', 'parent_run': 'parent'},
+        data={'provider': 'local_jsonl', 'local_path': 'data.jsonl'},
+        training={'micro_batch_size': 1})
+    blocks = (torch.tensor([[1]]), torch.tensor([[1]]),
+              torch.tensor([[2]]), torch.tensor([[2]]))
+    result = objectives.evaluate_stage(policy, reference, blocks, None, config, 'cpu', nullcontext)
+    assert result['policy_likelihood_accuracy'] == 1
+    assert result['preference_accuracy'] == 0
+    assert result['reference_adjusted_margin'] == -1
+
+
 @pytest.mark.parametrize('kind', ['midtrain', 'sft', 'dpo', 'rlvr', 'distill'])
 @pytest.mark.parametrize('adapter', [False, True])
 def test_posttraining_checkpoint_recovery_and_parent_is_unchanged(parent, tmp_path, kind, adapter):
@@ -200,6 +246,38 @@ def test_math_attention_and_compile_preserve_checkpoint_names(parent, tmp_path):
     assert result['execution']['compile'] and result['checkpoint_recovery'] == 'passed'
     weights = torch.load(result['checkpoint'], weights_only=True)['model']
     assert 'embedding.weight' in weights and not any('_orig_mod' in key for key in weights)
+
+
+def test_fp16_overflow_backs_off_and_recovers_without_corrupting_weights(parent, tmp_path, monkeypatch):
+    if not torch.cuda.is_available() or torch.version.hip:
+        pytest.skip('FP16 CUDA GradScaler integration requires an NVIDIA GPU')
+    from modelchef import pipeline
+    config, _ = parent
+    config.training.accelerator = 'cuda'
+    config.training.precision = 'fp16'
+    config.training.max_runtime_seconds = 60
+    original_create = pipeline.create_model
+    overflows = []
+
+    def create_with_one_overflow(*args, **kwargs):
+        model = original_create(*args, **kwargs)
+
+        def overflow_once(gradient):
+            if not overflows:
+                overflows.append(True)
+                return torch.full_like(gradient, float('inf'))
+            return gradient
+
+        model.embedding.weight.register_hook(overflow_once)
+        return model
+
+    monkeypatch.setattr(pipeline, 'create_model', create_with_one_overflow)
+    result = run_pipeline(config, tmp_path)
+    checkpoint = torch.load(result['checkpoint'], map_location='cpu', weights_only=True)
+    assert result['optimizer_steps'] == config.training.steps
+    assert result['skipped_optimizer_updates'] >= 1
+    assert checkpoint['skipped_optimizer_updates'] == result['skipped_optimizer_updates']
+    assert all(torch.isfinite(value).all() for value in checkpoint['model'].values())
 
 
 def test_custom_cuda_probe_preserves_rng_and_rejects_cpu(monkeypatch):

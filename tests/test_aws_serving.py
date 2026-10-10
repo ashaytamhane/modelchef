@@ -16,6 +16,7 @@ def hosting(tmp_path):
     (tmp_path / 'src/modelchef').mkdir(parents=True)
     (tmp_path / 'src/modelchef/__init__.py').write_text('')
     (tmp_path / 'pyproject.toml').write_text('')
+    (tmp_path / 'README.md').write_text('ModelChef tutorial')
     model = tmp_path / 'model'
     model.mkdir()
     for name in ['config.json', 'tokenizer.json', 'model.safetensors']:
@@ -40,6 +41,7 @@ def test_plan_bundle_and_service_have_no_deadline(hosting):
     assert not clients['ec2'].mock_calls and not clients['s3'].mock_calls
     with tarfile.open(fileobj=io.BytesIO(bundle(runner.root, runner.settings))) as archive:
         assert 'private.key' not in archive.getnames()
+        assert archive.extractfile('README.md').read() == b'ModelChef tutorial'
         config = yaml.safe_load(archive.extractfile('configs/serving.yaml').read())
         assert config['inference']['security']['api_key_env'] == 'MODELCHEF_API_KEY'
     script = guest_script(runner.settings, 'source.tar.gz', 'a' * 64)
@@ -92,3 +94,27 @@ def test_bundle_cap_prevents_upload(hosting):
     with pytest.raises(ValueError, match='cap'):
         runner.deploy()
     assert not clients['s3'].put_object.called
+
+
+def test_binary_export_and_tokenizer_assets_survive_hosting_bundle(hosting):
+    runner, _ = hosting
+    model = runner.root / 'model'
+    (model / 'model.safetensors').unlink()
+    (model / 'pytorch_model.bin').write_bytes(b'model-weights')
+    (model / 'chat_template.jinja').write_text('{{ messages }}')
+    with tarfile.open(fileobj=io.BytesIO(bundle(runner.root, runner.settings))) as archive:
+        assert archive.extractfile('model/pytorch_model.bin').read() == b'model-weights'
+        assert 'model/chat_template.jinja' in archive.getnames()
+        assert all(member.uid == 0 and not member.uname for member in archive.getmembers())
+
+
+def test_remote_fp4_plan_does_not_require_blackwell_on_controller(hosting, monkeypatch):
+    runner, clients = hosting
+    path = runner.root / runner.settings['inference_config']
+    config = yaml.safe_load(path.read_text())
+    config['inference']['quantization'] = 'nvfp4_per_token'
+    path.write_text(yaml.safe_dump(config))
+    monkeypatch.setattr('modelchef.hardware.detect_hardware', lambda: pytest.fail(
+        'Remote hosting must detect its GPU on the guest, not the controller'))
+    assert runner.plan()['bytes'] > 0
+    assert not clients['ec2'].mock_calls

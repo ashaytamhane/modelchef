@@ -23,7 +23,7 @@ def vllm_setup_plan(root, hardware, version="0.31.0"):
         "Model export and supported architecture are required before serving."}
 
 
-def serve_plan(config, root):
+def serve_plan(config, root, *, check_hardware=True):
     if not isinstance(config, dict):
         raise TypeError("Inference config must be a mapping")
     root = Path(root).resolve()
@@ -69,11 +69,15 @@ def serve_plan(config, root):
         raise ValueError('api_key_env must be an environment variable name')
     limits = {}
     for name, default in [('max_body_bytes', 1048576), ('requests_per_minute', 30),
-                          ('max_concurrent_requests', 2), ('request_timeout_seconds', 120)]:
+                          ('max_concurrent_requests', 2), ('request_timeout_seconds', 120),
+                          ('max_output_tokens', min(256, length)), ('max_batch_size', 1),
+                          ('max_choices', 1)]:
         value = security.get(name, default)
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f'{name} must be a positive integer')
         limits[name] = value
+    if limits['max_output_tokens'] > length:
+        raise ValueError('max_output_tokens cannot exceed max_model_len')
     limits['api_key_env'] = key_env
     cert, key = security.get('tls_certfile'), security.get('tls_keyfile')
     if bool(cert) != bool(key) or (external and not cert):
@@ -95,11 +99,12 @@ def serve_plan(config, root):
     quantization = settings.get('quantization', 'none')
     if quantization not in {'none', 'nvfp4_per_token'}:
         raise ValueError('quantization must be none or nvfp4_per_token')
-    if quantization != 'none':
+    if quantization != 'none' and check_hardware:
         from modelchef.hardware import detect_hardware
         hardware = detect_hardware()
         if hardware['backend'] != 'cuda' or hardware.get('compute_capability', [0])[0] < 10:
             raise ValueError('Native NVFP4 inference requires a supported Blackwell CUDA GPU')
+    if quantization != 'none':
         command += ['--quantization', quantization]
     return {"command": command, "environment": {"HF_HUB_OFFLINE": "1",
             "TRANSFORMERS_OFFLINE": "1", "VLLM_NO_USAGE_STATS": "1",

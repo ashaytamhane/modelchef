@@ -4,7 +4,7 @@ import io
 import json
 from pathlib import Path
 
-from modelchef.corpus import digest
+from modelchef.corpus import digest, file_digest
 
 
 def convert_data(source, output, format='jsonl', max_bytes=10_000_000, max_documents=1000):
@@ -83,7 +83,7 @@ def teacher_responses(teacher, prompts, output, max_documents=32, max_bytes=1_00
                 raise ValueError('Teacher emitted an empty response; inspect teacher/prompt')
             handle.write(json.dumps({'prompt': prompt, 'response': response}) + '\n')
             print(f'Teacher response {index + 1}/{len(records)} generated locally.', flush=True)
-    manifest = {'method': 'sequence_distillation', 'teacher_checkpoint_sha256': digest(checkpoint.read_bytes()),
+    manifest = {'method': 'sequence_distillation', 'teacher_checkpoint_sha256': file_digest(checkpoint),
                 'prompts_sha256': digest(payload), 'output_sha256': digest(output.read_bytes()),
                 'max_tokens': max_tokens, 'temperature': temperature, 'seed': config.training.seed}
     output.with_suffix('.manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')

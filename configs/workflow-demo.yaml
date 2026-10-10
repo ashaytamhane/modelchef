@@ -1,0 +1,9 @@
+schema_version: 1
+name: starter-menu
+stages:
+- name: foundation
+  recipe: configs/pretrain-demo.yaml
+- name: instructions
+  recipe: configs/sft-demo.yaml
+  parent_stage: foundation
+export: true

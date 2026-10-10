@@ -1,0 +1,12 @@
+{"prompt": "What is a token?", "response": "A token is a unit of text represented by an integer identifier."}
+{"prompt": "What does a language model predict?", "response": "It predicts the next token using earlier tokens."}
+{"prompt": "Why hold out validation data?", "response": "It checks predictions on documents excluded from training."}
+{"prompt": "What is a checkpoint?", "response": "It saves model weights and state needed for recovery."}
+{"prompt": "What does an optimizer do?", "response": "It updates trainable parameters using gradients."}
+{"prompt": "What is inference?", "response": "It generates output using a trained model."}
+{"prompt": "Why save a tokenizer?", "response": "Model weights depend on the exact token identifiers."}
+{"prompt": "What does a causal mask do?", "response": "It prevents attention from reading future tokens."}
+{"prompt": "What is instruction tuning?", "response": "It trains a model using prompt and response examples."}
+{"prompt": "Why limit generation?", "response": "Explicit token limits keep resource use predictable."}
+{"prompt": "What does export contain?", "response": "It contains model configuration, tokenizer and weights."}
+{"prompt": "Is this a useful assistant?", "response": "No. This tiny run tests the software."}

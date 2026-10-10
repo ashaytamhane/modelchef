@@ -34,16 +34,22 @@ def bundle(root, settings):
     inference = config['inference']
     inference = dict(inference)
     # Validate the local export without requiring production secrets on the controller.
-    local = {**inference, 'host': '127.0.0.1', 'security': {}}
-    serve_plan({'inference': local}, root)
+    local_security = dict(inference.get('security', {}))
+    local_security.pop('tls_certfile', None)
+    local_security.pop('tls_keyfile', None)
+    local = {**inference, 'host': '127.0.0.1', 'security': local_security}
+    serve_plan({'inference': local}, root, check_hardware=False)
     model = (root / inference['model_path']).resolve()
     cap = int(settings.get('max_bundle_bytes', 1_000_000_000))
     if cap <= 0:
         raise ValueError('max_bundle_bytes must be positive')
     files = {p.relative_to(root).as_posix(): p for p in (root / 'src/modelchef').glob('*.py')}
     files['pyproject.toml'] = root / 'pyproject.toml'
+    if (root / 'README.md').is_file():
+        files['README.md'] = root / 'README.md'
     for p in model.iterdir():
-        if p.is_file() and p.suffix in {'.json', '.safetensors', '.model'}:
+        if p.is_file() and (p.suffix in {'.json', '.safetensors', '.model', '.bin'} or
+                            p.name in {'merges.txt', 'vocab.txt', 'chat_template.jinja'}):
             files['model/' + p.name] = p
     if sum(p.stat().st_size for p in files.values()) > cap:
         raise ValueError('Serving source/model exceeds bundle cap')
@@ -57,7 +63,10 @@ def bundle(root, settings):
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode='w:gz', dereference=True) as archive:
         for name, path in sorted(files.items()):
-            archive.add(path, arcname=name, recursive=False)
+            content = path.read_bytes()
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
         content = yaml.safe_dump({'inference': inference}).encode()
         info = tarfile.TarInfo('configs/serving.yaml')
         info.size = len(content)

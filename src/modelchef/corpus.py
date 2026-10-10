@@ -14,6 +14,15 @@ def digest(value):
     return hashlib.sha256(value).hexdigest()
 
 
+def file_digest(path):
+    """Hash artifacts in bounded chunks instead of duplicating model weights in RAM."""
+    checksum = hashlib.sha256()
+    with path.open('rb') as source:
+        while chunk := source.read(1024 * 1024):
+            checksum.update(chunk)
+    return checksum.hexdigest()
+
+
 def acquire(config, root, explain):
     c = config.data
     identity = digest(json.dumps(c.model_dump(), sort_keys=True).encode())
@@ -30,11 +39,13 @@ def acquire(config, root, explain):
     if c.provider == "local_jsonl":
         path = (root / c.local_path).resolve()
         with path.open("rb") as handle:
-            for index, line in enumerate(handle):
+            index = 0
+            while line := handle.readline(c.max_download_bytes - downloaded + 1):
                 downloaded += len(line)
                 if downloaded > c.max_download_bytes:
                     raise ValueError("Local input exceeds configured byte budget")
                 if index < c.offset:
+                    index += 1
                     continue
                 row = json.loads(line)
                 if config.stage.kind in {"sft", "dpo", "rlvr", "distill"}:
@@ -47,6 +58,7 @@ def acquire(config, root, explain):
                     records.append({"text": row[c.text_field], "source_index": index})
                 if len(records) >= c.max_documents:
                     break
+                index += 1
         origin = {"provider": "local_jsonl", "path": str(path)}
     else:
         explain("Downloading only viewer row pages, not the multi-GB Parquet corpus. "
@@ -153,12 +165,15 @@ def process(records, config, root):
         accepted.append({"text": text, "sha256": digest(text.encode()),
                          "source_index": row["source_index"]})
     counts["accepted"] = len(accepted)
-    if len(accepted) < 10:
+    if len(accepted) < 3:
         raise ValueError(f"Too few documents after processing: {dict(counts)}; "
                          "adjust filters/domain or choose another bounded sample")
     random.Random(config.training.seed).shuffle(accepted)
-    validation_count = max(1, int(len(accepted) * c.validation_fraction))
-    test_count = max(1, int(len(accepted) * c.test_fraction))
+    # Rounding two held-out fractions must leave at least one training document,
+    # including the smallest supported three-document dataset.
+    validation_count = min(len(accepted) - 2, max(1, int(len(accepted) * c.validation_fraction)))
+    test_count = min(len(accepted) - validation_count - 1,
+                     max(1, int(len(accepted) * c.test_fraction)))
     splits = {"validation": accepted[:validation_count],
               "test": accepted[validation_count:validation_count + test_count],
               "train": accepted[validation_count + test_count:]}

@@ -73,9 +73,11 @@ def pack_structured(rows, tokenizer, c, token_limit):
             'answer' if c.stage.kind == 'rlvr' else 'response']
         pairs = [response_pair(row['prompt'], row[field], tokenizer, c.model.context_length)
                  for field in fields]
-        size = sum(sum(token != -100 for token in y) for _, y in pairs)
-        # Count prompt tokens as well, rather than exempting them from the token cap.
-        size += sum(sum(token != tokenizer.token_to_id('<pad>') for token in x) for x, _ in pairs)
+        # Count each token in the prompt/response sequence once, including EOS.
+        # The final supervised target marks the real sequence boundary even when
+        # an imported tokenizer uses the same token for padding and EOS.
+        size = sum(max(index for index, token in enumerate(y) if token != -100) + 2
+                   for _, y in pairs)
         if used + size > token_limit:
             break
         used += size
@@ -187,8 +189,10 @@ def evaluate_stage(model, reference, blocks, tokenizer, c, device, amp):
             cx, cy, rx, ry = parts
             chosen, rejected = sequence_logps(model, cx, cy), sequence_logps(model, rx, ry)
             ref_c, ref_r = sequence_logps(reference, cx, cy), sequence_logps(reference, rx, ry)
-            return {'examples': count, 'preference_accuracy': (chosen > rejected).float().mean().item(),
-                    'reference_adjusted_margin': ((chosen - rejected) - (ref_c - ref_r)).mean().item(),
+            margin = (chosen - rejected) - (ref_c - ref_r)
+            return {'examples': count, 'preference_accuracy': (margin > 0).float().mean().item(),
+                    'policy_likelihood_accuracy': (chosen > rejected).float().mean().item(),
+                    'reference_adjusted_margin': margin.mean().item(),
                     'dpo_loss': dpo_loss(chosen, rejected, ref_c, ref_r, c.stage.dpo_beta).item()}
         x, y = parts
         rewards = []

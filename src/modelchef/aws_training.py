@@ -3,6 +3,7 @@ import io
 import json
 import shlex
 import tarfile
+import uuid
 from pathlib import Path
 
 import yaml
@@ -15,13 +16,31 @@ def build_bundle(root, settings):
     config = RunConfig.model_validate(yaml.safe_load((root / settings['pipeline_config']).read_text()))
     if config.model.backend != 'native':
         raise ValueError('Managed AWS training currently packages native models only')
+    if config.training.distributed == 'ddp':
+        raise ValueError('Managed aws-train launches one process; DDP requires torchrun on a prepared host')
+    if config.model.quantization == 'nvfp4':
+        raise ValueError('Managed aws-train does not install Transformer Engine for native NVFP4; '
+                         'use a prepared Blackwell host with the nvfp4 extra')
     cap = int(settings.get('max_bundle_bytes', 64_000_000))
     if cap <= 0:
         raise ValueError('max_bundle_bytes must be positive')
     files = {}
+
+    def add_file(name, path):
+        remaining = cap - sum(map(len, files.values()))
+        if path.stat().st_size > remaining:
+            raise ValueError('Uncompressed training bundle exceeds max_bundle_bytes')
+        with path.open('rb') as source:
+            content = source.read(remaining + 1)
+        if len(content) > remaining:
+            raise ValueError('Uncompressed training bundle exceeds max_bundle_bytes')
+        files[name] = content
+
     for path in sorted((root / 'src/modelchef').glob('*.py')):
-        files[path.relative_to(root).as_posix()] = path.read_bytes()
-    files['pyproject.toml'] = (root / 'pyproject.toml').read_bytes()
+        add_file(path.relative_to(root).as_posix(), path)
+    add_file('pyproject.toml', root / 'pyproject.toml')
+    if (root / 'README.md').is_file():
+        add_file('README.md', root / 'README.md')
     recipe = config.model_dump(mode='json')
     if config.model.custom_swiglu_path:
         raise ValueError('Custom CUDA managed AWS packaging is not supported yet; run on a prepared host')
@@ -29,14 +48,20 @@ def build_bundle(root, settings):
         path = root / config.data.local_path
         rows, read_bytes = [], 0
         with path.open('rb') as source:
-            for index, line in enumerate(source):
+            index = 0
+            remaining = cap - sum(map(len, files.values()))
+            while len(rows) < config.data.max_documents:
+                line = source.readline(min(config.data.max_download_bytes, remaining) - read_bytes + 1)
+                if not line:
+                    break
                 read_bytes += len(line)
                 if read_bytes > config.data.max_download_bytes:
                     raise ValueError('Local training input exceeds byte budget')
+                if read_bytes > remaining:
+                    raise ValueError('Uncompressed training bundle exceeds max_bundle_bytes')
                 if index >= config.data.offset:
                     rows.append(line)
-                if len(rows) >= config.data.max_documents:
-                    break
+                index += 1
         files['inputs/data.jsonl'] = b''.join(rows)
         recipe['data'].update(local_path='inputs/data.jsonl', offset=0)
     for field in ['parent_run', 'teacher_run']:
@@ -53,13 +78,10 @@ def build_bundle(root, settings):
         checkpoint = f"checkpoints/step-{report['optimizer_steps']:06d}.pt"
         for name in ['config.json', 'report.json', 'tokenizer.json', checkpoint]:
             path = parent / name
-            if path.stat().st_size > cap:
-                raise ValueError('Parent checkpoint exceeds bundle cap')
-            files[f'{relative}/{name}'] = path.read_bytes()
+            add_file(f'{relative}/{name}', path)
         recipe['stage'][field] = relative
     for index, filename in enumerate(config.processing.benchmark_files):
-        content = (root / filename).read_bytes()
-        files[f'inputs/decontamination-{index}.txt'] = content
+        add_file(f'inputs/decontamination-{index}.txt', root / filename)
     recipe['processing']['benchmark_files'] = [f'inputs/decontamination-{i}.txt'
         for i in range(len(config.processing.benchmark_files))]
     recipe['output_dir'] = 'artifacts/training'
@@ -128,6 +150,7 @@ def training_preflight(root, settings):
     root = Path(root)
     config = RunConfig.model_validate(yaml.safe_load((root / settings['pipeline_config']).read_text()))
     config.name = 'aws-local-preflight'
+    config.output_dir = 'artifacts/aws-training-preflight/' + uuid.uuid4().hex
     config.data.max_documents = min(config.data.max_documents, 64)
     config.data.max_tokens = min(config.data.max_tokens, 16000)
     config.training.accelerator, config.training.precision = 'cpu', 'fp32'
@@ -148,4 +171,8 @@ def training_preflight(root, settings):
     path.write_text(yaml.safe_dump(config.model_dump(mode='json')), encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelchef.cli', 'pipeline', str(path), '--run'],
                    cwd=root, check=True, timeout=300)
-    return {'passed': True, 'recipe': str(path), 'steps': 2}
+    reports = list((root / config.output_dir).glob('*/report.json'))
+    if len(reports) != 1 or json.loads(reports[0].read_text())['status'] != 'completed':
+        raise RuntimeError('Local AWS training preflight did not produce a completed run; no instance launched')
+    return {'passed': True, 'recipe': str(path), 'steps': 2,
+            'run_dir': str(reports[0].parent)}

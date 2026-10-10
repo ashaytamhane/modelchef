@@ -172,7 +172,16 @@ class SpotRunner:
         report = json.loads(row[1])
         instance_id = report.get("instance_id")
         if not instance_id:
-            raise ValueError("This run has no journaled instance to reconcile")
+            response = self.ec2.describe_instances(Filters=[
+                {'Name': 'client-token', 'Values': [run_id]},
+                {'Name': 'tag:Project', 'Values': ['ModelChef']},
+                {'Name': 'tag:RunId', 'Values': [run_id]}])
+            found = [i for reservation in response['Reservations'] for i in reservation['Instances']]
+            if len(found) != 1:
+                raise ValueError('Expected one instance for this run; inspect AWS before retrying')
+            instance_id = found[0]['InstanceId']
+            report['instance_id'] = instance_id
+            ledger.record(run_id, 'recovered', report)
         instance = self.ec2.describe_instances(InstanceIds=[instance_id])[
             "Reservations"][0]["Instances"][0]
         report["terminated"] = instance["State"]["Name"] == "terminated"
@@ -288,6 +297,17 @@ class SpotRunner:
         report = {k: v for k, v in plan.items() if k != "user_data"}
         report["run_id"] = run_id
         report["local_preflight"] = preflight
+        report['started_at'] = datetime.now(UTC).isoformat()
+        out = self.root / 'artifacts/aws-runs' / run_id
+        out.mkdir(parents=True, exist_ok=True)
+
+        def persist(state):
+            ledger.record(run_id, state, report)
+            temporary = out / 'report.json.tmp'
+            temporary.write_text(json.dumps(report, indent=2, default=str), encoding='utf-8')
+            temporary.replace(out / 'report.json')
+
+        persist('reserved')
         started = time.monotonic()
         instance_id = None
         security_group = None
@@ -306,6 +326,8 @@ class SpotRunner:
             security_group = self.ec2.create_security_group(
                 GroupName=run_id, Description="ModelChef outbound-only test",
                 VpcId=plan["vpc_id"])["GroupId"]
+            report['security_group_id'] = security_group
+            persist('launching')
             deadline = datetime.now(UTC) + timedelta(minutes=s["max_runtime_minutes"])
             profile = ({'IamInstanceProfile': {'Name': s['instance_profile_name']}}
                        if bundle is not None else {})
@@ -328,7 +350,7 @@ class SpotRunner:
                     {"Key": "RunId", "Value": run_id}]} for kind in ["instance", "volume"]])
             instance_id = launch["Instances"][0]["InstanceId"]
             report["instance_id"] = instance_id
-            ledger.record(run_id, "launched", report)
+            persist('launched')
             self.scheduler.create_schedule(Name=run_id, GroupName="modelchef",
                 ScheduleExpression="at(" + deadline.strftime("%Y-%m-%dT%H:%M:%S") + ")",
                 ScheduleExpressionTimezone="UTC", FlexibleTimeWindow={"Mode": "OFF"},
@@ -347,48 +369,60 @@ class SpotRunner:
                     break  # Confirm completion through the termination waiter below.
                 time.sleep(15)
         finally:
-            # Recover an instance ID if the launch response was lost after AWS accepted it.
-            if instance_id is None and security_group:
-                recovered = self.ec2.describe_instances(Filters=[
-                    {"Name": "client-token", "Values": [run_id]},
-                    {"Name": "instance-state-name", "Values": ["pending", "running",
-                                                              "shutting-down", "stopped"]}])
-                instances = [i for r in recovered["Reservations"] for i in r["Instances"]]
-                if instances:
-                    instance_id = instances[0]["InstanceId"]
-                    report["instance_id"] = instance_id
-            # Do not remove the AWS watchdog or release reservations before confirmed termination.
-            if instance_id and not terminated:
-                from botocore.exceptions import WaiterError
+            try:
+                # Recover an instance ID if AWS accepted a launch whose response was lost.
+                if instance_id is None and security_group:
+                    recovered = self.ec2.describe_instances(Filters=[
+                        {"Name": "client-token", "Values": [run_id]},
+                        {"Name": "instance-state-name", "Values": ["pending", "running",
+                                                                  "shutting-down", "stopped"]}])
+                    instances = [i for r in recovered["Reservations"] for i in r["Instances"]]
+                    if instances:
+                        instance_id = instances[0]["InstanceId"]
+                        report["instance_id"] = instance_id
+                        persist('recovered')
+                # Preserve the watchdog and reservation until termination is confirmed.
+                if instance_id and not terminated:
+                    from botocore.exceptions import WaiterError
 
-                self.ec2.terminate_instances(InstanceIds=[instance_id])
-                waiter = self.ec2.get_waiter("instance_terminated")
-                try:
-                    waiter.wait(InstanceIds=[instance_id],
-                                WaiterConfig={"Delay": 5, "MaxAttempts": 12})
-                except WaiterError:
-                    # Disposable test: no persistent data to preserve after a stalled shutdown.
-                    self.ec2.terminate_instances(InstanceIds=[instance_id],
-                                                 Force=True, SkipOsShutdown=True)
-                    waiter.wait(InstanceIds=[instance_id],
-                                WaiterConfig={"Delay": 5, "MaxAttempts": 60})
-                terminated = True
-            report.update(terminated=terminated, elapsed_seconds=time.monotonic() - started)
-            if instance_id:
-                console = self.ec2.get_console_output(InstanceId=instance_id, Latest=True)
-                report["console_output"] = console.get("Output", "")
-                report["test_passed"] = "MODELCHEF_RESULT=0" in report["console_output"]
-            ledger.record(run_id, "terminated" if terminated else "no-instance", report)
-            out = self.root / "artifacts/aws-runs" / run_id
-            out.mkdir(parents=True, exist_ok=True)
-            (out / "report.json").write_text(json.dumps(report, indent=2, default=str))
-            if terminated and schedule_created:
-                try:
-                    self.scheduler.delete_schedule(Name=run_id, GroupName="modelchef")
-                except self.scheduler.exceptions.ResourceNotFoundException:
-                    pass
-            if security_group and (terminated or not instance_id):
-                self.ec2.delete_security_group(GroupId=security_group)
+                    self.ec2.terminate_instances(InstanceIds=[instance_id])
+                    waiter = self.ec2.get_waiter("instance_terminated")
+                    try:
+                        waiter.wait(InstanceIds=[instance_id],
+                                    WaiterConfig={"Delay": 5, "MaxAttempts": 12})
+                    except WaiterError:
+                        # Disposable test: no persistent data after a stalled shutdown.
+                        self.ec2.terminate_instances(InstanceIds=[instance_id],
+                                                     Force=True, SkipOsShutdown=True)
+                        waiter.wait(InstanceIds=[instance_id],
+                                    WaiterConfig={"Delay": 5, "MaxAttempts": 60})
+                    terminated = True
+                report.update(terminated=terminated, elapsed_seconds=time.monotonic() - started)
+                persist('terminated' if terminated else 'no-instance')
+                if instance_id:
+                    from botocore.exceptions import BotoCoreError, ClientError
+
+                    try:
+                        console = self.ec2.get_console_output(InstanceId=instance_id, Latest=True)
+                        report["console_output"] = console.get("Output", "")
+                        report["test_passed"] = "MODELCHEF_RESULT=0" in report["console_output"]
+                    except (BotoCoreError, ClientError) as error:
+                        # Console collection must never strand otherwise disposable resources.
+                        report['console_error'] = str(error)
+                        report['test_passed'] = False
+                if terminated and schedule_created:
+                    try:
+                        self.scheduler.delete_schedule(Name=run_id, GroupName="modelchef")
+                    except self.scheduler.exceptions.ResourceNotFoundException:
+                        pass
+                if security_group and (terminated or not instance_id):
+                    self.ec2.delete_security_group(GroupId=security_group)
+                persist('terminated' if terminated else 'no-instance')
+            except BaseException as error:
+                report.update(terminated=terminated, elapsed_seconds=time.monotonic() - started,
+                              cleanup_error=str(error))
+                persist('cleanup-pending')
+                raise
         if bundle is not None and terminated:
             self.fetch_training_results(report, out)
         return report

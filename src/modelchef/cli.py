@@ -13,14 +13,22 @@ from modelchef.hardware import detect_hardware, resolve_runtime, setup_plan
 from modelchef.progress import operation
 
 
-def main() -> None:
+def _settings(path, section):
+    with Path(path).open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    if not isinstance(config, dict) or not isinstance(config.get(section), dict):
+        raise TypeError(f"{path} requires a '{section}' mapping")
+    return config[section]
+
+
+def _main() -> None:
     parser = argparse.ArgumentParser(prog="modelchef")
     command = parser.add_subparsers(dest="command", required=True)
     workflow_parser = command.add_parser('cook', help='Plan/run a sequence of local stage recipes')
     workflow_parser.add_argument('path', type=Path)
     workflow_parser.add_argument('--run', action='store_true')
     command.add_parser("doctor", help="Inspect Python, PyTorch and CUDA")
-    config_parser = command.add_parser("check-config", help="Validate initial YAML config")
+    config_parser = command.add_parser("check-config", help="Validate a runtime config, training recipe or workflow")
     config_parser.add_argument("path", type=Path)
     runtime_parser = command.add_parser("resolve-runtime", help="Resolve auto device and precision")
     runtime_parser.add_argument("path", type=Path)
@@ -114,8 +122,12 @@ def main() -> None:
     standard.add_argument('--limit', type=int, default=100)
     standard.add_argument('--output', default='artifacts/standard-evaluation')
     standard.add_argument('--run', action='store_true')
+    standard.add_argument('--device', choices=['auto', 'cpu', 'cuda', 'rocm', 'mps'], default='auto')
+    parser.add_argument("--debug", action="store_true", help="Show tracebacks for troubleshooting")
     parser.add_argument("--quiet", action="store_true", help="Hide CLI progress on stderr")
     for subparser in command.choices.values():
+        subparser.add_argument("--debug", action="store_true", default=argparse.SUPPRESS,
+                               help="Show tracebacks for troubleshooting")
         subparser.add_argument("--quiet", action="store_true", default=argparse.SUPPRESS,
                                help="Hide CLI progress on stderr")
     args = parser.parse_args()
@@ -125,7 +137,7 @@ def main() -> None:
             print(json.dumps(cook(args.path, Path.cwd(), args.run), indent=2, default=str))
         elif args.command == 'aws-serve':
             from modelchef.aws_serving import ServingRunner
-            settings = yaml.safe_load(args.path.read_text())['aws_serving']
+            settings = _settings(args.path, 'aws_serving')
             runner = ServingRunner(settings, Path.cwd())
             if args.action == 'deploy':
                 result = runner.deploy() if args.run else runner.plan()
@@ -151,7 +163,7 @@ def main() -> None:
         elif args.command == 'evaluate-standard':
             from modelchef.comparison import standard_plan
             print(json.dumps(standard_plan(args.model_path, args.tasks, args.limit,
-                                           args.output, args.run), indent=2))
+                                           args.output, args.run, args.device), indent=2))
         elif args.command == 'download-model':
             from modelchef.pretrained import download_model
             print(json.dumps(download_model(args.repo, Path.cwd(), args.revision,
@@ -179,18 +191,20 @@ def main() -> None:
         elif args.command == "pipeline":
             from modelchef.run_config import RunConfig
             with args.path.open(encoding="utf-8") as stream:
-                config = RunConfig.model_validate(yaml.safe_load(stream))
+                config = RunConfig.model_validate(yaml.safe_load(stream)).validate_execution()
             if args.run:
                 from modelchef.pipeline import run_pipeline
-                run_pipeline(config, Path.cwd(), args.resume)
+                result = run_pipeline(config, Path.cwd(), args.resume)
+                if result.get('status') != 'completed':
+                    parser.exit(1, f"Training ended with status {result.get('status')}. "
+                                f"Inspect {result.get('run_dir')}/report.json before resuming.\n")
             else:
                 print("Validated plan only: no dataset download, training or AWS launch. "
                       "Add --run to execute on this machine.")
                 print(json.dumps(config.model_dump(mode="json"), indent=2))
         elif args.command in {"aws-test", "aws-train", "aws-reconcile"}:
             from modelchef.aws_runner import SpotRunner
-            with args.path.open(encoding="utf-8") as stream:
-                settings = yaml.safe_load(stream)["aws_test"]
+            settings = _settings(args.path, "aws_test")
             if args.command == 'aws-train' and not settings.get('pipeline_config'):
                 raise ValueError('aws-train requires pipeline_config in the AWS configuration')
             if getattr(args, "instance_type", None):
@@ -208,64 +222,85 @@ def main() -> None:
                 parser.exit(1, "Spot instance terminated; test success not confirmed in console output\n")
         elif args.command in {"setup-vllm", "serve-vllm"}:
             from modelchef.inference import launch_server, serve_plan, vllm_setup_plan
-            try:
-                if args.command == "setup-vllm":
-                    plan = vllm_setup_plan(args.root, detect_hardware(), args.version)
-                    print(json.dumps(plan, indent=2))
-                    if args.apply:
-                        if not shutil.which("uv"):
-                            parser.error("Install uv and add it to PATH first")
-                        if not plan["c_compiler_available"]:
-                            parser.error("Install a C compiler first (Ubuntu: sudo apt install "
-                                         "build-essential)")
-                        if not (Path(plan["environment"]) / "bin/python").is_file():
-                            parser.error("Create the project's .venv environment first")
-                        for install_command in plan["commands"]:
-                            subprocess.run(install_command, check=True)
-                else:
-                    with args.path.open(encoding="utf-8") as stream:
-                        plan = serve_plan(yaml.safe_load(stream), args.root)
-                    print(json.dumps(plan, indent=2))
-                    if args.run:
-                        launch_server(plan)
-            except (ValueError, TypeError, OSError, subprocess.SubprocessError) as error:
-                parser.error(str(error))
+            if args.command == "setup-vllm":
+                plan = vllm_setup_plan(args.root, detect_hardware(), args.version)
+                print(json.dumps(plan, indent=2))
+                if args.apply:
+                    if not shutil.which("uv"):
+                        parser.error("Install uv and add it to PATH first")
+                    if not plan["c_compiler_available"]:
+                        parser.error("Install a C compiler first (Ubuntu: sudo apt install "
+                                     "build-essential)")
+                    if not (Path(plan["environment"]) / "bin/python").is_file():
+                        parser.error("Create the project's .venv environment first")
+                    for install_command in plan["commands"]:
+                        subprocess.run(install_command, check=True)
+            else:
+                with args.path.open(encoding="utf-8") as stream:
+                    plan = serve_plan(yaml.safe_load(stream), args.root)
+                print(json.dumps(plan, indent=2))
+                if args.run:
+                    launch_server(plan)
         elif args.command == "doctor":
             print(json.dumps(check_environment(), indent=2))
         elif args.command == "setup":
-            try:
-                plan = setup_plan(args.backend, args.index_url, args.torch_version)
-                print(json.dumps(plan, indent=2))
-                if args.apply:
-                    if not plan["python_supported"]:
-                        parser.error("Create a Python 3.11/3.12 environment first")
-                    if sys.prefix == sys.base_prefix:
-                        parser.error("Activate a project virtual environment before --apply")
-                    if not shutil.which("uv"):
-                        parser.error("Install uv and add it to PATH first")
-                    subprocess.run(plan["command"], check=True)
-            except (ValueError, subprocess.SubprocessError) as error:
-                parser.error(str(error))
+            plan = setup_plan(args.backend, args.index_url, args.torch_version)
+            print(json.dumps(plan, indent=2))
+            if args.apply:
+                if not plan["python_supported"]:
+                    parser.error("Create a Python 3.11/3.12 environment first")
+                if sys.prefix == sys.base_prefix:
+                    parser.error("Activate a project virtual environment before --apply")
+                if not shutil.which("uv"):
+                    parser.error("Install uv and add it to PATH first")
+                subprocess.run(plan["command"], check=True)
         elif args.command == "smoke":
             from modelchef.smoke import run_smoke
-            try:
-                print(json.dumps(run_smoke(args.accelerator, args.precision), indent=2))
-            except (ValueError, ImportError) as error:
-                parser.error(str(error))
+            print(json.dumps(run_smoke(args.accelerator, args.precision), indent=2))
         elif args.command in {"check-config", "resolve-runtime"}:
             with args.path.open(encoding="utf-8") as f:
                 config = yaml.safe_load(f)
-            if not isinstance(config, dict) or "project" not in config or "runtime" not in config:
-                parser.error("Config must contain 'project' and 'runtime' sections")
+            if not isinstance(config, dict):
+                raise ValueError("Configuration must be a YAML mapping")
+            if args.command == "check-config" and "stages" in config:
+                from modelchef.workflow import cook
+                config = cook(args.path, Path.cwd())
+            elif args.command == "check-config" and "runtime" not in config:
+                from modelchef.run_config import RunConfig
+                config = RunConfig.model_validate(config).validate_execution().model_dump(mode="json")
+            elif not isinstance(config.get("project"), dict) or not isinstance(config.get("runtime"), dict):
+                raise ValueError("Runtime config requires 'project' and 'runtime' mappings")
             if args.command == "resolve-runtime":
-                try:
-                    config["runtime"] = resolve_runtime(config["runtime"], detect_hardware())
-                except (ValueError, TypeError) as error:
-                    parser.error(str(error))
+                config["runtime"] = resolve_runtime(config["runtime"], detect_hardware())
                 if args.output:
                     args.output.parent.mkdir(parents=True, exist_ok=True)
                     args.output.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
             print(json.dumps(config, indent=2))
+
+
+def main() -> None:
+    """Keep routine input/environment errors concise; --debug retains diagnostic tracebacks."""
+    try:
+        _main()
+    except KeyboardInterrupt:
+        print("ModelChef interrupted. Check the saved run report before resuming.", file=sys.stderr)
+        raise SystemExit(130) from None
+    except (ValueError, TypeError, OSError, ImportError, RuntimeError, yaml.YAMLError, subprocess.SubprocessError) as error:
+        if "--debug" in sys.argv[1:]:
+            raise
+        message = str(error)
+        if isinstance(error, ModuleNotFoundError):
+            package = (error.name or "").split(".")[0]
+            extras = {"pydantic": "pipeline", "tokenizers": "pipeline", "safetensors": "pipeline",
+                      "transformers": "pretrained", "huggingface_hub": "pretrained", "peft": "peft",
+                      "bitsandbytes": "qlora", "transformer_engine": "nvfp4", "boto3": "aws",
+                      "botocore": "aws", "vllm": "inference", "lm_eval": "evaluation"}
+            if package == "torch":
+                message += ". Run modelchef setup, then modelchef setup --apply."
+            elif package in extras:
+                message += f". Install the extra: uv pip install -e '.[{extras[package]}]'."
+        print(f"ModelChef error: {message}\nUse --debug to show the traceback.", file=sys.stderr)
+        raise SystemExit(2) from None
 
 
 if __name__ == "__main__":

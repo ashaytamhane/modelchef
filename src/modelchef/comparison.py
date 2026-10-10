@@ -3,17 +3,17 @@ import json
 from contextlib import nullcontext
 from pathlib import Path
 
-import torch
-
-from modelchef.benchmarks import evaluate_choices
-from modelchef.chat import checkpoint_for
-from modelchef.corpus import digest
-from modelchef.engines import create_model, load_tokenizer
+from modelchef.corpus import digest, file_digest
 from modelchef.hardware import detect_hardware, resolve_runtime
-from modelchef.run_config import RunConfig
 
 
 def compare(run_dir, baselines, output):
+    import torch
+
+    from modelchef.benchmarks import evaluate_choices
+    from modelchef.chat import checkpoint_for
+    from modelchef.engines import create_model, load_tokenizer
+    from modelchef.run_config import RunConfig
     folder = Path(run_dir)
     examples_path = folder / 'benchmark-examples.json'
     examples = json.loads(examples_path.read_text())
@@ -50,7 +50,12 @@ def compare(run_dir, baselines, output):
             context = getattr(raw.config, 'max_position_embeddings', 128)
         model.to(device).eval()
         scores = evaluate_choices(model, tokenizer, examples, device, context, nullcontext)
-        results.append({'model': str(path), 'context': context, 'scores': scores})
+        weight_paths = [checkpoint_for(path)] if (path / 'report.json').exists() else (
+            sorted(path.glob('*.safetensors')) or sorted(path.glob('*.bin')))
+        tokenizer_path = path / 'tokenizer.json'
+        results.append({'model': str(path), 'context': context, 'scores': scores,
+                        'weights_sha256': {p.name: file_digest(p) for p in weight_paths},
+                        'tokenizer_sha256': file_digest(tokenizer_path) if tokenizer_path.exists() else None})
         del model
         if not (path / 'report.json').exists():
             del raw
@@ -62,13 +67,18 @@ def compare(run_dir, baselines, output):
     return report
 
 
-def standard_plan(model_path, tasks=None, limit=100, output='artifacts/standard-evaluation', run=False):
+def standard_plan(model_path, tasks=None, limit=100, output='artifacts/standard-evaluation', run=False, device='auto'):
     """Explicit harness execution may download task data; preview is entirely local."""
     import subprocess
     import sys
     model = Path(model_path).resolve()
     if not (model / 'config.json').exists():
         raise ValueError('Provide an existing HF export directory')
+    if not any(model.glob('*.safetensors')) and not any(model.glob('*.bin')):
+        raise ValueError('HF evaluation requires local model weights')
+    if not any((model / name).is_file() for name in ['tokenizer.json', 'tokenizer.model', 'vocab.json']):
+        raise ValueError('HF evaluation requires local tokenizer files')
+    runtime = resolve_runtime({'accelerator': device, 'precision': 'fp32'}, detect_hardware())
     if limit < 1:
         raise ValueError('Evaluation limit must be positive')
     tasks = tasks or ['hellaswag', 'piqa', 'arc_easy']
@@ -77,9 +87,10 @@ def standard_plan(model_path, tasks=None, limit=100, output='artifacts/standard-
     if ',' in str(model):
         raise ValueError('Harness model path cannot contain commas')
     command = [sys.executable, '-m', 'lm_eval', 'run', '--model', 'hf', '--model_args',
-               f'pretrained={model},trust_remote_code=False', '--tasks', *tasks,
-               '--limit', str(limit), '--batch_size', '1', '--output_path', str(output)]
+               f'pretrained={model},trust_remote_code=False,local_files_only=True', '--tasks', *tasks,
+               '--limit', str(limit), '--batch_size', '1', '--device', runtime['device'],
+               '--output_path', str(output)]
     if run:
         subprocess.run(command, check=True)
-    return {'command': command, 'executed': run,
+    return {'command': command, 'executed': run, 'device': runtime['device'],
             'note': 'Execution may download benchmark datasets; --limit bounds scored examples, not download bytes.'}

@@ -77,6 +77,10 @@ def setup_plan(backend="auto", index_url=None, torch_version=None):
     if backend not in {"auto", "cpu", "cuda", "rocm", "mps"}:
         raise ValueError("Unknown installation backend")
     system = platform.system()
+    if system == "Darwin" and platform.machine().lower() not in {"arm64", "aarch64"}:
+        raise ValueError("Automatic setup requires Apple Silicon on macOS. Intel Macs can use "
+                         "an existing compatible source/community PyTorch build for CPU training "
+                         "or act as an AWS controller; official modern Intel macOS wheels are unavailable.")
     driver = None
     if shutil.which("nvidia-smi"):
         result = subprocess.run(

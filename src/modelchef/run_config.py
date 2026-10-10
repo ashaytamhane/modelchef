@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Section(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
 class Data(Section):
@@ -207,10 +207,15 @@ class RunConfig(Section):
                 raise ValueError('LoRA requires explicit nonempty target_modules')
             if m.quantization != 'none':
                 raise ValueError('PEFT and FP4 projection quantization cannot be combined')
+        if (m.backend == 'native' and m.peft.method == 'lora' and m.tie_embeddings and
+                any(name == 'head' or name.endswith('.head') for name in m.peft.target_modules)):
+            raise ValueError('LoRA on a tied output head cannot be merged; set tie_embeddings: false')
         if m.peft.method == 'qlora' and m.backend != 'huggingface':
             raise ValueError('QLoRA requires the Hugging Face backend')
         if m.experts_per_token > m.num_experts:
             raise ValueError('experts_per_token must not exceed num_experts')
+        if m.custom_swiglu_path and (m.backend != 'native' or m.type != 'decoder_rope'):
+            raise ValueError('Custom SwiGLU requires a native dense decoder')
         if m.type == 'decoder_moe' and m.bias:
             raise ValueError('Native MoE requires bias: false for Mixtral-compatible export')
         if m.quantization == 'nvfp4' and (m.backend != 'native' or m.type != 'decoder_rope'):
@@ -220,4 +225,12 @@ class RunConfig(Section):
         if t.distributed == 'ddp' and (t.compile or m.peft.method == 'qlora' or
                                       m.quantization == 'nvfp4' or self.stage.kind == 'rlvr'):
             raise ValueError('DDP currently excludes compile, QLoRA, NVFP4 and RLVR')
+        return self
+
+    def validate_execution(self):
+        """Stored imports/students share the schema but are not from-scratch recipes."""
+        if self.stage.kind == 'pretrain' and self.model.backend == 'huggingface':
+            raise ValueError('Import the pretrained model, then choose a continuation/post-training stage')
+        if self.stage.kind == 'pretrain' and self.tokenizer.algorithm != 'byte_bpe':
+            raise ValueError('From-scratch pretraining requires tokenizer.algorithm: byte_bpe')
         return self

@@ -21,3 +21,7 @@ data/processed/
 SETUP_STATUS.md
 requirements-*.snapshot.txt
 configs/*.local.yaml
+
+# Local package build products
+build/
+dist/

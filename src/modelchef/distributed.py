@@ -104,6 +104,7 @@ def run_distributed(config, root, resume=None):
             return nullcontext() if dtype == torch.float32 else torch.autocast(device, dtype=dtype)
 
         step, consumed = saved['step'], saved['tokens_seen']
+        skipped_updates = saved.get('skipped_optimizer_updates', 0)
         started = time.monotonic()
         initial_step = step
         result = preparation[0]['report']
@@ -121,7 +122,7 @@ def run_distributed(config, root, resume=None):
                 payload = {**saved, **states[0], 'model': model.state_dict(),
                            'optimizer': optimizer.state_dict(), 'scaler': scaler.state_dict(),
                            'rank_states': states, 'world_size': world, 'step': step,
-                           'tokens_seen': consumed,
+                           'tokens_seen': consumed, 'skipped_optimizer_updates': skipped_updates,
                            'cuda_rng': [states[0]['cuda_rng']] if device == 'cuda' else []}
                 temporary = path.with_suffix('.tmp')
                 torch.save(payload, temporary)
@@ -163,7 +164,14 @@ def run_distributed(config, root, resume=None):
             invalid = torch.tensor(int(not torch.isfinite(norm)), device=device)
             dist.all_reduce(invalid, op=dist.ReduceOp.MAX)
             if invalid.item():
-                raise FloatingPointError('Non-finite DDP gradient norm on at least one rank')
+                if not scaler.is_enabled():
+                    raise FloatingPointError('Non-finite DDP gradient norm on at least one rank')
+                scaler.update(new_scale=scaler.get_scale() * scaler.get_backoff_factor())
+                skipped_updates += 1
+                if rank == 0:
+                    report(f'FP16 gradient overflow: all ranks skipped the update; '
+                           f'loss scale={scaler.get_scale():g}, retrying step {step + 1}.')
+                continue
             scaler.step(optimizer)
             scaler.update()
             metrics = torch.tensor([loss_total, tokens], dtype=torch.float64, device=device)
@@ -172,7 +180,8 @@ def run_distributed(config, root, resume=None):
             step += 1
             if rank == 0:
                 row = {'step': step, 'training_loss': metrics[0].item() / world,
-                       'tokens_seen': consumed, 'learning_rate': optimizer.param_groups[0]['lr']}
+                       'tokens_seen': consumed, 'skipped_optimizer_updates': skipped_updates,
+                       'learning_rate': optimizer.param_groups[0]['lr']}
                 if step % t.evaluate_every == 0 or step == t.steps:
                     row['validation'] = evaluate(model, blocks['validation'][:2], c.evaluation.batches,
                                                  t.micro_batch_size, device, amp)
@@ -186,6 +195,7 @@ def run_distributed(config, root, resume=None):
         if rank == 0:
             result.update(status='completed', checkpoint=str(path), optimizer_steps=step,
                           tokens_seen=consumed, checkpoint_reload_verified=True,
+                          skipped_optimizer_updates=skipped_updates,
                           global_batch_size=t.micro_batch_size * t.gradient_accumulation * world,
                           tokens_per_second=(step - initial_step) * t.micro_batch_size *
                               t.gradient_accumulation * c.model.context_length * world / (time.monotonic() - started))
@@ -222,8 +232,9 @@ def run_distributed(config, root, resume=None):
                         break
             result['sample'] = tokenizer.decode(generated[0].tolist())
             (folder / 'report.json').write_text(json.dumps(result, indent=2))
-        dist.barrier()
-        return result
+        final_report = [result if rank == 0 else None]
+        dist.broadcast_object_list(final_report, src=0)
+        return final_report[0]
     except Exception as error:
         if rank == 0 and 'folder' in locals():
             failure = dict(locals().get('result', preparation[0]['report']))

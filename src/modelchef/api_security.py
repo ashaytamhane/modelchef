@@ -11,6 +11,9 @@ class SecurityMiddleware:
     def __init__(self, app):
         self.app = app
         self.settings = json.loads(os.environ['MODELCHEF_API_SECURITY'])
+        self.settings.setdefault('max_output_tokens', 256)
+        self.settings.setdefault('max_batch_size', 1)
+        self.settings.setdefault('max_choices', 1)
         self.secret = os.environ[self.settings['api_key_env']]
         if len(self.secret) < 32 or any(c.isspace() for c in self.secret):
             raise ValueError('API token must contain at least 32 non-whitespace characters')
@@ -70,7 +73,9 @@ class SecurityMiddleware:
                         break
                 if scope['method'] == 'POST':
                     try:
-                        payload = json.loads(body)
+                        def nonfinite(value):
+                            raise ValueError('Non-finite JSON number')
+                        payload = json.loads(body, parse_constant=nonfinite)
                     except (ValueError, UnicodeDecodeError):
                         return await reject(400)
                     if not isinstance(payload, dict):
@@ -80,16 +85,34 @@ class SecurityMiddleware:
                                'stop', 'seed', 'frequency_penalty', 'presence_penalty', 'n'}
                     if set(payload) - allowed:
                         return await reject(400)
+                    choices = payload.get('n', 1)
+                    if isinstance(choices, bool) or not isinstance(choices, int) or not 1 <= choices <= self.settings['max_choices']:
+                        return await reject(400)
+                    token_fields = [name for name in ('max_tokens', 'max_completion_tokens') if name in payload]
+                    if len(token_fields) > 1:
+                        return await reject(400)
+                    token_field = token_fields[0] if token_fields else 'max_tokens'
+                    tokens = payload.get(token_field, self.settings['max_output_tokens'])
+                    if isinstance(tokens, bool) or not isinstance(tokens, int) or not 1 <= tokens <= self.settings['max_output_tokens']:
+                        return await reject(400)
+                    payload[token_field] = tokens
                     if scope['path'] == '/v1/completions':
                         prompt = payload.get('prompt')
                         if not isinstance(prompt, str) and not (isinstance(prompt, list) and
+                                1 <= len(prompt) <= self.settings['max_batch_size'] and
                                 all(isinstance(p, str) for p in prompt)):
                             return await reject(400)
                     # Text-only boundary prevents user-controlled multimodal URL/file fetching.
                     messages = payload.get('messages', [])
                     if not isinstance(messages, list) or any(not isinstance(m, dict) or
-                            not isinstance(m.get('content'), str) for m in messages):
+                            set(m) - {'role', 'content', 'name'} or
+                            m.get('role') not in {'system', 'developer', 'user', 'assistant'} or
+                            not isinstance(m.get('content'), str) or
+                            ('name' in m and not isinstance(m['name'], str)) for m in messages):
                         return await reject(400)
+                    if scope['path'] == '/v1/chat/completions' and not messages:
+                        return await reject(400)
+                    body = json.dumps(payload, allow_nan=False).encode()
                 delivered = False
 
                 async def replay():

@@ -78,3 +78,15 @@ def test_native_fp4_requires_blackwell(exported_model, tmp_path, monkeypatch, ca
     else:
         with pytest.raises(ValueError, match='Blackwell'):
             serve_plan(exported_model, tmp_path)
+
+
+def test_generation_limits_are_bounded_by_server_context(exported_model, tmp_path):
+    import json
+    exported_model['inference']['max_model_len'] = 64
+    plan = serve_plan(exported_model, tmp_path)
+    security = json.loads(plan['environment']['MODELCHEF_API_SECURITY'])
+    assert security['max_output_tokens'] == 64
+    assert security['max_batch_size'] == security['max_choices'] == 1
+    exported_model['inference']['security'] = {'max_output_tokens': 65}
+    with pytest.raises(ValueError, match='max_model_len'):
+        serve_plan(exported_model, tmp_path)
