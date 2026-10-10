@@ -62,6 +62,11 @@ def main() -> None:
     aws_train.add_argument('path', type=Path)
     aws_train.add_argument('--instance-type')
     aws_train.add_argument('--run', action='store_true')
+    hosting = command.add_parser('aws-serve', help='Plan/deploy persistent on-demand API hosting')
+    hosting.add_argument('path', type=Path)
+    hosting.add_argument('--action', choices=['deploy', 'status', 'logs', 'stop', 'start', 'delete'], default='deploy')
+    hosting.add_argument('--deployment')
+    hosting.add_argument('--run', action='store_true')
     aws_reconcile = command.add_parser("aws-reconcile", help="Recover reports/cleanup for a saved run")
     aws_reconcile.add_argument("run_id")
     aws_reconcile.add_argument("--path", type=Path, default=Path("configs/aws-test.yaml"))
@@ -122,7 +127,21 @@ def main() -> None:
     standard.add_argument('--output', default='artifacts/standard-evaluation')
     standard.add_argument('--run', action='store_true')
     args = parser.parse_args()
-    if args.command == 'convert-data':
+    if args.command == 'aws-serve':
+        from ashayllm.aws_serving import ServingRunner
+        settings = yaml.safe_load(args.path.read_text())['aws_serving']
+        runner = ServingRunner(settings, Path.cwd())
+        if args.action == 'deploy':
+            result = runner.deploy() if args.run else runner.plan()
+        elif not args.deployment:
+            parser.error('--deployment is required for hosting lifecycle commands')
+        elif args.action == 'status' or args.run:
+            result = runner.action(args.deployment, args.action)
+        else:
+            result = {'planned': args.action, 'deployment': args.deployment,
+                      'note': 'Add --run to execute this hosting lifecycle command'}
+        print(json.dumps(result, indent=2, default=str))
+    elif args.command == 'convert-data':
         from ashayllm.data_tools import convert_data
         print(json.dumps(convert_data(args.source, args.output, args.format, args.max_bytes,
                                       args.max_documents), indent=2))

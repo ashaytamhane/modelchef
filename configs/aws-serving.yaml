@@ -1,0 +1,16 @@
+aws_serving:
+  profile: ashayllm
+  region: us-east-1
+  instance_type: g4dn.xlarge
+  ami_id: YOUR_PREPARED_X86_GPU_DLAMI
+  root_device: /dev/xvda  # Must match the selected AMI root device.
+  subnet_id: YOUR_PUBLIC_SUBNET
+  security_group_ids: [YOUR_RESTRICTED_HTTPS_SECURITY_GROUP]
+  instance_profile_name: YOUR_SERVING_INSTANCE_PROFILE
+  artifact_bucket: YOUR_PRIVATE_ARTIFACT_BUCKET
+  secret_id: YOUR_SERVING_SECRET_ARN
+  inference_config: configs/inference-public.yaml
+  storage_gb: 100
+  max_bundle_bytes: 1000000000
+  hourly_estimate_usd: '1.00'  # Set an all-in estimate for your chosen region/type.
+  alert_after_usd: '10.00'  # Status warning only; does not terminate or stop hosting.

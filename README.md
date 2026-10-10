@@ -53,6 +53,9 @@ flowchart TD
     AWS --> Guard[Local checks, budget ledger and termination deadlines]
     Guard --> Cloud[Temporary cloud workload]
     Cloud --> Cleanup[Collect evidence and confirm termination]
+    Export --> Hosting[Separate persistent on-demand hosting]
+    Hosting --> API[vLLM API managed by systemd]
+    API --> Explicit[Explicit stop / start / delete]
 ```
 
 The local pipeline runs where invoked; it does not choose or provision AWS automatically. Run artifacts and downloaded models remain outside Git. Post-training objectives and pretrained import/SFT/export are covered by small CPU tests, with native stages also exercised on CUDA. Real-device macOS, live AWS training and native FP4 validation require their respective environments.
@@ -66,12 +69,13 @@ The local pipeline runs where invoked; it does not choose or provision AWS autom
 | Develop code and run unit tests | Current machine | `python -m pytest -q`, `python -m ruff check .` | No |
 | Install PyTorch or vLLM | Current machine | `setup --apply`, `setup-vllm --apply` | No |
 | Serve an existing local model export | Current Linux/WSL CUDA machine | `serve-vllm ... --run` | No |
+| Host an API on EC2 | Separate persistent on-demand host | `aws-serve CONFIG --run` | Yes; ongoing charges until explicitly stopped/deleted |
 | Preview an EC2 test | Local controller makes read-only AWS requests | `aws-test` | Credentials, but no instance launched |
 | Provision and test a cloud GPU | Local controller launches a temporary EC2 instance; tests run there | `aws-test ... --run` | Yes; incurs AWS charges |
 | Launch a native training stage | Local controller packages inputs; a temporary Spot host trains | `aws-train CONFIG --run` | Yes; incurs AWS charges |
 | Recover cloud results/cleanup | Local controller queries AWS and removes temporary resources after termination | `aws-reconcile` | Yes; no new instance launched |
 
-Commands run **where you invoke them**. If you SSH into an existing EC2 instance and run `doctor`, it inspects that EC2 instance. It does not provision another machine. `aws-test --run` and `aws-train CONFIG --run` explicitly launch temporary Spot compute.
+Commands run **where you invoke them**. If you SSH into an existing EC2 instance and run `doctor`, it inspects that EC2 instance. It does not provision another machine. `aws-test --run` and `aws-train CONFIG --run` explicitly launch temporary Spot compute. `aws-serve CONFIG --run` launches a separate persistent on-demand serving host.
 
 `configs/local.yaml` and `configs/aws.yaml` describe runtime/model planning settings. Selecting `aws.yaml` does **not** deploy anything. `configs/aws-test.yaml` is the separate EC2 provisioning/budget configuration.
 
@@ -523,6 +527,15 @@ These controls are a secure starting point, not a guarantee of complete security
 
 ## AWS execution
 
+Choose the lifecycle before launching. A training job and a hosted API use different runners:
+
+| Workflow | Purchase model | Lifetime | Cost policy |
+| --- | --- | --- | --- |
+| `aws-test`, `aws-train` | Temporary Spot | Terminates after completion or deadline | Conservative reservations and runtime safeguards |
+| `aws-serve` | On-demand | Remains running until explicitly stopped or deleted | Status warnings and separately configured AWS Budgets notifications |
+
+Do not use a temporary training/test instance for a persistent API: its termination safeguards remain active. Export the trained model and deploy it independently. Existing manually provisioned hosts can still run `serve-vllm` directly.
+
 ### Prepare AWS access
 
 Skip this entire section for local-only work. AWS commands run from your **controller** environment: Windows, WSL or Linux. Use the same environment for credentials and the runner; Windows and WSL normally have separate AWS profile files.
@@ -698,6 +711,39 @@ Before provisioning, the runner performs local tests/lint and an actual bounded 
 
 The guest arms a shutdown timer before package/data work, verifies the source checksum, runs the pipeline and attempts a bounded result upload on exit. The existing AWS deadline and controller termination safeguards remain active. Confirm `terminated` and inspect the saved cloud report; a lost/interrupted result upload can leave `results_missing` even after cleanup. Results are downloaded as an ignored `results.tar.gz`, without automatically extracting an external archive. S3 objects persist until your lifecycle rules remove them; the ledger is a conservative estimate, not a hard cap on every AWS charge. Live cloud training has not been validated during this local-only development pass.
 
+### Persistent API hosting on EC2
+
+This workflow packages a local compatible export and launches one on-demand NVIDIA G-series instance. A systemd service starts vLLM at boot and restarts it after failure. There is no training deadline, shutdown trap, Spot interruption policy or automatic cost-based shutdown. It is a single-host deployment, without autoscaling or high availability.
+
+1. Complete the local export and API configuration described in [inference and API serving](#inference-and-api-serving). Copy `configs/inference-public.yaml` to `configs/inference-public.local.yaml`; set the export path, port and context length. The serving bundle rewrites certificate paths for the guest and does not upload your local certificates or token.
+2. Prepare an Amazon Linux-compatible x86 GPU image with working drivers, `/opt/pytorch/bin/activate`, systemd, a C compiler and an SSM agent. Supply its AMI ID and actual root-device name explicitly. Provide an existing subnet with outbound package/S3/Secrets Manager access, a restricted security group allowing only intended clients on the API TLS port, and an instance profile. No SSH port is opened by this code.
+3. Create a private S3 artifact bucket and a Secrets Manager secret with a JSON object containing `api_key`, `tls_cert` and `tls_key`. The token must be a random URL-safe string of at least 32 characters; the certificate chain and key are PEM strings, with escaped newlines in the JSON. Use a certificate trusted by clients for the hostname they will call. Store the secret through your own secure AWS tooling; never commit its values.
+4. Have your IAM administrator grant the controller scoped S3 uploads, EC2 launch/tag/read/stop/start/terminate, PassRole for the serving profile, and SSM SendCommand/read permissions. The instance role needs GetObject for its source prefix, GetSecretValue for this secret, and SSM managed-instance permissions; customer-managed encryption keys also need suitable decrypt permissions. The role receives temporary credentials; controller keys never enter the bundle. This runner reuses existing infrastructure and does not create IAM roles, secrets, buckets or security groups.
+5. Copy `configs/aws-serving.yaml` to ignored `configs/aws-serving.local.yaml`. Fill in the resource identifiers, profile/region, instance type, storage and `inference_config: configs/inference-public.local.yaml`. Set a realistic `hourly_estimate_usd` and `alert_after_usd`. These values are estimates, not price lookup or billing limits. Configure AWS Budgets notifications separately for recurring cost alerts.
+6. Preview and deploy:
+
+   ```bash
+   python -m ashayllm.cli aws-serve configs/aws-serving.local.yaml
+   python -m ashayllm.cli aws-serve configs/aws-serving.local.yaml --run
+   ```
+
+   Preview checks the local bundle without making service API calls. Deployment runs local tests/lint, uploads source/model with server-side encryption, launches on-demand EC2 with IMDSv2 and encrypted EBS, and records a deployment ID under ignored `artifacts/aws-serving/`. The guest fetches secret material into a protected directory and runs the API as a dedicated user. A successful launch response means provisioned, not API-ready; check the service logs and make an authenticated TLS request before sharing it.
+7. Manage the recorded deployment:
+
+   ```bash
+   python -m ashayllm.cli aws-serve configs/aws-serving.local.yaml --action status --deployment HOSTING_ID
+   python -m ashayllm.cli aws-serve configs/aws-serving.local.yaml --action logs --deployment HOSTING_ID --run
+   python -m ashayllm.cli aws-serve configs/aws-serving.local.yaml --action stop --deployment HOSTING_ID --run
+   python -m ashayllm.cli aws-serve configs/aws-serving.local.yaml --action start --deployment HOSTING_ID --run
+   python -m ashayllm.cli aws-serve configs/aws-serving.local.yaml --action delete --deployment HOSTING_ID --run
+   ```
+
+   Logs returns an SSM command ID; retrieve its output with `aws ssm get-command-invocation --command-id COMMAND_ID --instance-id INSTANCE_ID --profile YOUR_PROFILE --region YOUR_REGION`. Lifecycle commands report the requested transition; poll `status` to confirm it. Stop retains EBS and interrupts the API; start boots the installed service again. Delete terminates the host and deletes its configured root volume. Source objects, secrets and other pre-existing infrastructure remain.
+
+Status reports EC2 state, public IP and a coarse estimate since `LaunchTime`; it can include stopped time and reset on start, so it is not a cumulative billing ledger. Crossing the threshold sets `budget_alert: true` but never shuts the API down. Storage and retained objects can continue costing money after stop or deletion. Public IPs can change after stop/start; update your hostname accordingly or manage a stable address externally. Secrets are fetched at deployment, not refreshed automatically; rotate token/certificates securely on the host or redeploy and retire the old host. Protect the local journal: if launch response delivery fails, use its deployment ID/client token to recover the instance before retrying.
+
+Live hosting has not been deployed during development. Tests cover bundle boundaries, on-demand launch semantics, ownership checks and explicit lifecycle operations; cloud bootstrap, TLS reachability and model readiness still require a separately approved AWS run.
+
 ## Performance and precision experiments
 
 Establish a correctness baseline before changing execution settings. Architecture changes affect what model you train; kernel and compiler choices affect how its operations execute. Compare tokens/second, peak memory and validation behavior under the same recipe, and include compilation/warmup overhead when evaluating short runs.
@@ -782,6 +828,9 @@ flowchart TD
     Chat --> VLLM[inference.py: optional vLLM setup / serving]
     VLLM --> Security[api_security.py: authentication and request limits]
     CLI --> Spot[aws_runner.py: preflight, ledger, Spot and cleanup]
+    CLI --> Hosting[aws_serving.py: persistent on-demand host and lifecycle]
+    Hosting --> Service[systemd: restart vLLM after failure / reboot]
+    Hosting --> Secret[Secrets Manager: API token and TLS material]
     Spot --> Bundle[aws_training.py: capped bundle and guest training script]
     Bundle --> S3[S3: encrypted source and result transfer]
     Tests[tests/: configuration, objectives, causality and recovery] --> Pipeline
@@ -806,6 +855,7 @@ flowchart TD
 | `chat.py`, `inference.py` | Checkpoint inference, exports and optional vLLM serving |
 | `aws_runner.py` | Local preflight, conservative budget reservations, Spot lifecycle and shutdown safeguards |
 | `aws_training.py` | Allowlisted training bundles, local data/training preflight, source verification and bounded result upload |
+| `aws_serving.py` | Persistent on-demand deployment, bounded model bundle, systemd bootstrap and explicit stop/start/delete |
 | `tests/` | Small unit/integration tests; hardware availability determines device coverage |
 
 ## Troubleshooting
@@ -840,6 +890,7 @@ flowchart TD
 | `compare RUN_DIR [--baseline LOCAL_DIR]` | Compare models using saved benchmark examples |
 | `evaluate-standard LOCAL_EXPORT [--run]` | Plan or invoke the optional standard harness |
 | `aws-train CONFIG [--run]` | Plan or execute an S3-backed native Spot training stage |
+| `aws-serve CONFIG [--action ACTION] [--deployment ID] [--run]` | Plan/deploy persistent hosting or inspect/manage its lifecycle |
 | `doctor` | Inspect current hardware and PyTorch/CUDA |
 | `check-cuda-kernel PATH` | Validate local custom SwiGLU outputs and backward gradients on CUDA |
 | `setup [--apply]` | Plan/install hardware-aware PyTorch packages |
