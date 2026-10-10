@@ -35,6 +35,9 @@ def export_model(folder):
         tokenizer = load_tokenizer(folder)
         model = create_model(c, tokenizer.get_vocab_size())
         model.load_state_dict(state)
+        if c.peft.method == 'lora':
+            model.model.save_pretrained(folder / 'adapter', safe_serialization=True)
+            model.model = model.model.merge_and_unload(safe_merge=True)
         model.model.save_pretrained(output, safe_serialization=True)
         AutoTokenizer.from_pretrained(c.pretrained_path, local_files_only=True,
                                       trust_remote_code=False).save_pretrained(output)

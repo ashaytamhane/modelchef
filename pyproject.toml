@@ -14,6 +14,7 @@ dev = ["pytest>=8,<10", "ruff>=0.9"]
 train = ["torch==2.13.0", "numpy==2.3.5"]
 pipeline = ["pydantic>=2.10,<3", "tokenizers>=0.21,<0.24", "safetensors>=0.5,<1"]
 pretrained = ["transformers>=4.55,<5", "huggingface-hub>=0.34,<1"]
+peft = ["peft>=0.17,<0.19", "transformers>=4.55,<5", "huggingface-hub>=0.34,<1"]
 evaluation = ["lm-eval[hf]>=0.4.10,<0.5"]
 cuda-kernels = ["ninja>=1.11,<2"]
 cuda13-toolchain = [

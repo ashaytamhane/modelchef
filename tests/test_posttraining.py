@@ -88,7 +88,8 @@ def test_fp4_simulation_preserves_gradient_and_zero_values():
     assert torch.equal(fake_nvfp4(torch.zeros(2, 16)), torch.zeros(2, 16))
 
 
-def test_local_pretrained_import_and_sft(parent, tmp_path):
+@pytest.mark.parametrize('lora', [False, True])
+def test_local_pretrained_import_and_sft(parent, tmp_path, lora):
     transformers = pytest.importorskip('transformers')
     pytest.importorskip('safetensors')
     from ashayllm.chat import export_model
@@ -112,11 +113,40 @@ def test_local_pretrained_import_and_sft(parent, tmp_path):
     config = RunConfig.model_validate(yaml.safe_load(recipe.read_text()))
     config.training.accelerator = 'cpu'
     config.training.precision = 'fp32'
+    config.training.checkpoint_every = 1
+    if lora:
+        pytest.importorskip('peft')
+        config.model.peft.method = 'lora'
+        config.model.peft.target_modules = ['c_attn']
+        from ashayllm.engines import create_model, load_parent
+        initial = create_model(config.model, len(tokenizer))
+        parent_weights = torch.load(Path(imported) / 'checkpoints/step-000000.pt', weights_only=True)['model']
+        parent_config = RunConfig.model_validate_json((Path(imported) / 'config.json').read_text())
+        load_parent(initial, parent_weights, parent_config.model)
+        frozen = {name: p.detach().clone() for name, p in initial.named_parameters() if not p.requires_grad}
     result = run_pipeline(config, tmp_path)
     assert result['stage'] == 'sft'
     exported = export_model(result['run_dir'])
     restored = transformers.AutoModelForCausalLM.from_pretrained(exported, local_files_only=True)
     assert restored.config.model_type == 'gpt2'
+    if lora:
+        assert 0 < result['trainable_parameters'] < result['parameters']
+        assert (Path(result['run_dir']) / 'adapter/adapter_model.safetensors').exists()
+        trained = create_model(config.model, len(tokenizer))
+        weights = torch.load(result['checkpoint'], weights_only=True)['model']
+        trained.load_state_dict(weights)
+        for name, p in trained.named_parameters():
+            if name in frozen:
+                assert torch.equal(p, frozen[name]), name
+        assert any('lora_B' in name and value.abs().sum() > 0 for name, value in weights.items())
+        trained.eval()
+        restored.eval()
+        ids = torch.tensor([[1, 2, 3]])
+        with torch.no_grad():
+            assert torch.allclose(trained(ids), restored(ids).logits, atol=1e-5, rtol=1e-5)
+        resumed = run_pipeline(config, tmp_path, Path(result['run_dir']) / 'checkpoints/step-000001.pt')
+        recovered = torch.load(resumed['checkpoint'], weights_only=True)['model']
+        assert all(torch.equal(value, recovered[name]) for name, value in weights.items())
 
 
 def test_reasoning_is_optional_and_student_can_share_teacher_vocabulary(parent, tmp_path):

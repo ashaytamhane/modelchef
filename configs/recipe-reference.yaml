@@ -45,6 +45,13 @@ tokenizer:  # OPTIONAL: defaults are supplied when omitted.
   add_bos: false  # OPTIONAL: Raw-text packing only; structured stages apply their own prompt/EOS formatting.
   append_eos: true  # OPTIONAL: Raw-text document separator; structured stages always append response EOS.
 model:  # OPTIONAL: defaults are supplied when omitted.
+  peft:  # OPTIONAL: Parameter-efficient training; imported HF midtrain/SFT only.
+    method: none  # OPTIONAL: none | lora; QLoRA is not implemented.
+    rank: 8  # OPTIONAL: Positive adapter rank.
+    alpha: 16  # OPTIONAL: Positive adapter scaling factor.
+    dropout: 0.0  # OPTIONAL: Adapter dropout in [0, 1).
+    target_modules: [q_proj, v_proj]  # OPTIONAL: Must match the imported model; GPT-2 uses c_attn.
+    use_rslora: false  # OPTIONAL: Rank-stabilized scaling.
   backend: native  # OPTIONAL: native | huggingface; use import-model to configure a local pretrained adapter.
   pretrained_path: null  # CONDITIONAL: Required local source directory for the huggingface backend.
   pretrained_config_sha256: null  # OPTIONAL: Filled by import-model; validates the original HF config on loading.
@@ -81,7 +88,7 @@ training:  # OPTIONAL: defaults are supplied when omitted.
   steps: 40  # OPTIONAL: Optimizer updates, with training blocks sampled with replacement.
   micro_batch_size: 2  # OPTIONAL: defaults are supplied when omitted.
   gradient_accumulation: 2  # OPTIONAL: Effective single-device batch = micro_batch_size * gradient_accumulation.
-  optimizer: adamw  # OPTIONAL: adamw only; this updates full parameters, not LoRA adapters.
+  optimizer: adamw  # OPTIONAL: adamw only; optimizes trainable full weights or LoRA adapters.
   learning_rate: 0.0005  # OPTIONAL: defaults are supplied when omitted.
   min_learning_rate_ratio: 0.1  # OPTIONAL: Final cosine learning-rate floor relative to learning_rate.
   betas:  # OPTIONAL: defaults are supplied when omitted.

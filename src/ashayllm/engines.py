@@ -42,6 +42,14 @@ class HFDecoder(torch.nn.Module):
         if c.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
         self.model.config.use_cache = False
+        if c.peft.method == 'lora':
+            from peft import LoraConfig, get_peft_model
+            self.model = get_peft_model(self.model, LoraConfig(task_type='CAUSAL_LM',
+                r=c.peft.rank, lora_alpha=c.peft.alpha, lora_dropout=c.peft.dropout,
+                target_modules=c.peft.target_modules, use_rslora=c.peft.use_rslora,
+                bias='none'))
+            if c.gradient_checkpointing:
+                self.model.enable_input_require_grads()
 
     def forward(self, ids):
         if ids.shape[1] > self.config.context_length:
@@ -58,3 +66,21 @@ def create_model(c, vocab_size):
         from ashayllm.quantization import apply_fake_fp4
         apply_fake_fp4(model)
     return model
+
+
+def load_parent(model, state, parent_config):
+    if model.config.peft == parent_config.peft:
+        model.load_state_dict(state)
+    elif model.config.peft.method == 'lora' and parent_config.peft.method == 'none':
+        # Restore parent weights before wrapping, since LoRA changes module/state names.
+        from peft import get_peft_model
+        adapter = model.model.peft_config['default']
+        base = model.model.unload()
+        if hasattr(base, 'peft_config'):
+            del base.peft_config
+        base.load_state_dict({key.removeprefix('model.'): value for key, value in state.items()})
+        model.model = get_peft_model(base, adapter)
+        if model.config.gradient_checkpointing:
+            model.model.enable_input_require_grads()
+    else:
+        raise ValueError('Changing an existing adapter configuration requires merge/export and re-import')

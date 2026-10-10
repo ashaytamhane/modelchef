@@ -3,6 +3,9 @@
     "Architecture": {
       "additionalProperties": false,
       "properties": {
+        "peft": {
+          "$ref": "#/$defs/PEFT"
+        },
         "backend": {
           "default": "native",
           "enum": [
@@ -332,6 +335,53 @@
         }
       },
       "title": "Evaluation",
+      "type": "object"
+    },
+    "PEFT": {
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "default": "none",
+          "enum": [
+            "none",
+            "lora"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "rank": {
+          "default": 8,
+          "exclusiveMinimum": 0,
+          "title": "Rank",
+          "type": "integer"
+        },
+        "alpha": {
+          "default": 16,
+          "exclusiveMinimum": 0,
+          "title": "Alpha",
+          "type": "integer"
+        },
+        "dropout": {
+          "default": 0,
+          "exclusiveMaximum": 1,
+          "minimum": 0,
+          "title": "Dropout",
+          "type": "number"
+        },
+        "target_modules": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Target Modules",
+          "type": "array"
+        },
+        "use_rslora": {
+          "default": false,
+          "title": "Use Rslora",
+          "type": "boolean"
+        }
+      },
+      "title": "PEFT",
       "type": "object"
     },
     "Processing": {

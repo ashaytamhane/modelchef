@@ -52,7 +52,17 @@ class Tokenization(Section):
     append_eos: bool = True
 
 
+class PEFT(Section):
+    method: Literal['none', 'lora'] = 'none'
+    rank: int = Field(default=8, gt=0)
+    alpha: int = Field(default=16, gt=0)
+    dropout: float = Field(default=0, ge=0, lt=1)
+    target_modules: list[str] = Field(default_factory=lambda: ['q_proj', 'v_proj'])
+    use_rslora: bool = False
+
+
 class Architecture(Section):
+    peft: PEFT = Field(default_factory=PEFT)
     backend: Literal["native", "huggingface"] = "native"
     pretrained_path: str | None = None
     pretrained_config_sha256: str | None = None
@@ -183,4 +193,11 @@ class RunConfig(Section):
             raise ValueError('Token distillation requires a teacher_run')
         if m.backend == 'huggingface' and not m.pretrained_path:
             raise ValueError('Hugging Face backend requires a local pretrained_path')
+        if m.peft.method != 'none':
+            if m.backend != 'huggingface' or self.stage.kind not in {'midtrain', 'sft'}:
+                raise ValueError('LoRA currently requires a Hugging Face parent and midtrain or sft stage')
+            if not m.peft.target_modules or any(not name.strip() for name in m.peft.target_modules):
+                raise ValueError('LoRA requires explicit nonempty target_modules')
+            if m.quantization != 'none':
+                raise ValueError('LoRA with FP4 fake quantization is not supported; QLoRA is not implemented')
         return self

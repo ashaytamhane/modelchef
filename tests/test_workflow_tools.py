@@ -84,3 +84,16 @@ def test_stage_configuration_requires_parent_and_teacher():
     with pytest.raises(ValueError, match='teacher_run'):
         RunConfig(stage={'kind': 'distill', 'parent_run': 'parent'},
                   data={'provider': 'local_jsonl', 'local_path': 'input.jsonl'})
+
+
+def test_peft_requires_supported_backend_stage_and_quantization():
+    with pytest.raises(ValueError, match='Hugging Face'):
+        RunConfig(model={'peft': {'method': 'lora'}})
+    settings = {'model': {'backend': 'huggingface', 'pretrained_path': 'local',
+                         'peft': {'method': 'lora'}},
+                'data': {'provider': 'local_jsonl', 'local_path': 'sft.jsonl'},
+                'stage': {'kind': 'sft', 'parent_run': 'parent'}}
+    assert RunConfig.model_validate(settings).model.peft.rank == 8
+    settings['model']['quantization'] = 'fp4_fake'
+    with pytest.raises(ValueError, match='QLoRA'):
+        RunConfig.model_validate(settings)

@@ -63,7 +63,7 @@ stage:
   kind: pretrain
 ```
 
-This is an edit guide, not a replacement for the complete copied recipe. Validate with `python -m ashayllm.cli pipeline configs/my-run.local.yaml`; add `--run` to execute it. Fields you omit use defaults; some become required when you select another workflow. See [required versus optional](#required-versus-optional). Unsupported fields and incompatible settings fail validation. `*.local.yaml` files stay out of Git. For fine-tuning, use `stage-config` in workflow 3 to generate a recipe matching the parent model instead of manually copying its architecture. See the [complete annotated recipe](#complete-annotated-recipe) for every training field and its alternatives, and [data and recipes](#data-and-recipes) for local-data examples.
+This is an edit guide, not a replacement for the complete copied recipe. Validate with `python -m ashayllm.cli pipeline configs/my-run.local.yaml`; add `--run` to execute it. Fields you omit use defaults; some become required when you select another workflow. See [required versus optional](#required-versus-optional). Unsupported fields and incompatible settings fail validation. `*.local.yaml` files stay out of Git. For fine-tuning, use `stage-config` in workflow 3 to generate a recipe matching the parent model instead of manually copying its architecture. See [published recipe patterns](#published-recipes-and-small-scale-adaptations) for starting points and the [complete annotated recipe](#complete-annotated-recipe) for every training field and its alternatives, and [data and recipes](#data-and-recipes) for local-data examples.
 
 ### 1. Train a small model from scratch
 
@@ -100,7 +100,7 @@ python -m ashayllm.cli pipeline configs/sft.local.yaml --run
 python -m ashayllm.cli chat NEW_RUN_DIR
 ```
 
-This keeps the pretrained tokenizer and weights and learns from your supplied responses. Import and training use local model files; they do not fetch weights implicitly. Choose a model that fits available memory; this workflow uses full-parameter fine-tuning. Later sections cover domain midtraining, preferences, verifiable rewards, distillation and AWS execution.
+This keeps the pretrained tokenizer and weights and learns from your supplied responses. Import and training use local model files; they do not fetch weights implicitly. Choose a model that fits available memory; this workflow defaults to full-parameter fine-tuning; see [optional LoRA](#parameter-efficient-fine-tuning-with-lora) to train adapters instead. Later sections cover domain midtraining, preferences, verifiable rewards, distillation and AWS execution.
 
 ## The platform at a glance
 
@@ -520,7 +520,7 @@ Hugging Face supplies dataset/model distribution, tokenizer tooling and a compat
 
 Midtraining keeps the next-token objective but changes the corpus, for example to domain documents. SFT instead learns supplied responses while masking prompt tokens from the loss. DPO increases the relative likelihood of a chosen response compared with a rejected response, using a frozen reference to anchor the change. RLVR samples answers and obtains a reward from a deterministic verifier; it needs the model to produce enough varied, sometimes-correct answers for a useful learning signal.
 
-These are separate experiment choices, not a mandatory sequence. Current fine-tuning updates model parameters directly; LoRA/QLoRA adapters are not implemented.
+These are separate experiment choices, not a mandatory sequence. Full-parameter fine-tuning is the default. Imported Hugging Face models also support optional LoRA for midtraining and SFT; QLoRA is not implemented.
 
 Use a completed or imported run as the parent. `stage-config` copies its architecture and tokenizer settings, avoiding manual mismatches. Write personal recipes to ignored `configs/*.local.yaml` files:
 
@@ -552,6 +552,26 @@ Examples, one per JSONL line:
 Keep separate files for each format. At least ten distinct accepted records are required to form document splits. Structured stages use `User: ...` / `Assistant:` formatting. They reject overlong examples rather than silently truncate answers. Duplicate prompts are removed before splitting. Existing PII/quality/decontamination heuristics still apply; provide benchmark files for your evaluation data.
 
 Copy `configs/posttrain-*.yaml` for full native defaults, or prefer `stage-config` for the actual parent. Edit `stage.dpo_beta`, reward/verifier, group size, rollout cap, KL coefficient and optimizer settings deliberately. RLVR is a small GRPO-inspired implementation with one update per sampled group, not a distributed production RL system. Equal rewards give zero policy advantage; mostly wrong samples may provide no useful learning signal. The integer verifier accepts a complete signed integer response, not arbitrary reasoning text or executable code. The DPO and group-relative objectives follow the ideas in [DPO](https://arxiv.org/abs/2305.18290) and [DeepSeekMath](https://arxiv.org/abs/2402.03300).
+
+#### Parameter-efficient fine-tuning with LoRA
+
+LoRA freezes the pretrained weights and trains small low-rank updates in selected layers. This reduces trainable parameters and optimizer memory while preserving the base model. See the original [LoRA paper](https://arxiv.org/abs/2106.09685) and [Hugging Face PEFT documentation](https://huggingface.co/docs/peft/en/package_reference/lora).
+
+Install `uv pip install -e '.[pipeline,pretrained,peft]'`. Generate an SFT or midtraining recipe with `stage-config` as above, then add this block inside its existing `model:` section:
+
+```yaml
+  peft:
+    method: lora
+    rank: 8
+    alpha: 16
+    dropout: 0.0
+    target_modules: [q_proj, v_proj]
+    use_rslora: false
+```
+
+Target names depend on the imported architecture: Llama-style models use `q_proj`/`v_proj`; GPT-2 uses `c_attn`. Validate and run using the same `pipeline` commands. The report includes total and trainable parameter counts. PyTorch CLI chat restores the adapter automatically. `export RUN_DIR` writes separate adapter files under `RUN_DIR/adapter/` and a merged dense model under `RUN_DIR/export/` for vLLM.
+
+Checkpoints retain the full base and adapter state for reproducible resume, so they are not adapter-sized. Keep the original local model directory. Continuing an adapter requires the same adapter settings; changing rank or targets requires exporting, importing the merged model, and starting a new adapter. This implementation supports imported HF midtraining/SFT only, without quantized base weights; native-model LoRA, adapter DPO/RLVR/distillation and QLoRA are not supported.
 
 #### Optional reasoning supervision
 
@@ -658,6 +678,33 @@ Choose sampling and licenses deliberately. The current built-in acquisition path
 Supply your own evaluation text through `processing.benchmark_files` and preserve run snapshots. Automatic decontamination covers only the selected benchmark sample, and regex PII filtering is incomplete. For larger experiments, assess these limitations before treating a saved manifest as evidence of data quality. A manifest identifies bytes; it does not certify the corpus.
 
 
+### Published recipes and small-scale adaptations
+
+Start with a published training pattern, then size the experiment for your hardware. These are reference recipes, not a universal best configuration or a reconstruction of unpublished proprietary frontier training. Each linked paper describes the original model; the YAML files below are deliberately small **AshayLLM adaptations**, with project-chosen learning rates and budgets.
+
+| Pattern | Published recipe / original source | What to carry into an experiment | AshayLLM example and limits |
+| --- | --- | --- | --- |
+| Small, data-focused dense model | [SmolLM2 paper](https://arxiv.org/abs/2502.02737): 1.7B model, approximately 11T tokens, staged web/math/code data curation | Start with clean general text; evaluate, then specialize using curated domain data; finish with instruction examples | [SmolLM2-inspired](configs/recipe-smollm2-inspired.yaml): bounded FineWeb-Edu sample and small native decoder. Later `midtrain`/`sft` runs use separate recipes; this does not reproduce the original mixtures or token budget. |
+| Open, staged foundation training | [OLMo 2 paper](https://arxiv.org/abs/2501.00656), [original Ai2 post](https://allenai.org/blog/olmo2), and [official training recipes](https://github.com/allenai/OLMo-core/tree/main/src/scripts/official/OLMo2) | Broad pretraining followed by curated late training; evaluate domain gains and general capability; use SFT/preferences/verifiable rewards when suitable | [OLMo-inspired](configs/recipe-olmo-inspired.yaml): local curated corpus, then separate stages. Native architecture and cosine schedule differ from OLMo 2; its linear annealing and training infrastructure are not reproduced. |
+| Large dense frontier-scale reference | [The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783): released family includes a 405B model; report describes pretraining and post-training | Decoder with grouped-query attention, careful data quality, staged capability development and instruction/preference training | [Llama-inspired](configs/recipe-llama-inspired.yaml): small RoPE/RMSNorm/SwiGLU/GQA decoder. No distributed frontier-scale training, original tokenizer/data mixture or long-context curriculum reproduction. |
+| Efficient pretrained specialization | [LoRA paper](https://arxiv.org/abs/2106.09685) | Freeze the base and train low-rank updates rather than all weights | Generate an imported-model SFT recipe and enable [LoRA](#parameter-efficient-fine-tuning-with-lora). This is an adaptation method, not a foundation pretraining recipe. |
+
+For frontier architectures beyond dense decoders, the [DeepSeek-V3 technical report](https://arxiv.org/abs/2412.19437) documents MoE, latent attention and multi-token prediction; AshayLLM does not implement those architectures or objectives. The [DeepSeek-R1 paper](https://arxiv.org/abs/2501.12948) provides a reasoning/RL reference. AshayLLM's optional reasoning supervision, distillation and small verifier-based RLVR experiments are learning workflows, not reproductions of R1's training algorithm or capability. These references help identify future extensions without presenting unsupported options as runnable recipes.
+
+**Try a recipe:** copy one to an ignored personal file, inspect its data source and limits, and validate before execution:
+
+```bash
+cp configs/recipe-smollm2-inspired.yaml configs/my-small-model.local.yaml
+python -m ashayllm.cli pipeline configs/my-small-model.local.yaml
+python -m ashayllm.cli pipeline configs/my-small-model.local.yaml --run
+```
+
+The SmolLM2 example downloads only a bounded sample when executed. The other two use `data/raw/corpus.jsonl`: provide your own JSONL records with a `text` field before execution. Validation does not launch AWS. Use [managed AWS training](#run-a-managed-native-training-stage) for an explicitly configured cloud run; these recipes themselves execute locally.
+
+For a staged experiment, train the base, then use `stage-config BASE_RUN --kind midtrain --data data/raw/domain.jsonl --output configs/domain.local.yaml --steps 40`. After that run, generate `--kind sft` from its output using instruction/response JSONL. Add DPO or RLVR only when you have appropriate preference pairs or verifiable tasks. Each stage has its own recipe, data manifest and checkpoint lineage. Export the chosen final run for CLI inference or vLLM serving.
+
+Do not copy a frontier model's learning rate or batch size blindly. Measure throughput and memory first; compare held-out loss and domain benchmarks across runs. The current trainer samples packed blocks with replacement: `steps × micro_batch_size × gradient_accumulation × context_length` estimates token positions processed, not unique training tokens. Tiny tests establish pipeline correctness, not competitive model quality. For every available field and required/optional rules, see the [complete annotated recipe](#complete-annotated-recipe).
+
 ### Complete annotated recipe
 
 The following is a complete, schema-valid training recipe with **every supported training field** explicit. A copy lives in [configs/recipe-reference.yaml](configs/recipe-reference.yaml). Comments show alternatives and when a setting applies; the selected values form a small native pretraining run. Fields for DPO, RLVR and distillation remain inactive until their stage is selected. There is no single run that applies all objectives at once.
@@ -734,6 +781,13 @@ tokenizer:  # OPTIONAL: defaults are supplied when omitted.
   add_bos: false  # OPTIONAL: Raw-text packing only; structured stages apply their own prompt/EOS formatting.
   append_eos: true  # OPTIONAL: Raw-text document separator; structured stages always append response EOS.
 model:  # OPTIONAL: defaults are supplied when omitted.
+  peft:  # OPTIONAL: Parameter-efficient training; imported HF midtrain/SFT only.
+    method: none  # OPTIONAL: none | lora; QLoRA is not implemented.
+    rank: 8  # OPTIONAL: Positive adapter rank.
+    alpha: 16  # OPTIONAL: Positive adapter scaling factor.
+    dropout: 0.0  # OPTIONAL: Adapter dropout in [0, 1).
+    target_modules: [q_proj, v_proj]  # OPTIONAL: Must match the imported model; GPT-2 uses c_attn.
+    use_rslora: false  # OPTIONAL: Rank-stabilized scaling.
   backend: native  # OPTIONAL: native | huggingface; use import-model to configure a local pretrained adapter.
   pretrained_path: null  # CONDITIONAL: Required local source directory for the huggingface backend.
   pretrained_config_sha256: null  # OPTIONAL: Filled by import-model; validates the original HF config on loading.
@@ -770,7 +824,7 @@ training:  # OPTIONAL: defaults are supplied when omitted.
   steps: 40  # OPTIONAL: Optimizer updates, with training blocks sampled with replacement.
   micro_batch_size: 2  # OPTIONAL: defaults are supplied when omitted.
   gradient_accumulation: 2  # OPTIONAL: Effective single-device batch = micro_batch_size * gradient_accumulation.
-  optimizer: adamw  # OPTIONAL: adamw only; this updates full parameters, not LoRA adapters.
+  optimizer: adamw  # OPTIONAL: adamw only; optimizes trainable full weights or LoRA adapters.
   learning_rate: 0.0005  # OPTIONAL: defaults are supplied when omitted.
   min_learning_rate_ratio: 0.1  # OPTIONAL: Final cosine learning-rate floor relative to learning_rate.
   betas:  # OPTIONAL: defaults are supplied when omitted.

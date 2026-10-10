@@ -15,7 +15,7 @@ from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
 from ashayllm.benchmarks import acquire_benchmark, evaluate_choices, select_benchmark
 from ashayllm.corpus import acquire, digest, process
-from ashayllm.engines import create_model, load_tokenizer
+from ashayllm.engines import create_model, load_parent, load_tokenizer
 from ashayllm.execution import check_custom_kernel, configure_execution, plugin_fingerprint
 from ashayllm.hardware import detect_hardware, resolve_runtime
 from ashayllm.objectives import evaluate_stage, objective, pack_structured, prepare_structured
@@ -200,7 +200,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
         from ashayllm.run_config import RunConfig
         parent_folder = (root / c.stage.parent_run).resolve()
         parent_config = RunConfig.model_validate_json((parent_folder / 'config.json').read_text())
-        execution_fields = {'quantization', 'attention_kernel', 'custom_swiglu_path'}
+        execution_fields = {'quantization', 'attention_kernel', 'custom_swiglu_path', 'peft'}
         if c.model.model_dump(exclude=execution_fields) != parent_config.model.model_dump(
                 exclude=execution_fields) or c.tokenizer != parent_config.tokenizer:
             raise ValueError('Parent architecture/tokenizer settings must match; copy the parent recipe')
@@ -245,7 +245,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
             "The HF adapter loads local pretrained models without remote code or implicit downloads.")
     model = create_model(c.model, tokenizer.get_vocab_size()).to(device)
     if parent is not None:
-        model.load_state_dict(parent)
+        load_parent(model, parent, parent_config.model)
     if c.model.quantization == 'fp4_fake':
         n.say('Experimental software FP4 fake quantization enabled: FP32/BF16 master weights and '
               'straight-through gradients. No packed-weight storage or native FP4 acceleration.')
@@ -285,13 +285,15 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
             raise ValueError('Teacher checkpoint changed since this stage started')
         teacher_manifest.write_text(report['teacher_checkpoint_sha256'], encoding='utf-8')
     parameters = sum(parameter.numel() for parameter in model.parameters())
+    report['trainable_parameters'] = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n.say(f"Trainable parameters={report['trainable_parameters']:,}; PEFT={c.model.peft.method}.")
     n.say(f"Parameters={parameters:,}; layers={c.model.layers}; width={c.model.hidden_size}; "
           f"attention heads={c.model.attention_heads}; KV heads={c.model.kv_heads}.")
     t = c.training
     report['execution'] = configure_execution(model, t, device)
-    groups = [{"params": [p for p in model.parameters() if p.ndim >= 2],
+    groups = [{"params": [p for p in model.parameters() if p.requires_grad and p.ndim >= 2],
                "weight_decay": t.weight_decay},
-              {"params": [p for p in model.parameters() if p.ndim < 2], "weight_decay": 0}]
+              {"params": [p for p in model.parameters() if p.requires_grad and p.ndim < 2], "weight_decay": 0}]
     optimizer_options = ({'fused': True} if t.optimizer_kernel == 'fused' else
                          {'foreach': True} if t.optimizer_kernel == 'foreach' else {})
     optimizer = torch.optim.AdamW(groups, lr=t.learning_rate, betas=t.betas,
