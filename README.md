@@ -2,7 +2,7 @@
 
 **Your ingredients. Your recipe. Your model.**
 
-With ModelChef, **pick your ingredients, choose a recipe, cook your model and serve it**. Your ingredients are datasets and optional pretrained weights; your recipe defines processing, architecture and training. Cook from scratch or refine an existing model, taste-test it with evaluation, then serve it through CLI inference or a secured vLLM API. The same Python/PyTorch codebase runs locally and on AWS, with precision, kernels and execution settings exposed in versioned configuration.
+With ModelChef, **pick your ingredients, choose a recipe, cook your model and serve it**. Your ingredients are text, image or speech datasets and optional pretrained weights; your recipe defines processing, architecture and training. Cook a text model from scratch or refine an existing text, vision-language or Whisper model, taste-test it with evaluation, then use CLI inference, publish to Hugging Face, or serve supported text models through a secured vLLM API. The same Python/PyTorch codebase runs locally and on AWS, with precision, kernels and execution settings exposed in versioned configuration.
 
 Think of the workflow as **ingredients → recipe → training → evaluation → serving**. Start with one small experiment, then compose stages with `cook`: domain midtraining, instruction tuning, preference learning or distillation. ModelChef records manifests, checkpoints and lineage and explains progress as it runs. You decide what to build and how much to spend; the platform executes the declared steps.
 
@@ -10,7 +10,7 @@ Think of the workflow as **ingredients → recipe → training → evaluation �
 
 ## Quick Start
 
-The Quick Start examples below run on your current machine. ModelChef can also launch AWS instances: see [the Spot training example](#run-a-managed-native-training-stage) for a temporary training job that terminates when finished, or [the API hosting example](#persistent-api-hosting-on-ec2) for persistent on-demand serving. AWS launches require configured credentials and explicit execution with `--run`, and incur charges. Start with a small local experiment; the default training run tests the pipeline rather than producing a useful assistant.
+The Quick Start examples below run on your current machine. ModelChef can also launch AWS instances: see [the Spot training example](#run-a-managed-training-stage) for a temporary training job that terminates when finished, or [the API hosting example](#persistent-api-hosting-on-ec2) for persistent on-demand serving. AWS launches require configured credentials and explicit execution with `--run`, and incur charges. Start with a small local experiment; the default training run tests the pipeline rather than producing a useful assistant.
 
 ### Prepare your kitchen: set up once
 
@@ -130,6 +130,8 @@ python -m modelchef.cli chat NEW_RUN_DIR
 
 This keeps the pretrained tokenizer and weights and learns from your supplied responses. Import and training use local model files; they do not fetch weights implicitly. Choose a model that fits available memory; this workflow defaults to full-parameter fine-tuning; see [optional LoRA](#parameter-efficient-fine-tuning-with-lora) to train adapters instead. Later sections cover domain midtraining, preferences, verifiable rewards, distillation and AWS execution.
 
+For images and speech, continue with the [multimodal tutorial](docs/MULTIMODAL.md). To share a completed export, follow the [Hugging Face publishing tutorial](docs/PUBLISHING.md). Both workflows use explicit recipes; publishing previews are offline and uploads require `--run`.
+
 ## The platform at a glance
 
 The central workflow is a YAML recipe executed by `pipeline`: acquire a bounded sample, prepare and split documents, train or reuse a tokenizer, initialize or load a model, optimize it, evaluate it, and save a reproducible run. The script explains each step on screen and records the same explanations alongside the artifacts.
@@ -204,7 +206,7 @@ The local pipeline runs where invoked; it does not choose or provision AWS autom
 | Host an API on EC2 | Separate persistent on-demand host | `aws-serve CONFIG --run` | Yes; ongoing charges until explicitly stopped/deleted |
 | Preview an EC2 test | Local controller makes read-only AWS requests | `aws-test` | Credentials, but no instance launched |
 | Provision and test a cloud GPU | Local controller launches a temporary EC2 instance; tests run there | `aws-test ... --run` | Yes; incurs AWS charges |
-| Launch a native training stage | Local controller packages inputs; a temporary Spot host trains | `aws-train CONFIG --run` | Yes; incurs AWS charges |
+| Launch a training stage | Local controller packages inputs; a temporary Spot host trains | `aws-train CONFIG --run` | Yes; incurs AWS charges |
 | Recover cloud results/cleanup | Local controller queries AWS and removes temporary resources after termination | `aws-reconcile` | Yes; no new instance launched |
 
 Commands run **where you invoke them**. If you SSH into an existing EC2 instance and run `doctor`, it inspects that EC2 instance. It does not provision another machine. `aws-test --run` and `aws-train CONFIG --run` explicitly launch temporary Spot compute. `aws-serve CONFIG --run` launches a separate persistent on-demand serving host.
@@ -486,6 +488,32 @@ From-scratch experiments use the native causal RoPE decoder with GQA, RMSNorm an
 
 ### Prepare your own ingredients: data
 
+For larger local corpora, copy a complete pretraining recipe and change its `data`
+section as follows (these are overrides, not a standalone recipe):
+
+```yaml
+data:
+  provider: local_jsonl
+  local_path: null
+  local_paths: [data/train-000.jsonl, data/train-001.jsonl]
+  storage: disk
+  max_documents: 100000
+  max_download_bytes: 1000000000
+  max_record_bytes: 4000000
+  max_tokens: 10000000
+```
+
+Shard order and offset define the selected snapshot. Disk mode streams records through
+SQLite deduplication, writes deterministic disjoint splits and stores uint32 tokens in
+memory-mapped files. Training allocates only selected token batches; resume verifies the
+mapped files before using them. It supports local JSONL pretraining/midtraining and DDP.
+Use `storage: memory` for structured post-training objectives. Near deduplication uses
+approximate LSH candidate search; tokenizer learning and benchmark indexes still use RAM.
+Set byte/token/runtime limits deliberately and allow disk space for snapshots and indexes.
+Managed AWS training carries these settings into the guest, with the additional bundle cap.
+See [quality and acceptance criteria](docs/QUALITY.md) for scale and hardware validation boundaries.
+
+
 ```bash
 python -m modelchef.cli convert-data documents.txt --format text --output data/raw/documents.jsonl --max-bytes 10000000 --max-documents 1000
 python -m modelchef.cli convert-data instructions.csv --format csv --output data/raw/sft.jsonl
@@ -678,7 +706,7 @@ stages:                         # REQUIRED: at least one ordered stage.
     inherit_architecture: true  # OPTIONAL: preserve parent geometry/tokenizer.
 ```
 
-The workflow persists its plan and a report linking each stage to its run. Failed execution records the error and preserves completed artifacts. Recover an individual stage with its checkpoint using `pipeline --resume`; `cook` does not yet resume the entire workflow automatically. Run DDP stages separately with `torchrun`. Training, export and API launch remain explicit operations: use [AWS training](#run-a-managed-native-training-stage) or [API serving](#serve-your-model-inference-and-api) when those are your chosen execution environments.
+The workflow persists its plan and a report linking each stage to its run. Failed execution records the error and preserves completed artifacts. Recover an individual stage with its checkpoint using `pipeline --resume`; `cook` does not yet resume the entire workflow automatically. Run DDP stages separately with `torchrun`. Training, export and API launch remain explicit operations: use [AWS training](#run-a-managed-training-stage) or [API serving](#serve-your-model-inference-and-api) when those are your chosen execution environments.
 
 ### Taste-test and compare: evaluation
 
@@ -739,6 +767,40 @@ These controls are a secure starting point, not a guarantee of complete security
 **Before moving on:** retain a baseline and a candidate run, compare them on held-out data with a stated protocol, and verify inference uses the intended checkpoint. A serving process runs on its current host; starting vLLM is not an AWS deployment. The advanced path covers managed cloud jobs and persistent hosting.
 
 
+### Add vision or speech ingredients
+
+Use `configs/multimodal-vision.yaml` for image/prompt/response fine-tuning, or
+`configs/multimodal-speech.yaml` for Whisper audio/transcript training. Set the local
+model and manifest paths, then preview and execute:
+
+```bash
+python -m modelchef.cli multimodal configs/vision.local.yaml
+python -m modelchef.cli multimodal configs/vision.local.yaml --run
+python -m modelchef.cli predict-media configs/vision.local.yaml --model-path artifacts/multimodal/YOUR_RUN/export --media data/vision/example.png --prompt "Describe this image."
+```
+
+The [multimodal tutorial](docs/MULTIMODAL.md) explains manifests, every required/optional
+field, assistant-only labels, encoder freezing, media bounds, grouped evaluation,
+checkpoint recovery, exports and AWS packaging. Vision/speech use pretrained processors;
+native scratch training remains text-only. Speech currently supports recognition and
+multilingual Whisper translation, not speech synthesis.
+
+### Share the finished model
+
+Copy `configs/publish-model.yaml` to a local recipe and set the export, Hub repository,
+license, training description, evaluation and limitations:
+
+```bash
+python -m modelchef.cli publish-model configs/publish.local.yaml
+# After reviewing the exact file list/card and authenticating with hf auth login:
+python -m modelchef.cli publish-model configs/publish.local.yaml --run
+```
+
+Publishing defaults to a private repository and uploads only model/processor files and
+an explicit model card. It excludes run history and raw datasets. See the
+[publishing tutorial](docs/PUBLISHING.md) for authentication, visibility, licensing and
+multimodal pipeline tags.
+
 ## Advanced: control execution and deployment
 
 **Goal:** make detailed experiment choices, test them locally, and scale or deploy deliberately. The full recipe exposes every training field; cloud and API lifecycle configurations stay separate so a temporary training job cannot accidentally become a permanent service.
@@ -771,7 +833,7 @@ python -m modelchef.cli pipeline configs/my-small-model.local.yaml
 python -m modelchef.cli pipeline configs/my-small-model.local.yaml --run
 ```
 
-The SmolLM2 example downloads only a bounded sample when executed. The other two use `data/raw/corpus.jsonl`: provide your own JSONL records with a `text` field before execution. Validation does not launch AWS. Use [managed AWS training](#run-a-managed-native-training-stage) for an explicitly configured cloud run; these recipes themselves execute locally.
+The SmolLM2 example downloads only a bounded sample when executed. The other two use `data/raw/corpus.jsonl`: provide your own JSONL records with a `text` field before execution. Validation does not launch AWS. Use [managed AWS training](#run-a-managed-training-stage) for an explicitly configured cloud run; these recipes themselves execute locally.
 
 For a staged experiment, train the base, then use `stage-config BASE_RUN --kind midtrain --data data/raw/domain.jsonl --output configs/domain.local.yaml --steps 40`. After that run, generate `--kind sft` from its output using instruction/response JSONL. Add DPO or RLVR only when you have appropriate preference pairs or verifiable tasks. Each stage has its own recipe, data manifest and checkpoint lineage. Export the chosen final run for CLI inference or vLLM serving.
 
@@ -779,7 +841,7 @@ Do not copy a frontier model's learning rate or batch size blindly. Measure thro
 
 ### Complete annotated recipe
 
-The following is a complete, schema-valid training recipe with **every supported training field** explicit. A copy lives in [configs/recipe-reference.yaml](configs/recipe-reference.yaml). Comments show alternatives and when a setting applies; the selected values form a small native pretraining run. Fields for DPO, RLVR and distillation remain inactive until their stage is selected. There is no single run that applies all objectives at once.
+The following is a complete, schema-valid training recipe with **every supported text-training field** explicit. Vision/speech have their [own complete schema and tutorial](docs/MULTIMODAL.md). A copy lives in [configs/recipe-reference.yaml](configs/recipe-reference.yaml). Comments show alternatives and when a setting applies; the selected values form a small native pretraining run. Fields for DPO, RLVR and distillation remain inactive until their stage is selected. There is no single run that applies all objectives at once.
 
 #### Required versus optional
 
@@ -816,9 +878,12 @@ data:  # OPTIONAL: defaults are supplied when omitted.
   subset: sample-10BT  # OPTIONAL: Dataset configuration name, not a random sampling strategy.
   split: train  # OPTIONAL: defaults are supplied when omitted.
   text_field: text  # OPTIONAL: defaults are supplied when omitted.
-  local_path: null  # CONDITIONAL: Set a JSONL path when provider is local_jsonl.
+  local_path: null  # CONDITIONAL: One JSONL path, or use local_paths below.
+  local_paths: []  # OPTIONAL: Ordered JSONL shards; mutually exclusive with local_path.
+  storage: memory  # OPTIONAL: memory | disk; disk supports local pretrain/midtrain.
+  max_record_bytes: 4000000  # OPTIONAL: Maximum raw JSONL record size.
   offset: 0  # OPTIONAL: Ordered starting row; skipped input bytes still count toward the cap.
-  max_documents: 256  # OPTIONAL: Raw records before filtering; 3..10000, but at least 10 accepted are needed.
+  max_documents: 256  # OPTIONAL: Raw records before filtering; at least 3 accepted documents are needed.
   page_size: 50  # OPTIONAL: Viewer page length: 1..100.
   max_download_bytes: 16000000  # OPTIONAL: Corpus response/input-byte cap; separate from benchmark downloads.
   timeout_seconds: 30  # OPTIONAL: defaults are supplied when omitted.
@@ -1022,7 +1087,7 @@ Custom CUDA is opt-in for the native decoder. The included example replaces the 
 
 `src/modelchef/execution.py` loads the trusted local plugin and runs checks; `model.py` selects it; `kernels/swiglu/kernel.py` provides the autograd wrapper; `swiglu.cpp` exposes bindings; and `swiglu.cu` implements the CUDA operations. Custom SwiGLU currently applies to the native dense decoder, not MoE or the Hugging Face backend. Your own directory must export `swiglu(gate, up)` from `kernel.py` with autograd support. Selecting a plugin executes its local code, so use a source directory you trust. Set `custom_swiglu_path: null` to restore the built-in activation.
 
-Other optional execution controls are `model.attention_kernel: auto|math|flash|efficient|cudnn`, `training.compile`, `compile_backend: inductor|aot_eager|eager`, `compile_mode: default|reduce-overhead|max-autotune`, and `optimizer_kernel: default|fused|foreach`. Explicit optimized attention and fused optimizer selections require a compatible GPU. Measure throughput and memory for your workload; compilation can add startup time. Custom CUDA is currently limited to native-model SwiGLU and prepared hosts; managed `aws-train` packaging rejects it. Native FP4 kernels are a separate capability.
+Other optional execution controls are `model.attention_kernel: auto|math|flash|efficient|cudnn`, `training.compile`, `compile_backend: inductor|aot_eager|eager`, `compile_mode: default|reduce-overhead|max-autotune`, and `optimizer_kernel: default|fused|foreach`. Explicit optimized attention and fused optimizer selections require a compatible GPU. Measure throughput and memory for your workload; compilation can add startup time. Completed run reports include `performance.training_loop_seconds`, `tokens_per_second` and peak CUDA allocated/reserved bytes. These timings include loop evaluation/checkpoint work and compilation performed inside the loop, while excluding setup and initial validation; DDP reports global tokens and maximum per-rank CUDA peaks. Custom CUDA currently targets native-model SwiGLU. Managed `aws-train` packages the declared kernel sources and installs a CUDA 13 compiler matching the pinned PyTorch build. Native FP4 kernels are a separate capability.
 
 The included kernel has passed FP32, FP16 and BF16 forward/backward checks on an RTX 4060 Laptop GPU with CUDA 13.0 compiler components. NVIDIA runtime wheels that lack an unversioned `libcudart.so` receive a linker alias inside the ignored build directory. A mismatched toolkit still fails visibly rather than bypassing compatibility checks. These checks establish correctness for the tested inputs, not a performance improvement.
 
@@ -1052,7 +1117,7 @@ A mixture-of-experts (MoE) decoder routes each token to a subset of feed-forward
 DDP gives each process a complete model replica and synchronizes gradients. It improves data throughput; it does not shard weights or make an oversized model fit on one device. Copy [configs/pretrain-ddp.yaml](configs/pretrain-ddp.yaml) to `configs/ddp.local.yaml`, or edit a stage recipe to set `training.distributed: ddp`, choose CPU or compatible GPUs, then launch:
 
 ```bash
-torchrun --standalone --nproc_per_node=2 -m modelchef.cli pipeline configs/ddp.local.yaml --run
+torchrun --standalone --nproc_per_node=2 -m -- modelchef.cli pipeline configs/ddp.local.yaml --run
 ```
 
 Each rank samples training blocks; the global sequence batch is `micro_batch_size × gradient_accumulation × world_size`. Rank zero prepares shared artifacts and writes reports/checkpoints; recovery preserves per-rank random state and requires the same world size. Dense and MoE two-rank CPU execution and resume have been tested. GPU DDP uses NCCL and needs its own throughput and device validation; MPS DDP is unavailable. DDP currently excludes QLoRA, NVFP4, compilation and RLVR. See [PyTorch DDP](https://docs.pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html) and [torchrun](https://docs.pytorch.org/docs/stable/elastic/run.html).
@@ -1237,7 +1302,7 @@ aws ec2 describe-instances --profile modelchef --region us-east-1 --instance-ids
 
 A successful termination request can still report `shutting-down`. Confirm `terminated` and root-volume removal in EC2. The ledger is local and run-ID recovery after an early crash is limited; it is not a distributed job service.
 
-#### Run a managed native training stage
+#### Run a managed training stage
 
 Copy `configs/aws-training.yaml` to ignored `configs/aws-training.local.yaml`. Follow the AWS credential/IAM tutorial above, then provide:
 
@@ -1254,9 +1319,9 @@ python -m modelchef.cli aws-train configs/aws-training.local.yaml
 python -m modelchef.cli aws-train configs/aws-training.local.yaml --run
 ```
 
-Before provisioning, the runner performs local tests/lint and an actual bounded two-step CPU data/training preflight. The controller therefore needs PyTorch and pipeline dependencies for `aws-train`, unlike the lightweight `aws-test` controller. It allowlists source/configuration and declared inputs, checks bundle size, reserves budget, uploads encrypted source, launches one Spot instance and attaches the supplied profile. It packages native pretraining and native parent/teacher stages; the managed bundler currently rejects external pretrained-model paths.
+Before provisioning, the runner performs local tests/lint and an actual bounded two-step CPU data/training preflight. The controller therefore needs PyTorch and pipeline dependencies for `aws-train`, unlike the lightweight `aws-test` controller. It allowlists source/configuration and declared inputs, checks bundle size, reserves budget, uploads encrypted source, launches one Spot instance and attaches the supplied profile. It packages text stages, local Hugging Face parent/teacher models, and multimodal recipes with bounded media/processor inputs using capped safetensors bundles. Pretrained config, tokenizer files and special-token roles are relocated together; remote code, environment files and arbitrary pickle weight downloads are excluded. Bundle limits must accommodate weights and checkpoints, and local preflight still requires enough memory for its CPU probe.
 
-The guest arms a shutdown timer before package/data work, verifies the source checksum, runs the pipeline and attempts a bounded result upload on exit. The existing AWS deadline and controller termination safeguards remain active. Confirm `terminated` and inspect the saved cloud report; a lost/interrupted result upload can leave `results_missing` even after cleanup. Results are downloaded as an ignored `results.tar.gz`, without automatically extracting an external archive. S3 objects persist until your lifecycle rules remove them; the ledger is a conservative estimate, not a hard cap on every AWS charge. Live cloud training has not been validated during this local-only development pass.
+The guest arms a shutdown timer before package/data work, verifies the source checksum, installs pinned CUDA 13 PyTorch and recipe-selected extras, runs the pipeline and attempts a bounded result upload on exit. Compilation, TF32, optimized attention, fused/foreach optimizers, checkpointing and fake FP4 use the same execution code as local training. Custom CUDA sources are allowlisted into the bundle, and matching compiler packages are installed. Native NVFP4 selects Transformer Engine; DDP selects `torchrun --nproc-per-node=gpu`. Choose an AMI with a CUDA 13-compatible NVIDIA driver and an instance whose GPU supports the requested policy. The local CPU preflight validates data/objective/recovery; the guest validates the actual GPU optimizations. DDP plus compile/NVFP4/RLVR/QLoRA remains unsupported by the training engine, as enforced by recipe validation. The existing AWS deadline and controller termination safeguards remain active. Confirm `terminated` and inspect the saved cloud report; a lost/interrupted result upload can leave `results_missing` even after cleanup. Results are downloaded as an ignored `results.tar.gz`, without automatically extracting an external archive. S3 objects persist until your lifecycle rules remove them; the ledger is a conservative estimate, not a hard cap on every AWS charge. Live cloud training has not been validated during this local-only development pass.
 
 #### Persistent API hosting on EC2
 
@@ -1307,11 +1372,15 @@ flowchart TD
     DDP --> Pipeline
     CLI --> HW[hardware.py: detect and resolve device / precision]
     CLI --> PT[pretrained.py: download, import and stage recipes]
+    CLI --> MM[multimodal.py: vision SFT and Whisper training / inference]
+    MM --> Media[multimodal_data.py: bounded assets and grouped splits]
+    CLI --> Pub[publishing.py: model card and explicit Hub commit]
     CLI --> Tools[data_tools.py: format conversion and teacher responses]
     CLI --> Compare[comparison.py: saved samples and standard-suite plans]
     Config --> Pipeline[pipeline.py: narrate, orchestrate, checkpoint and resume]
     HW --> Pipeline
     Pipeline --> Corpus[corpus.py: capped acquisition and filtering]
+    Corpus --> Disk[disk_data.py: JSONL streaming, SQLite/LSH and mapped tokens]
     Pipeline --> Bench[benchmarks.py: domain selection and continuation scoring]
     Pipeline --> Pack[Tokenizer training and next-token packing]
     Corpus --> Objective[objectives.py: structured data and training losses]
@@ -1331,6 +1400,8 @@ flowchart TD
     Hosting --> Service[systemd: restart vLLM after failure / reboot]
     Hosting --> Secret[Secrets Manager: API token and TLS material]
     Spot --> Bundle[aws_training.py: capped bundle and guest training script]
+    Bundle --> Guest[aws_guest.py: recipe dependencies and CUDA/DDP launch]
+    Guest --> Pipeline
     Bundle --> S3[S3: encrypted source and result transfer]
     Tests[tests/: configuration, objectives, causality and recovery] --> Pipeline
     Tests --> Spot
@@ -1363,6 +1434,8 @@ flowchart TD
 
 ## Verification and project boundaries
 
+See [quality and acceptance criteria](docs/QUALITY.md) for evidence required across usability, reliability, scale, model quality, performance and operations. Hardware simulations are identified separately from real-device validation.
+
 Run the checks used for changes to the platform:
 
 ```bash
@@ -1379,7 +1452,7 @@ PII filtering changes processed training inputs. Original text remains in raw ru
 
 API serving limits output tokens, batch size and number of completions through `inference.security.max_output_tokens`, `max_batch_size` and `max_choices`. Defaults are at most 256 output tokens (bounded by context), one prompt and one completion. Requests exceeding these limits are rejected; omitted output limits receive the configured default. TLS/shared-token controls do not replace per-user identity or production traffic protection.
 
-AWS launch journals are saved before provisioning steps so interrupted/lost launch responses can be reconciled. Training preflight requires a completed local report. Managed `aws-train` uses a single-process guest and currently excludes DDP and native NVFP4; run those on prepared hosts using `torchrun` or the documented Blackwell dependencies. This is a launcher limitation; compatible local/prepared environments remain usable.
+AWS launch journals are saved before provisioning steps so interrupted/lost launch responses can be reconciled. Training preflight requires a completed local report. Managed `aws-train` preserves recipe optimization settings, installs optional dependencies, and launches DDP with one worker per visible GPU. DDP requires at least two GPUs; native NVFP4 requires Blackwell. Unsupported combinations still fail recipe validation. Deployment-contract tests cover these paths; live cloud GPU validation remains outstanding.
 
 ## Troubleshooting
 
@@ -1404,7 +1477,10 @@ AWS launch journals are saved before provisioning steps so interrupted/lost laun
 | `cook WORKFLOW [--run]` | Plan or execute ordered local stage recipes and final export |
 | `pipeline CONFIG [--run] [--resume CHECKPOINT]` | Strict recipe validation or narrated training stage on the current host |
 | `chat RUN_DIR [--backend torch\|vllm]` | CLI inference from a completed training run |
-| `export RUN_DIR` | Export trained model/tokenizer for HF-compatible inference |
+| `export RUN_DIR` | Export trained text model/tokenizer for HF-compatible inference |
+| `multimodal CONFIG [--run] [--resume CHECKPOINT]` | Preview/train local vision-language or Whisper recipes |
+| `predict-media CONFIG --media FILE [--model-path EXPORT]` | Generate text from an image or speech clip |
+| `publish-model CONFIG [--run]` | Preview/publish an allowlisted model export and card to Hugging Face |
 | `stage-config PARENT --kind STAGE --data FILE --output CONFIG` | Derive a post-training recipe from its parent |
 | `download-model REPO [--run]` | Preview or execute revision-pinned, capped pretrained acquisition |
 | `init-student TEACHER [--architecture FILE]` | Initialize a random native student with the teacher vocabulary |
@@ -1413,12 +1489,12 @@ AWS launch journals are saved before provisioning steps so interrupted/lost laun
 | `teacher-data TEACHER --prompts FILE --output FILE` | Generate local sequence-distillation data |
 | `compare RUN_DIR [--baseline LOCAL_DIR]` | Compare models using saved benchmark examples |
 | `evaluate-standard LOCAL_EXPORT [--run]` | Plan or invoke the optional standard harness |
-| `aws-train CONFIG [--run]` | Plan or execute an S3-backed native Spot training stage |
+| `aws-train CONFIG [--run]` | Plan or execute an S3-backed text or multimodal Spot training stage |
 | `aws-serve CONFIG [--action ACTION] [--deployment ID] [--run]` | Plan/deploy persistent hosting or inspect/manage its lifecycle |
 | `doctor` | Inspect current hardware and PyTorch/CUDA |
 | `check-cuda-kernel PATH` | Validate local custom SwiGLU outputs and backward gradients on CUDA |
 | `setup [--apply]` | Plan/install hardware-aware PyTorch packages |
-| `check-config CONFIG` | Validate required top-level project/runtime sections; not full schema validation |
+| `check-config CONFIG` | Validate runtime, text, multimodal, workflow or publication configuration |
 | `resolve-runtime CONFIG [--output FILE]` | Resolve device/precision and optionally persist the result |
 | `smoke [--accelerator ...] [--precision ...]` | Synthetic training and checkpoint recovery |
 | `setup-vllm [--apply]` | Plan/install optional shared vLLM stack |

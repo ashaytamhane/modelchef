@@ -8,9 +8,12 @@ data:  # OPTIONAL: defaults are supplied when omitted.
   subset: sample-10BT  # OPTIONAL: Dataset configuration name, not a random sampling strategy.
   split: train  # OPTIONAL: defaults are supplied when omitted.
   text_field: text  # OPTIONAL: defaults are supplied when omitted.
-  local_path: null  # CONDITIONAL: Set a JSONL path when provider is local_jsonl.
+  local_path: null  # CONDITIONAL: One JSONL path, or use local_paths below.
+  local_paths: []  # OPTIONAL: Ordered JSONL shards; mutually exclusive with local_path.
+  storage: memory  # OPTIONAL: memory | disk; disk supports local pretrain/midtrain.
+  max_record_bytes: 4000000  # OPTIONAL: Maximum raw JSONL record size.
   offset: 0  # OPTIONAL: Ordered starting row; skipped input bytes still count toward the cap.
-  max_documents: 256  # OPTIONAL: Raw records before filtering; 3..10000, but at least 10 accepted are needed.
+  max_documents: 256  # OPTIONAL: Raw records before filtering; at least 3 accepted documents are needed.
   page_size: 50  # OPTIONAL: Viewer page length: 1..100.
   max_download_bytes: 16000000  # OPTIONAL: Corpus response/input-byte cap; separate from benchmark downloads.
   timeout_seconds: 30  # OPTIONAL: defaults are supplied when omitted.

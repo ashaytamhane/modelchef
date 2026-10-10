@@ -15,8 +15,11 @@ class Data(Section):
     split: str = "train"
     text_field: str = "text"
     local_path: str | None = None
+    local_paths: list[str] = Field(default_factory=list)
+    storage: Literal["memory", "disk"] = "memory"
+    max_record_bytes: int = Field(default=4000000, gt=0)
     offset: int = Field(default=0, ge=0)
-    max_documents: int = Field(default=256, ge=3, le=10000)
+    max_documents: int = Field(default=256, ge=3)
     page_size: int = Field(default=50, ge=1, le=100)
     max_download_bytes: int = Field(default=16000000, gt=0)
     timeout_seconds: int = Field(default=30, gt=0, le=120)
@@ -186,8 +189,14 @@ class RunConfig(Section):
             raise ValueError("Special tokens must be unique")
         if not {"<pad>", "<unk>", "<bos>", "<eos>"} <= set(self.tokenizer.special_tokens):
             raise ValueError("Required pad/unk/bos/eos tokens missing")
-        if self.data.provider == "local_jsonl" and not self.data.local_path:
-            raise ValueError("local_jsonl requires local_path")
+        if self.data.provider == "local_jsonl" and not (self.data.local_path or self.data.local_paths):
+            raise ValueError("local_jsonl requires local_path or local_paths")
+        if self.data.storage == 'disk' and self.stage.kind not in {'pretrain', 'midtrain'}:
+            raise ValueError('Disk-backed storage currently supports pretrain and midtrain')
+        if self.data.storage == 'disk' and self.data.provider != 'local_jsonl':
+            raise ValueError('Disk-backed acquisition requires local JSONL shards')
+        if self.data.local_path and self.data.local_paths:
+            raise ValueError('Choose local_path or local_paths, not both')
         if self.data.domain != "general" and not self.data.domain_keywords:
             raise ValueError("Domain selection requires explicit domain_keywords")
         if self.evaluation.benchmark == "auto" and self.data.domain not in {"general", "finance"}:

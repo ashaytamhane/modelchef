@@ -227,7 +227,7 @@ def training_source(tmp_path):
 
 
 @pytest.mark.parametrize('feature', ['ddp', 'nvfp4'])
-def test_managed_training_rejects_incompatible_guest_launcher_before_upload(training_source, feature):
+def test_managed_training_preserves_gpu_optimization_policy(training_source, feature):
     from modelchef.aws_training import build_bundle
     root, config = training_source
     if feature == 'ddp':
@@ -235,8 +235,20 @@ def test_managed_training_rejects_incompatible_guest_launcher_before_upload(trai
     else:
         config.model.quantization = 'nvfp4'
     (root / 'job.yaml').write_text(yaml.safe_dump(config.model_dump(mode='json')))
-    with pytest.raises(ValueError, match='prepared'):
-        build_bundle(root, {'pipeline_config': 'job.yaml'})
+    import io
+    import tarfile
+
+    from modelchef.aws_guest import guest_plan
+    with tarfile.open(fileobj=io.BytesIO(build_bundle(root, {'pipeline_config': 'job.yaml'}))) as archive:
+        loaded = yaml.safe_load(archive.extractfile('configs/job.yaml').read())
+    assert loaded['model']['quantization'] == config.model.quantization
+    assert loaded['training']['distributed'] == config.training.distributed
+    plan = guest_plan(config)
+    if feature == 'ddp':
+        assert '--nproc-per-node=gpu' in plan['command']
+        assert '--' in plan['command']
+    else:
+        assert 'nvfp4' in plan['extras']
 
 
 def test_training_bundle_includes_build_readme_and_bounds_single_input_line(training_source):
@@ -267,3 +279,38 @@ def test_training_preflight_requires_completed_report_even_if_process_exits_zero
     monkeypatch.setattr('subprocess.run', fake_pipeline)
     with pytest.raises(RuntimeError, match='completed run'):
         training_preflight(root, {'pipeline_config': 'job.yaml'})
+
+
+def test_pretrained_bundle_relocates_parent_and_preserves_token_roles(training_source):
+    import io
+    import json
+    import tarfile
+
+    from modelchef.aws_training import build_bundle
+    root, config = training_source
+    model = root / 'hf-model'
+    model.mkdir()
+    (model / 'config.json').write_text('{}')
+    (model / 'model.safetensors').write_bytes(b'weights')
+    (model / '.env').write_text('secret')
+    parent = root / 'parent'
+    (parent / 'checkpoints').mkdir(parents=True)
+    config.model.backend = 'huggingface'
+    config.model.pretrained_path = str(model)
+    config.tokenizer.algorithm = 'pretrained'
+    (parent / 'config.json').write_text(config.model_dump_json())
+    (parent / 'report.json').write_text(json.dumps({'status': 'completed', 'optimizer_steps': 0}))
+    (parent / 'tokenizer.json').write_text('{}')
+    (parent / 'tokenizer-roles.json').write_text('{"<eos>":3}')
+    (parent / 'checkpoints/step-000000.pt').write_bytes(b'checkpoint')
+    config.stage.kind, config.stage.parent_run = 'sft', str(parent)
+    config.model.peft.method = 'qlora'
+    (root / 'job.yaml').write_text(yaml.safe_dump(config.model_dump(mode='json')))
+    with tarfile.open(fileobj=io.BytesIO(build_bundle(root, {'pipeline_config': 'job.yaml'}))) as archive:
+        job = yaml.safe_load(archive.extractfile('configs/job.yaml').read())
+        saved = json.loads(archive.extractfile('inputs/parent_run/config.json').read())
+        assert job['model']['pretrained_path'] == saved['model']['pretrained_path']
+        assert job['model']['pretrained_path'] == 'inputs/pretrained-0'
+        assert 'inputs/pretrained-0/model.safetensors' in archive.getnames()
+        assert 'inputs/pretrained-0/.env' not in archive.getnames()
+        assert archive.extractfile('inputs/parent_run/tokenizer-roles.json').read() == b'{"<eos>":3}'

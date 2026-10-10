@@ -64,6 +64,18 @@ def test_aws_bundle_allowlists_code_and_declared_data(tmp_path):
     (tmp_path / 'recipe.yaml').write_text(yaml.safe_dump(config.model_dump(mode='json')))
     with pytest.raises(ValueError, match='Custom CUDA'):
         build_bundle(tmp_path, {'pipeline_config': 'recipe.yaml'})
+    directory = tmp_path / 'kernels/swiglu'
+    directory.mkdir(parents=True)
+    (directory / 'kernel.py').write_text('def swiglu(gate, up): return gate * up')
+    (directory / 'source.cu').write_text('// trusted source')
+    (directory / '.env').write_text('DO_NOT_UPLOAD=secret')
+    from modelchef.aws_guest import guest_plan
+    with tarfile.open(fileobj=io.BytesIO(build_bundle(tmp_path, {'pipeline_config': 'recipe.yaml'}))) as archive:
+        assert 'inputs/custom-kernel/source.cu' in archive.getnames()
+        assert 'inputs/custom-kernel/.env' not in archive.getnames()
+        loaded = yaml.safe_load(archive.extractfile('configs/job.yaml').read())
+        assert loaded['model']['custom_swiglu_path'] == 'inputs/custom-kernel'
+    assert 'cuda13-toolchain' in guest_plan(config)['extras']
 
 
 def test_training_guest_arms_shutdown_before_transfer_and_verifies_bundle():
@@ -72,7 +84,7 @@ def test_training_guest_arms_shutdown_before_transfer_and_verifies_bundle():
     script = training_user_data(settings)
     assert script.index('systemd-run') < script.index('aws s3 cp')
     assert 'trap finish EXIT' in script and 'sha256sum -c -' in script
-    assert '--sse AES256' in script and 'pipeline configs/job.yaml --run' in script
+    assert '--sse AES256' in script and 'modelchef.aws_guest configs/job.yaml' in script
     assert len(script.encode()) < 16384
     with pytest.raises(ValueError, match='instance_profile_name'):
         training_user_data({'max_runtime_minutes': 12})

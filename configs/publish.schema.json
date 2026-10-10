@@ -1,0 +1,101 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "export_dir": {
+      "title": "Export Dir",
+      "type": "string"
+    },
+    "repo_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$",
+      "title": "Repo Id",
+      "type": "string"
+    },
+    "private": {
+      "default": true,
+      "title": "Private",
+      "type": "boolean"
+    },
+    "license": {
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+      "title": "License",
+      "type": "string"
+    },
+    "summary": {
+      "minLength": 1,
+      "title": "Summary",
+      "type": "string"
+    },
+    "training_data": {
+      "minLength": 1,
+      "title": "Training Data",
+      "type": "string"
+    },
+    "evaluation": {
+      "minLength": 1,
+      "title": "Evaluation",
+      "type": "string"
+    },
+    "limitations": {
+      "minLength": 1,
+      "title": "Limitations",
+      "type": "string"
+    },
+    "base_model": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Base Model"
+    },
+    "pipeline_tag": {
+      "default": "text-generation",
+      "enum": [
+        "text-generation",
+        "image-text-to-text",
+        "automatic-speech-recognition"
+      ],
+      "title": "Pipeline Tag",
+      "type": "string"
+    },
+    "max_upload_bytes": {
+      "default": 8000000000,
+      "exclusiveMinimum": 0,
+      "title": "Max Upload Bytes",
+      "type": "integer"
+    },
+    "max_text_file_bytes": {
+      "default": 64000000,
+      "exclusiveMinimum": 0,
+      "title": "Max Text File Bytes",
+      "type": "integer"
+    },
+    "commit_message": {
+      "default": "Publish ModelChef model export",
+      "title": "Commit Message",
+      "type": "string"
+    }
+  },
+  "required": [
+    "export_dir",
+    "repo_id",
+    "license",
+    "summary",
+    "training_data",
+    "evaluation",
+    "limitations"
+  ],
+  "title": "PublishConfig",
+  "type": "object"
+}

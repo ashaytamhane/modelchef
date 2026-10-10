@@ -6,6 +6,8 @@ from pathlib import Path
 
 import yaml
 
+from modelchef.multimodal_config import MultimodalConfig
+from modelchef.publishing import PublishConfig
 from modelchef.run_config import RunConfig
 from modelchef.workflow import Workflow, cook
 
@@ -46,7 +48,8 @@ def check(root):
     documented = next((yaml.safe_load(block) for block in blocks
                        if 'name: full-reference' in block), None)
     assert documented == reference, 'README reference recipe differs from checked-in recipe'
-    for model, name in [(RunConfig, 'pretrain'), (Workflow, 'workflow')]:
+    for model, name in [(RunConfig, 'pretrain'), (Workflow, 'workflow'),
+                        (MultimodalConfig, 'multimodal'), (PublishConfig, 'publish')]:
         saved = json.loads((root / f'configs/{name}.schema.json').read_text(encoding='utf-8'))
         assert saved == model.model_json_schema(), f'{name} schema is stale'
     for path in (root / 'configs').glob('*.yaml'):
@@ -55,6 +58,10 @@ def check(root):
         config = yaml.safe_load(path.read_text(encoding='utf-8'))
         if path.name.startswith('workflow-'):
             cook(path, root)
+        elif isinstance(config, dict) and 'export_dir' in config:
+            PublishConfig.model_validate(config)
+        elif isinstance(config, dict) and 'modality' in config:
+            MultimodalConfig.model_validate(config)
         elif isinstance(config, dict) and 'training' in config:
             RunConfig.model_validate(config).validate_execution()
     print('Documentation, commands, example recipes and schemas agree.')

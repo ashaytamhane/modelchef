@@ -134,12 +134,14 @@ def test_two_cpu_rank_ddp_and_resume(tmp_path, model_type):
     import yaml
     config = recipe(tmp_path, model_type)
     config.training.distributed = 'ddp'
+    if model_type == 'decoder_rope':
+        config.data.storage = 'disk'
     path = tmp_path / 'recipe.yaml'
     path.write_text(yaml.safe_dump(config.model_dump(mode='json')))
     root = Path(__file__).resolve().parents[1]
     env = {**os.environ, 'PYTHONPATH': str(root / 'src'), 'OMP_NUM_THREADS': '1'}
     command = [sys.executable, '-m', 'torch.distributed.run', '--standalone', '--nproc_per_node=2',
-               '--module', 'modelchef.cli', 'pipeline', str(path), '--run', '--quiet']
+               '--module', '--', 'modelchef.cli', 'pipeline', str(path), '--run', '--quiet']
     executed = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True,
                               timeout=120, check=False)
     assert executed.returncode == 0, executed.stdout + executed.stderr
@@ -157,6 +159,7 @@ def test_two_cpu_rank_ddp_and_resume(tmp_path, model_type):
     data.write_text(''.join(json.dumps({'prompt': f'Q{i}', 'response': '1',
                                        'chosen': '1', 'rejected': '2'}) + '\n' for i in range(30)))
     config.data.local_path = str(data)
+    config.data.storage = 'memory'
     config.stage.kind = 'sft' if model_type == 'decoder_rope' else 'dpo'
     config.stage.parent_run = str(folder)
     config.name = 'post'

@@ -27,6 +27,18 @@ def _main() -> None:
     workflow_parser = command.add_parser('cook', help='Plan/run a sequence of local stage recipes')
     workflow_parser.add_argument('path', type=Path)
     workflow_parser.add_argument('--run', action='store_true')
+    multimodal = command.add_parser('multimodal', help='Plan/train local vision-language or speech recipes')
+    multimodal.add_argument('path', type=Path)
+    multimodal.add_argument('--run', action='store_true')
+    multimodal.add_argument('--resume', type=Path)
+    publish_parser = command.add_parser('publish-model', help='Preview/publish an allowlisted export to Hugging Face')
+    publish_parser.add_argument('path', type=Path, help='Publication recipe')
+    publish_parser.add_argument('--run', action='store_true')
+    media_predict = command.add_parser('predict-media', help='Generate text from a local image or PCM WAV')
+    media_predict.add_argument('path', type=Path, help='Multimodal recipe')
+    media_predict.add_argument('--media', required=True, type=Path)
+    media_predict.add_argument('--prompt', default='Describe this image.')
+    media_predict.add_argument('--model-path', type=Path, help='Override with a trained export directory')
     command.add_parser("doctor", help="Inspect Python, PyTorch and CUDA")
     config_parser = command.add_parser("check-config", help="Validate a runtime config, training recipe or workflow")
     config_parser.add_argument("path", type=Path)
@@ -132,7 +144,23 @@ def _main() -> None:
                                help="Hide CLI progress on stderr")
     args = parser.parse_args()
     with operation(args.command, args.quiet):
-        if args.command == 'cook':
+        if args.command == 'publish-model':
+            from modelchef.publishing import PublishConfig, publish
+            config = PublishConfig.model_validate(yaml.safe_load(args.path.read_text(encoding='utf-8')))
+            print(json.dumps(publish(config, Path.cwd(), args.run), indent=2))
+        elif args.command in {'multimodal', 'predict-media'}:
+            from modelchef.multimodal import plan, predict, train
+            from modelchef.multimodal_config import MultimodalConfig
+            config = MultimodalConfig.model_validate(yaml.safe_load(args.path.read_text(encoding='utf-8')))
+            if args.command == 'predict-media':
+                print(predict(config, Path.cwd(), args.media, args.prompt, args.model_path))
+            elif args.run:
+                print(json.dumps(train(config, Path.cwd(), args.resume), indent=2))
+            else:
+                if args.resume:
+                    raise ValueError('--resume requires --run')
+                print(json.dumps(plan(config, Path.cwd()), indent=2))
+        elif args.command == 'cook':
             from modelchef.workflow import cook
             print(json.dumps(cook(args.path, Path.cwd(), args.run), indent=2, default=str))
         elif args.command == 'aws-serve':
@@ -265,6 +293,12 @@ def _main() -> None:
             if args.command == "check-config" and "stages" in config:
                 from modelchef.workflow import cook
                 config = cook(args.path, Path.cwd())
+            elif args.command == 'check-config' and 'export_dir' in config:
+                from modelchef.publishing import PublishConfig
+                config = PublishConfig.model_validate(config).model_dump(mode='json')
+            elif args.command == 'check-config' and 'modality' in config:
+                from modelchef.multimodal_config import MultimodalConfig
+                config = MultimodalConfig.model_validate(config).model_dump(mode='json')
             elif args.command == "check-config" and "runtime" not in config:
                 from modelchef.run_config import RunConfig
                 config = RunConfig.model_validate(config).validate_execution().model_dump(mode="json")
@@ -295,6 +329,7 @@ def main() -> None:
                       "transformers": "pretrained", "huggingface_hub": "pretrained", "peft": "peft",
                       "bitsandbytes": "qlora", "transformer_engine": "nvfp4", "boto3": "aws",
                       "botocore": "aws", "vllm": "inference", "lm_eval": "evaluation"}
+            extras.update(PIL='multimodal', numpy='train')
             if package == "torch":
                 message += ". Run modelchef setup, then modelchef setup --apply."
             elif package in extras:

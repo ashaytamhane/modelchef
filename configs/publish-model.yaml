@@ -1,0 +1,12 @@
+schema_version: 1
+export_dir: artifacts/training/YOUR_RUN/export
+repo_id: YOUR_USERNAME/YOUR_MODEL
+private: true
+license: apache-2.0
+summary: Replace with an accurate description of your model and intended use.
+training_data: Describe your data sources, permissions, filtering and training stages.
+evaluation: Describe evaluation protocols and results; do not invent benchmark scores.
+limitations: Describe known failures and whether this is only a pipeline test model.
+base_model: null
+pipeline_tag: text-generation
+max_upload_bytes: 8000000000

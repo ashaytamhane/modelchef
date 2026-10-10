@@ -15,6 +15,7 @@ from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
 from modelchef.benchmarks import acquire_benchmark, evaluate_choices, select_benchmark
 from modelchef.corpus import acquire, digest, file_digest, process
+from modelchef.disk_data import JsonlRows, load_blocks, pack_disk
 from modelchef.engines import create_model, load_parent, load_tokenizer
 from modelchef.execution import check_custom_kernel, configure_execution, plugin_fingerprint
 from modelchef.hardware import detect_hardware, resolve_runtime
@@ -196,14 +197,16 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             "The saved SHA256 identifies the exact sample; raw text is never committed to Git.")
     snapshot = folder / 'raw.jsonl'
     if resume:
-        records = [json.loads(line) for line in snapshot.read_text(encoding='utf-8').splitlines()]
         source = json.loads((folder / 'source-manifest.json').read_text())
-        if digest(snapshot.read_bytes()) != source['raw_sha256']:
+        records = (JsonlRows(snapshot, source['documents']) if c.data.storage == 'disk' else
+                   [json.loads(line) for line in snapshot.read_text(encoding='utf-8').splitlines()])
+        if file_digest(snapshot) != source['raw_sha256']:
             raise ValueError('Run snapshot checksum changed')
     else:
         records, source = acquire(c, root, lambda message: n.say(message, detail=True))
-        snapshot.write_bytes(b''.join((json.dumps(row, ensure_ascii=False) + '\n').encode()
-                                     for row in records))
+        with snapshot.open('w', encoding='utf-8', newline='\n') as output:
+            for row in records:
+                output.write(json.dumps(row, ensure_ascii=False) + '\n')
     if not resume:
         (folder / "source-manifest.json").write_text(json.dumps(source, indent=2), encoding="utf-8")
 
@@ -244,8 +247,9 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                           process(records, processing_config, root))
     if not resume:
         for name, rows in splits.items():
-            (folder / f"{name}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows),
-                                               encoding="utf-8")
+            with (folder / f"{name}.jsonl").open("w", encoding="utf-8") as output:
+                for row in rows:
+                    output.write(json.dumps(row) + "\n")
         (folder / "processing.json").write_text(json.dumps(processing, indent=2), encoding="utf-8")
     n.say(f"Filter counts: {processing['counts']}; document splits: {processing['split_documents']}.")
     n.say(f"Benchmark decontamination: {processing['decontamination']}. "
@@ -295,19 +299,34 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     blocks, token_counts = {}, {}
     fractions = {"validation": c.processing.validation_fraction, "test": c.processing.test_fraction,
                  "train": 1 - c.processing.validation_fraction - c.processing.test_fraction}
-    for name, rows in splits.items():
-        limit = int(c.data.max_tokens * fractions[name])
-        blocks[name], token_counts[name] = (pack_structured(rows, tokenizer, c, limit) if structured
-            else pack(rows, tokenizer, c.tokenizer, c.model.context_length, limit))
-    # Logical data identity is independent of torch ZIP container metadata.
-    data_hash = hashlib.sha256(b"".join(part.numpy().tobytes() for name in sorted(blocks)
-                                       for part in blocks[name])).hexdigest()
+    descriptors = {}
+    if c.data.storage == 'disk' and resume:
+        blocks = load_blocks(folder)
+        descriptors = torch.load(folder / 'tokens.pt', weights_only=True)['splits']
+        token_counts = {name: item['tokens'] for name, item in descriptors.items()}
+    else:
+        for name, rows in splits.items():
+            limit = int(c.data.max_tokens * fractions[name])
+            if c.data.storage == 'disk':
+                blocks[name], descriptors[name] = pack_disk(rows, tokenizer, c.tokenizer,
+                    c.model.context_length, limit, folder, name)
+                token_counts[name] = descriptors[name]['tokens']
+            else:
+                blocks[name], token_counts[name] = (pack_structured(rows, tokenizer, c, limit) if structured
+                    else pack(rows, tokenizer, c.tokenizer, c.model.context_length, limit))
+    # Logical data identity does not depend on torch ZIP container metadata.
+    if descriptors:
+        data_hash = digest(json.dumps(descriptors, sort_keys=True).encode())
+    else:
+        data_hash = hashlib.sha256(b"".join(part.numpy().tobytes() for name in sorted(blocks)
+                                           for part in blocks[name])).hexdigest()
     if resume:
         if (saved['config_sha256'], saved['data_sha256'], saved['tokenizer_sha256']) != (
                 fingerprint, data_hash, tokenizer_hash):
             raise ValueError('Resume recipe/data/tokenizer differs from checkpoint')
     else:
-        torch.save(blocks, folder / 'tokens.pt')
+        torch.save({'format': 'memmap-v1', 'splits': descriptors} if descriptors else blocks,
+                   folder / 'tokens.pt')
     token_hash = file_digest(folder / 'tokens.pt')
     n.say(f"Token counts: {token_counts}; context={c.model.context_length}. "
           "This is bounded pretraining data, not a full corpus download.")
@@ -426,6 +445,9 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     baseline = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
                         t.micro_batch_size, device, amp)
     n.say(f"Initial validation loss={baseline['loss']:.4f}; perplexity={baseline['perplexity']:.2f}.")
+    if device == 'cuda':
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
     started = time.monotonic()
     initial_step = step
     while step < t.steps:
@@ -496,6 +518,15 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     n.stage("8. Final held-out evaluation and checkpoint reload", "Evaluate validation and test splits "
             "without gradient updates. Reload the final weights into a fresh decoder and check matching "
             "logits. Perplexity only applies to this sample/tokenizer; it is not a standard-suite score.")
+    if device == 'cuda':
+        torch.cuda.synchronize()
+    elapsed_loop = time.monotonic() - started
+    report['performance'] = {
+        'training_loop_seconds': elapsed_loop,
+        'tokens_per_second': (consumed - saved.get('tokens_seen', 0) if resume else consumed) / elapsed_loop,
+        'peak_cuda_allocated_bytes': torch.cuda.max_memory_allocated() if device == 'cuda' else None,
+        'peak_cuda_reserved_bytes': torch.cuda.max_memory_reserved() if device == 'cuda' else None,
+        'scope': 'Training loop, including loop compilation, evaluations and checkpoints; excludes setup/initial validation.'}
     validation = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
                           t.micro_batch_size, device, amp)
     test = evaluate(model, evaluation_blocks["test"], c.evaluation.batches, t.micro_batch_size, device, amp)
@@ -507,8 +538,9 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     restored.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True)["model"])
     restored.eval()
     probe = blocks["test"][0][:1].to(device)
-    with torch.no_grad():
-        if not torch.allclose(model(probe), restored(probe), rtol=1e-5, atol=1e-6):
+    tolerance = 0.03 if dtype == torch.bfloat16 else 0.003 if dtype == torch.float16 else 1e-5
+    with torch.no_grad(), amp():
+        if not torch.allclose(model(probe), restored(probe), rtol=tolerance, atol=tolerance):
             raise RuntimeError("Reloaded checkpoint logits differ")
     del restored
     n.say(f"Validation loss={validation['loss']:.4f}, test loss={test['loss']:.4f}; "

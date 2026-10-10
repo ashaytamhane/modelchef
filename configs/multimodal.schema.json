@@ -1,0 +1,434 @@
+{
+  "$defs": {
+    "MediaData": {
+      "additionalProperties": false,
+      "properties": {
+        "manifest": {
+          "title": "Manifest",
+          "type": "string"
+        },
+        "max_records": {
+          "default": 128,
+          "minimum": 3,
+          "title": "Max Records",
+          "type": "integer"
+        },
+        "max_manifest_bytes": {
+          "default": 2000000,
+          "exclusiveMinimum": 0,
+          "title": "Max Manifest Bytes",
+          "type": "integer"
+        },
+        "max_record_bytes": {
+          "default": 64000,
+          "exclusiveMinimum": 0,
+          "title": "Max Record Bytes",
+          "type": "integer"
+        },
+        "max_media_bytes": {
+          "default": 16000000,
+          "exclusiveMinimum": 0,
+          "title": "Max Media Bytes",
+          "type": "integer"
+        },
+        "max_total_media_bytes": {
+          "default": 256000000,
+          "exclusiveMinimum": 0,
+          "title": "Max Total Media Bytes",
+          "type": "integer"
+        },
+        "max_image_pixels": {
+          "default": 4000000,
+          "exclusiveMinimum": 0,
+          "title": "Max Image Pixels",
+          "type": "integer"
+        },
+        "max_audio_seconds": {
+          "default": 30,
+          "exclusiveMinimum": 0,
+          "maximum": 30,
+          "title": "Max Audio Seconds",
+          "type": "number"
+        },
+        "validation_fraction": {
+          "default": 0.1,
+          "exclusiveMaximum": 0.5,
+          "exclusiveMinimum": 0,
+          "title": "Validation Fraction",
+          "type": "number"
+        },
+        "test_fraction": {
+          "default": 0.1,
+          "exclusiveMaximum": 0.5,
+          "exclusiveMinimum": 0,
+          "title": "Test Fraction",
+          "type": "number"
+        }
+      },
+      "required": [
+        "manifest"
+      ],
+      "title": "MediaData",
+      "type": "object"
+    },
+    "MediaEvaluation": {
+      "additionalProperties": false,
+      "properties": {
+        "max_examples": {
+          "default": 8,
+          "minimum": 1,
+          "title": "Max Examples",
+          "type": "integer"
+        },
+        "max_new_tokens": {
+          "default": 64,
+          "maximum": 1024,
+          "minimum": 1,
+          "title": "Max New Tokens",
+          "type": "integer"
+        }
+      },
+      "title": "MediaEvaluation",
+      "type": "object"
+    },
+    "MediaModel": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "max_model_bytes": {
+          "default": 4000000000,
+          "exclusiveMinimum": 0,
+          "title": "Max Model Bytes",
+          "type": "integer"
+        },
+        "vision_format": {
+          "default": "chat",
+          "enum": [
+            "chat",
+            "suffix"
+          ],
+          "title": "Vision Format",
+          "type": "string"
+        },
+        "freeze_encoders": {
+          "default": false,
+          "title": "Freeze Encoders",
+          "type": "boolean"
+        },
+        "encoder_modules": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Encoder Modules",
+          "type": "array"
+        },
+        "attention_kernel": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "math",
+            "flash",
+            "efficient",
+            "cudnn"
+          ],
+          "title": "Attention Kernel",
+          "type": "string"
+        },
+        "gradient_checkpointing": {
+          "default": false,
+          "title": "Gradient Checkpointing",
+          "type": "boolean"
+        },
+        "language": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Language"
+        },
+        "speech_task": {
+          "default": "transcribe",
+          "enum": [
+            "transcribe",
+            "translate"
+          ],
+          "title": "Speech Task",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "MediaModel",
+      "type": "object"
+    },
+    "Training": {
+      "additionalProperties": false,
+      "properties": {
+        "distributed": {
+          "default": "none",
+          "enum": [
+            "none",
+            "ddp"
+          ],
+          "title": "Distributed",
+          "type": "string"
+        },
+        "distributed_timeout_seconds": {
+          "default": 300,
+          "exclusiveMinimum": 0,
+          "title": "Distributed Timeout Seconds",
+          "type": "integer"
+        },
+        "compile": {
+          "default": false,
+          "title": "Compile",
+          "type": "boolean"
+        },
+        "compile_backend": {
+          "default": "inductor",
+          "enum": [
+            "inductor",
+            "aot_eager",
+            "eager"
+          ],
+          "title": "Compile Backend",
+          "type": "string"
+        },
+        "compile_mode": {
+          "default": "default",
+          "enum": [
+            "default",
+            "reduce-overhead",
+            "max-autotune"
+          ],
+          "title": "Compile Mode",
+          "type": "string"
+        },
+        "allow_tf32": {
+          "default": false,
+          "title": "Allow Tf32",
+          "type": "boolean"
+        },
+        "optimizer_kernel": {
+          "default": "default",
+          "enum": [
+            "default",
+            "fused",
+            "foreach"
+          ],
+          "title": "Optimizer Kernel",
+          "type": "string"
+        },
+        "accelerator": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "cpu",
+            "cuda",
+            "rocm",
+            "mps"
+          ],
+          "title": "Accelerator",
+          "type": "string"
+        },
+        "precision": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "fp32",
+            "bf16",
+            "fp16"
+          ],
+          "title": "Precision",
+          "type": "string"
+        },
+        "seed": {
+          "default": 42,
+          "minimum": 0,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "deterministic": {
+          "default": true,
+          "title": "Deterministic",
+          "type": "boolean"
+        },
+        "steps": {
+          "default": 40,
+          "exclusiveMinimum": 0,
+          "title": "Steps",
+          "type": "integer"
+        },
+        "micro_batch_size": {
+          "default": 2,
+          "exclusiveMinimum": 0,
+          "title": "Micro Batch Size",
+          "type": "integer"
+        },
+        "gradient_accumulation": {
+          "default": 2,
+          "exclusiveMinimum": 0,
+          "title": "Gradient Accumulation",
+          "type": "integer"
+        },
+        "optimizer": {
+          "const": "adamw",
+          "default": "adamw",
+          "title": "Optimizer",
+          "type": "string"
+        },
+        "learning_rate": {
+          "default": 0.0005,
+          "exclusiveMinimum": 0,
+          "title": "Learning Rate",
+          "type": "number"
+        },
+        "min_learning_rate_ratio": {
+          "default": 0.1,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Min Learning Rate Ratio",
+          "type": "number"
+        },
+        "betas": {
+          "default": [
+            0.9,
+            0.95
+          ],
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Betas",
+          "type": "array"
+        },
+        "weight_decay": {
+          "default": 0.1,
+          "minimum": 0,
+          "title": "Weight Decay",
+          "type": "number"
+        },
+        "optimizer_eps": {
+          "default": 1e-08,
+          "exclusiveMinimum": 0,
+          "title": "Optimizer Eps",
+          "type": "number"
+        },
+        "schedule": {
+          "default": "cosine",
+          "enum": [
+            "cosine",
+            "constant"
+          ],
+          "title": "Schedule",
+          "type": "string"
+        },
+        "warmup_steps": {
+          "default": 4,
+          "minimum": 0,
+          "title": "Warmup Steps",
+          "type": "integer"
+        },
+        "gradient_clip_norm": {
+          "default": 1,
+          "exclusiveMinimum": 0,
+          "title": "Gradient Clip Norm",
+          "type": "number"
+        },
+        "checkpoint_every": {
+          "default": 20,
+          "exclusiveMinimum": 0,
+          "title": "Checkpoint Every",
+          "type": "integer"
+        },
+        "evaluate_every": {
+          "default": 10,
+          "exclusiveMinimum": 0,
+          "title": "Evaluate Every",
+          "type": "integer"
+        },
+        "log_every": {
+          "default": 5,
+          "exclusiveMinimum": 0,
+          "title": "Log Every",
+          "type": "integer"
+        },
+        "max_runtime_seconds": {
+          "default": 600,
+          "exclusiveMinimum": 0,
+          "title": "Max Runtime Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "Training",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "name": {
+      "default": "multimodal",
+      "title": "Name",
+      "type": "string"
+    },
+    "modality": {
+      "enum": [
+        "vision",
+        "speech"
+      ],
+      "title": "Modality",
+      "type": "string"
+    },
+    "output_dir": {
+      "default": "artifacts/multimodal",
+      "title": "Output Dir",
+      "type": "string"
+    },
+    "data": {
+      "$ref": "#/$defs/MediaData"
+    },
+    "model": {
+      "$ref": "#/$defs/MediaModel"
+    },
+    "max_text_tokens": {
+      "default": 512,
+      "minimum": 8,
+      "title": "Max Text Tokens",
+      "type": "integer"
+    },
+    "training": {
+      "$ref": "#/$defs/Training"
+    },
+    "evaluation": {
+      "$ref": "#/$defs/MediaEvaluation"
+    }
+  },
+  "required": [
+    "modality",
+    "data",
+    "model"
+  ],
+  "title": "MultimodalConfig",
+  "type": "object"
+}

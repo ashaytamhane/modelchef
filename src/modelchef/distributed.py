@@ -23,6 +23,7 @@ def run_distributed(config, root, resume=None):
     from modelchef.run_config import RunConfig
     if int(os.environ.get('WORLD_SIZE', '1')) < 2:
         raise ValueError('DDP requires torchrun --standalone --nproc_per_node=2 (or more)')
+    os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
     local_rank = int(os.environ['LOCAL_RANK'])
     if config.training.accelerator in {'auto', 'cuda', 'rocm'} and torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
@@ -46,11 +47,13 @@ def run_distributed(config, root, resume=None):
         folder = Path(preparation[0]['report']['run_dir'])
         config = RunConfig.model_validate_json((folder / 'config.json').read_text())
         c, t = config, config.training
+        torch.backends.cuda.matmul.allow_tf32 = t.allow_tf32
         random.seed(t.seed + rank)
         torch.manual_seed(t.seed + rank)
         torch.use_deterministic_algorithms(t.deterministic)
         tokenizer = load_tokenizer(folder)
-        blocks = torch.load(folder / 'tokens.pt', weights_only=True)
+        from modelchef.disk_data import load_blocks
+        blocks = load_blocks(folder)
         saved = torch.load(resume or preparation[0]['report']['checkpoint'],
                            map_location='cpu', weights_only=True)
         if resume and saved.get('world_size') != world:
@@ -105,6 +108,9 @@ def run_distributed(config, root, resume=None):
 
         step, consumed = saved['step'], saved['tokens_seen']
         skipped_updates = saved.get('skipped_optimizer_updates', 0)
+        if device == 'cuda':
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
         started = time.monotonic()
         initial_step = step
         result = preparation[0]['report']
@@ -192,7 +198,19 @@ def run_distributed(config, root, resume=None):
             if step % t.checkpoint_every == 0 or step == t.steps:
                 checkpoint()
         path = checkpoint()
+        if device == 'cuda':
+            torch.cuda.synchronize()
+        elapsed_loop = time.monotonic() - started
+        peaks = torch.tensor([torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved()]
+                              if device == 'cuda' else [0, 0], device=device, dtype=torch.int64)
+        dist.all_reduce(peaks, op=dist.ReduceOp.MAX)
         if rank == 0:
+            result['performance'] = {
+                'training_loop_seconds': elapsed_loop,
+                'tokens_per_second': (consumed - saved['tokens_seen']) / elapsed_loop,
+                'peak_cuda_allocated_bytes': peaks[0].item() if device == 'cuda' else None,
+                'peak_cuda_reserved_bytes': peaks[1].item() if device == 'cuda' else None,
+                'scope': 'Global tokens; maximum per-rank CUDA peaks; loop includes evaluation/checkpoints.'}
             result.update(status='completed', checkpoint=str(path), optimizer_steps=step,
                           tokens_seen=consumed, checkpoint_reload_verified=True,
                           skipped_optimizer_updates=skipped_updates,
@@ -209,8 +227,9 @@ def run_distributed(config, root, resume=None):
             restored.load_state_dict(torch.load(path, map_location=device, weights_only=True)['model'])
             model.eval()
             probe = blocks['test'][0][:1].to(device)
-            with torch.no_grad():
-                if not torch.allclose(model(probe), restored(probe), atol=1e-6, rtol=1e-5):
+            tolerance = 0.03 if dtype == torch.bfloat16 else 0.003 if dtype == torch.float16 else 1e-5
+            with torch.no_grad(), amp():
+                if not torch.allclose(model(probe), restored(probe), atol=tolerance, rtol=tolerance):
                     raise RuntimeError('DDP checkpoint reload differs')
             from modelchef.benchmarks import evaluate_choices
             examples = json.loads((folder / 'benchmark-examples.json').read_text())

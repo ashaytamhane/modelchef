@@ -13,14 +13,11 @@ from modelchef.run_config import RunConfig
 
 def build_bundle(root, settings):
     root = Path(root).resolve()
-    config = RunConfig.model_validate(yaml.safe_load((root / settings['pipeline_config']).read_text()))
-    if config.model.backend != 'native':
-        raise ValueError('Managed AWS training currently packages native models only')
-    if config.training.distributed == 'ddp':
-        raise ValueError('Managed aws-train launches one process; DDP requires torchrun on a prepared host')
-    if config.model.quantization == 'nvfp4':
-        raise ValueError('Managed aws-train does not install Transformer Engine for native NVFP4; '
-                         'use a prepared Blackwell host with the nvfp4 extra')
+    raw = yaml.safe_load((root / settings['pipeline_config']).read_text())
+    if 'modality' in raw:
+        return build_multimodal_bundle(root, settings, raw)
+    config = RunConfig.model_validate(raw)
+    config.validate_execution()
     cap = int(settings.get('max_bundle_bytes', 64_000_000))
     if cap <= 0:
         raise ValueError('max_bundle_bytes must be positive')
@@ -42,43 +39,91 @@ def build_bundle(root, settings):
     if (root / 'README.md').is_file():
         add_file('README.md', root / 'README.md')
     recipe = config.model_dump(mode='json')
-    if config.model.custom_swiglu_path:
-        raise ValueError('Custom CUDA managed AWS packaging is not supported yet; run on a prepared host')
+    pretrained = {}
+    kernels = {}
+
+    def package_kernel(model):
+        if not model['custom_swiglu_path']:
+            return
+        directory = (root / model['custom_swiglu_path']).resolve()
+        if directory not in kernels:
+            relative = 'inputs/custom-kernel' + (f'-{len(kernels)}' if kernels else '')
+            if not (directory / 'kernel.py').is_file():
+                raise ValueError('Custom CUDA directory requires kernel.py')
+            for path in sorted(directory.iterdir()):
+                if path.is_file() and path.suffix in {'.py', '.cpp', '.cu', '.h', '.cuh'}:
+                    add_file(relative + '/' + path.name, path)
+            kernels[directory] = relative
+        model['custom_swiglu_path'] = kernels[directory]
+
+    def package_pretrained(model):
+        if model['backend'] != 'huggingface':
+            return
+        directory = (root / model['pretrained_path']).resolve()
+        if directory not in pretrained:
+            relative = f'inputs/pretrained-{len(pretrained)}'
+            if not (directory / 'config.json').is_file() or not any(directory.glob('*.safetensors')):
+                raise ValueError('Managed pretrained bundles require local config and safetensors weights')
+            for path in sorted(directory.iterdir()):
+                if path.is_file() and path.suffix in {'.json', '.safetensors', '.txt', '.model', '.jinja'}:
+                    add_file(relative + '/' + path.name, path)
+            # Index references must stay in the allowlisted model directory.
+            for path in directory.glob('*.index.json'):
+                index = json.loads(path.read_text(encoding='utf-8'))
+                for filename in set(index.get('weight_map', {}).values()):
+                    if relative + '/' + filename not in files:
+                        raise ValueError('Pretrained index references a missing or excluded shard')
+            pretrained[directory] = relative
+        model['pretrained_path'] = pretrained[directory]
+
+    package_pretrained(recipe['model'])
+    package_kernel(recipe['model'])
     if config.data.provider == 'local_jsonl':
-        path = root / config.data.local_path
         rows, read_bytes = [], 0
-        with path.open('rb') as source:
-            index = 0
-            remaining = cap - sum(map(len, files.values()))
-            while len(rows) < config.data.max_documents:
-                line = source.readline(min(config.data.max_download_bytes, remaining) - read_bytes + 1)
-                if not line:
-                    break
-                read_bytes += len(line)
-                if read_bytes > config.data.max_download_bytes:
-                    raise ValueError('Local training input exceeds byte budget')
-                if read_bytes > remaining:
-                    raise ValueError('Uncompressed training bundle exceeds max_bundle_bytes')
-                if index >= config.data.offset:
-                    rows.append(line)
-                index += 1
+        index = 0
+        remaining = cap - sum(map(len, files.values()))
+        for filename in config.data.local_paths or [config.data.local_path]:
+            with (root / filename).open('rb') as source:
+                while len(rows) < config.data.max_documents:
+                    line = source.readline(min(config.data.max_record_bytes,
+                        config.data.max_download_bytes - read_bytes, remaining - read_bytes) + 1)
+                    if not line:
+                        break
+                    read_bytes += len(line)
+                    if read_bytes > config.data.max_download_bytes:
+                        raise ValueError('Local training input exceeds byte budget')
+                    if read_bytes > remaining:
+                        raise ValueError('Uncompressed training bundle exceeds max_bundle_bytes')
+                    if len(line) > config.data.max_record_bytes:
+                        raise ValueError('Local training record exceeds max_record_bytes')
+                    if not line.strip():
+                        continue
+                    if index >= config.data.offset:
+                        rows.append(line if line.endswith(b'\n') else line + b'\n')
+                    index += 1
+            if len(rows) >= config.data.max_documents:
+                break
         files['inputs/data.jsonl'] = b''.join(rows)
-        recipe['data'].update(local_path='inputs/data.jsonl', offset=0)
+        recipe['data'].update(local_path='inputs/data.jsonl', local_paths=[], offset=0)
     for field in ['parent_run', 'teacher_run']:
         if not getattr(config.stage, field):
             continue
         parent = (root / getattr(config.stage, field)).resolve()
         saved = RunConfig.model_validate_json((parent / 'config.json').read_text())
-        if saved.model.backend != 'native':
-            raise ValueError('AWS bundles cannot reference external pretrained paths')
         report = json.loads((parent / 'report.json').read_text())
         if report['status'] != 'completed':
             raise ValueError('AWS parent run must be complete')
         relative = f'inputs/{field}'
         checkpoint = f"checkpoints/step-{report['optimizer_steps']:06d}.pt"
-        for name in ['config.json', 'report.json', 'tokenizer.json', checkpoint]:
+        for name in ['report.json', 'tokenizer.json', checkpoint]:
             path = parent / name
             add_file(f'{relative}/{name}', path)
+        if (parent / 'tokenizer-roles.json').is_file():
+            add_file(f'{relative}/tokenizer-roles.json', parent / 'tokenizer-roles.json')
+        metadata = saved.model_dump(mode='json')
+        package_pretrained(metadata['model'])
+        package_kernel(metadata['model'])
+        files[f'{relative}/config.json'] = json.dumps(metadata).encode()
         recipe['stage'][field] = relative
     for index, filename in enumerate(config.processing.benchmark_files):
         add_file(f'inputs/decontamination-{index}.txt', root / filename)
@@ -88,6 +133,61 @@ def build_bundle(root, settings):
     files['configs/job.yaml'] = yaml.safe_dump(recipe, sort_keys=False).encode()
     if sum(map(len, files.values())) > cap:
         raise ValueError('Uncompressed training bundle exceeds max_bundle_bytes')
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode='w:gz') as archive:
+        for name, content in sorted(files.items()):
+            entry = tarfile.TarInfo(name)
+            entry.size = len(content)
+            archive.addfile(entry, io.BytesIO(content))
+    return output.getvalue()
+
+
+def build_multimodal_bundle(root, settings, raw):
+    from modelchef.multimodal import model_manifest
+    from modelchef.multimodal_config import MultimodalConfig
+    from modelchef.multimodal_data import read_manifest
+    config = MultimodalConfig.model_validate(raw)
+    cap = int(settings.get('max_bundle_bytes', 64_000_000))
+    if cap <= 0:
+        raise ValueError('max_bundle_bytes must be positive')
+    files = {}
+    def add(name, path):
+        if name in files:
+            return
+        remaining = cap - sum(map(len, files.values()))
+        if path.stat().st_size > remaining:
+            raise ValueError('Multimodal bundle exceeds max_bundle_bytes')
+        with path.open('rb') as source:
+            value = source.read(remaining + 1)
+        if len(value) > remaining:
+            raise ValueError('Multimodal bundle exceeds max_bundle_bytes')
+        files[name] = value
+    for path in sorted((root / 'src/modelchef').glob('*.py')):
+        add(path.relative_to(root).as_posix(), path)
+    for name in ['pyproject.toml', 'README.md']:
+        if (root / name).is_file():
+            add(name, root / name)
+    records, _ = read_manifest(config, root)
+    field = 'image' if config.modality == 'vision' else 'audio'
+    rows = []
+    for record in records:
+        path = Path(record[field])
+        name = f"media/{record['media_sha256']}{path.suffix}"
+        add('inputs/' + name, path)
+        row = {key: value for key, value in record.items() if key != 'media_sha256'}
+        row[field] = name
+        rows.append(row)
+    model = (root / config.model.path).resolve()
+    for name in model_manifest(model, config.model.max_model_bytes):
+        add('inputs/model/' + name, model / name)
+    recipe = config.model_dump(mode='json')
+    recipe['data']['manifest'] = 'inputs/media.jsonl'
+    recipe['model']['path'] = 'inputs/model'
+    recipe['output_dir'] = 'artifacts/multimodal'
+    files['inputs/media.jsonl'] = ''.join(json.dumps(row) + '\n' for row in rows).encode()
+    files['configs/job.yaml'] = yaml.safe_dump(recipe, sort_keys=False).encode()
+    if sum(map(len, files.values())) > cap:
+        raise ValueError('Multimodal bundle exceeds max_bundle_bytes')
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode='w:gz') as archive:
         for name, content in sorted(files.items()):
@@ -139,7 +239,8 @@ echo '{checksum}  /tmp/source.tar.gz' | sha256sum -c -
 tar -xzf /tmp/source.tar.gz
 python -m pip install '.[pipeline]'
 python -m modelchef.cli doctor
-python -m modelchef.cli pipeline configs/job.yaml --run
+# Guest preparation preserves the original recipe's optimization policy.
+python -m modelchef.aws_guest configs/job.yaml
 '''
 
 
@@ -148,12 +249,20 @@ def training_preflight(root, settings):
     import subprocess
     import sys
     root = Path(root)
-    config = RunConfig.model_validate(yaml.safe_load((root / settings['pipeline_config']).read_text()))
+    raw = yaml.safe_load((root / settings['pipeline_config']).read_text())
+    if 'modality' in raw:
+        return multimodal_preflight(root, raw)
+    config = RunConfig.model_validate(raw)
     config.name = 'aws-local-preflight'
     config.output_dir = 'artifacts/aws-training-preflight/' + uuid.uuid4().hex
     config.data.max_documents = min(config.data.max_documents, 64)
     config.data.max_tokens = min(config.data.max_tokens, 16000)
     config.training.accelerator, config.training.precision = 'cpu', 'fp32'
+    config.training.distributed = 'none'
+    if config.model.quantization == 'nvfp4':
+        config.model.quantization = 'none'
+    if config.model.peft.method == 'qlora':
+        config.model.peft.method = 'lora'
     config.training.compile, config.training.allow_tf32 = False, False
     config.training.optimizer_kernel = 'default'
     config.model.attention_kernel, config.model.custom_swiglu_path = 'math', None
@@ -175,4 +284,34 @@ def training_preflight(root, settings):
     if len(reports) != 1 or json.loads(reports[0].read_text())['status'] != 'completed':
         raise RuntimeError('Local AWS training preflight did not produce a completed run; no instance launched')
     return {'passed': True, 'recipe': str(path), 'steps': 2,
+            'scope': 'CPU data/objective/recovery probe; GPU optimization validation runs on guest',
             'run_dir': str(reports[0].parent)}
+
+
+def multimodal_preflight(root, raw):
+    import subprocess
+    import sys
+
+    from modelchef.multimodal_config import MultimodalConfig
+    config = MultimodalConfig.model_validate(raw)
+    config.name = 'aws-multimodal-preflight'
+    config.output_dir = 'artifacts/aws-training-preflight/' + uuid.uuid4().hex
+    config.data.max_records = min(config.data.max_records, 16)
+    config.training.accelerator, config.training.precision = 'cpu', 'fp32'
+    config.training.compile, config.training.allow_tf32 = False, False
+    config.training.optimizer_kernel = 'default'
+    config.model.attention_kernel = 'math'
+    config.training.steps, config.training.warmup_steps = 2, 0
+    config.training.gradient_accumulation = 1
+    config.training.max_runtime_seconds = 120
+    config.evaluation.max_examples, config.evaluation.max_new_tokens = 1, 1
+    path = root / 'artifacts/aws-multimodal-preflight.yaml'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(config.model_dump(mode='json')), encoding='utf-8')
+    subprocess.run([sys.executable, '-m', 'modelchef.cli', 'multimodal', str(path), '--run'],
+                   cwd=root, check=True, timeout=300)
+    reports = list((root / config.output_dir).glob('*/report.json'))
+    if len(reports) != 1 or json.loads(reports[0].read_text())['status'] != 'completed':
+        raise RuntimeError('Multimodal local preflight did not complete; no instance launched')
+    return {'passed': True, 'recipe': str(path), 'steps': 2, 'run_dir': str(reports[0].parent),
+            'scope': 'CPU multimodal data/objective/recovery probe; actual GPU policy validated on guest'}

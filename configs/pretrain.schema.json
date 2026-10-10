@@ -244,6 +244,28 @@
           "default": null,
           "title": "Local Path"
         },
+        "local_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Local Paths",
+          "type": "array"
+        },
+        "storage": {
+          "default": "memory",
+          "enum": [
+            "memory",
+            "disk"
+          ],
+          "title": "Storage",
+          "type": "string"
+        },
+        "max_record_bytes": {
+          "default": 4000000,
+          "exclusiveMinimum": 0,
+          "title": "Max Record Bytes",
+          "type": "integer"
+        },
         "offset": {
           "default": 0,
           "minimum": 0,
@@ -252,7 +274,6 @@
         },
         "max_documents": {
           "default": 256,
-          "maximum": 10000,
           "minimum": 3,
           "title": "Max Documents",
           "type": "integer"

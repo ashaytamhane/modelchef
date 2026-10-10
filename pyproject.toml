@@ -15,6 +15,8 @@ dev = ["pytest>=8,<10", "ruff>=0.9"]
 train = ["torch==2.13.0", "numpy==2.3.5"]
 pipeline = ["pydantic>=2.10,<3", "tokenizers>=0.21,<0.24", "safetensors>=0.5,<1"]
 pretrained = ["transformers>=4.55,<5", "huggingface-hub>=0.34,<1"]
+multimodal = ["transformers>=4.55,<5", "huggingface-hub>=0.34,<1", "pillow>=10.4,<13",
+              "numpy==2.3.5", "pydantic>=2.10,<3", "safetensors>=0.5,<1"]
 peft = ["peft>=0.17,<0.19", "transformers>=4.55,<5", "huggingface-hub>=0.34,<1"]
 qlora = ["peft>=0.17,<0.19", "transformers>=4.55,<5", "bitsandbytes>=0.48,<0.50"]
 nvfp4 = ["transformer-engine[pytorch]>=2.13,<3; platform_system == 'Linux'"]

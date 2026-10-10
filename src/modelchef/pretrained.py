@@ -11,7 +11,8 @@ def download_model(repo, root, revision='main', max_bytes=500_000_000, run=False
     if max_bytes <= 0:
         raise ValueError('Download cap must be positive')
     info = HfApi().model_info(repo, revision=revision, files_metadata=True)
-    files = [f for f in info.siblings if f.rfilename.endswith(('.json', '.safetensors', '.model'))]
+    files = [f for f in info.siblings if f.rfilename.endswith(('.json', '.safetensors', '.model', '.jinja'))
+             or f.rfilename in {'merges.txt', 'vocab.txt'}]
     if any(f.size is None for f in files):
         raise ValueError('Cannot enforce download budget without file sizes')
     size = sum(f.size for f in files)
@@ -142,8 +143,10 @@ def stage_config(parent, kind, data, output, steps=40, teacher=None, reasoning='
     recipe['stage'].update(kind=kind, parent_run=str(parent))
     recipe['stage']['teacher_run'] = str(Path(teacher).resolve()) if teacher else None
     recipe['stage']['reasoning_format'] = reasoning
-    recipe['data'].update(provider='local_jsonl', local_path=data, domain='general',
+    recipe['data'].update(provider='local_jsonl', local_path=data, local_paths=[], domain='general',
                           domain_keywords=[], offset=0)
+    if kind != 'midtrain':
+        recipe['data']['storage'] = 'memory'
     recipe['processing'].update(min_chars=1, near_dedup=False, max_repeated_line_fraction=0.99)
     recipe['training'].update(steps=steps, warmup_steps=min(4, steps - 1), learning_rate=0.00005)
     recipe['evaluation'].update(benchmark='none')

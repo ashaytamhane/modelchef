@@ -1,0 +1,33 @@
+schema_version: 1
+name: speech-asr
+modality: speech
+output_dir: artifacts/multimodal
+data:
+  manifest: data/speech/train.jsonl
+  max_records: 128
+  max_media_bytes: 1000000
+  max_total_media_bytes: 128000000
+  max_audio_seconds: 30
+model:
+  path: artifacts/models/whisper-model
+  language: null
+  speech_task: transcribe
+  attention_kernel: auto
+  freeze_encoders: false
+  gradient_checkpointing: false
+max_text_tokens: 256
+training:
+  accelerator: auto
+  precision: auto
+  micro_batch_size: 1
+  gradient_accumulation: 4
+  steps: 40
+  warmup_steps: 4
+  learning_rate: 0.00001
+  checkpoint_every: 10
+  evaluate_every: 10
+  log_every: 1
+  max_runtime_seconds: 600
+evaluation:
+  max_examples: 8
+  max_new_tokens: 64

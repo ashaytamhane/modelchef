@@ -25,6 +25,9 @@ def file_digest(path):
 
 def acquire(config, root, explain):
     c = config.data
+    if c.storage == 'disk':
+        from modelchef.disk_data import acquire_disk
+        return acquire_disk(config, root, explain)
     identity = digest(json.dumps(c.model_dump(), sort_keys=True).encode())
     cache = root / "data/cache" / identity
     raw, manifest = cache / "raw.jsonl", cache / "source.json"
@@ -37,13 +40,24 @@ def acquire(config, root, explain):
         return [json.loads(line) for line in content.splitlines()], info
     records, downloaded = [], 0
     if c.provider == "local_jsonl":
-        path = (root / c.local_path).resolve()
-        with path.open("rb") as handle:
+        paths = [(root / name).resolve() for name in (c.local_paths or [c.local_path])]
+        path = paths[0]
+        from contextlib import ExitStack
+        from itertools import chain
+        with ExitStack() as stack:
+            handles = [stack.enter_context(p.open('rb')) for p in paths]
+            handle = iter(chain.from_iterable(iter(lambda h=h: h.readline(
+                min(c.max_record_bytes, max(0, c.max_download_bytes - downloaded)) + 1), b'')
+                for h in handles))
             index = 0
-            while line := handle.readline(c.max_download_bytes - downloaded + 1):
+            for line in handle:
                 downloaded += len(line)
                 if downloaded > c.max_download_bytes:
                     raise ValueError("Local input exceeds configured byte budget")
+                if len(line) > c.max_record_bytes:
+                    raise ValueError('JSONL record exceeds max_record_bytes')
+                if not line.strip():
+                    continue
                 if index < c.offset:
                     index += 1
                     continue
@@ -59,7 +73,7 @@ def acquire(config, root, explain):
                 if len(records) >= c.max_documents:
                     break
                 index += 1
-        origin = {"provider": "local_jsonl", "path": str(path)}
+        origin = {"provider": "local_jsonl", "path": str(path), "paths": [str(p) for p in paths]}
     else:
         explain("Downloading only viewer row pages, not the multi-GB Parquet corpus. "
                 "This is an ordered smoke-test slice, not a representative random sample.")
@@ -108,47 +122,60 @@ PII = re.compile(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}|"
                  r"(?<!\w)(?:\+?\d[\d ().-]{7,}\d)(?!\w)")
 
 
+def clean_record(row, config, benchmark, counts):
+    """Normalize/filter one record; deduplication and splitting are separate policies."""
+    c = config.processing
+    counts["input"] += 1
+    text = row["text"]
+    if not isinstance(text, str):
+        counts["invalid_text"] += 1
+        return None
+    text = unicodedata.normalize(c.unicode_normalization, html.unescape(text))
+    if c.strip_html:
+        text = re.sub(r"<[^>]+>", " ", text)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    repetition = 1 - len(set(lines)) / max(len(lines), 1)
+    text = " ".join(" ".join(lines).split())
+    if not c.min_chars <= len(text) <= c.max_chars:
+        counts["length"] += 1
+        return None
+    if sum(char.isalnum() for char in text) / len(text) < c.min_alnum_fraction:
+        counts["quality"] += 1
+        return None
+    if repetition > c.max_repeated_line_fraction:
+        counts["repetition"] += 1
+        return None
+    if config.data.domain_keywords and not any(
+            word.casefold() in text.casefold() for word in config.data.domain_keywords):
+        counts["domain"] += 1
+        return None
+    if c.pii != "off" and PII.search(text):
+        if c.pii == "drop":
+            counts["pii_dropped"] += 1
+            return None
+        text, matches = PII.subn("[REDACTED]", text)
+        counts["pii_redactions"] += matches
+    if benchmark and benchmark & ngrams(text, c.decontamination_ngram_words):
+        counts["benchmark_overlap"] += 1
+        return None
+    return {"text": text, "sha256": digest(text.encode()), "source_index": row["source_index"]}
+
+
 def process(records, config, root):
     c = config.processing
+    if config.data.storage == 'disk':
+        from modelchef.disk_data import process_disk
+        return process_disk(records, config, root)
     benchmark = set()
     for path in c.benchmark_files:
         benchmark |= ngrams((root / path).read_text(encoding="utf-8"),
                             c.decontamination_ngram_words)
     counts, accepted, exact, near = Counter(), [], set(), []
     for row in records:
-        counts["input"] += 1
-        text = row["text"]
-        if not isinstance(text, str):
-            counts["invalid_text"] += 1
+        cleaned = clean_record(row, config, benchmark, counts)
+        if cleaned is None:
             continue
-        text = unicodedata.normalize(c.unicode_normalization, html.unescape(text))
-        if c.strip_html:
-            text = re.sub(r"<[^>]+>", " ", text)
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        repetition = 1 - len(set(lines)) / max(len(lines), 1)
-        text = " ".join(" ".join(lines).split())
-        if not c.min_chars <= len(text) <= c.max_chars:
-            counts["length"] += 1
-            continue
-        if sum(char.isalnum() for char in text) / len(text) < c.min_alnum_fraction:
-            counts["quality"] += 1
-            continue
-        if repetition > c.max_repeated_line_fraction:
-            counts["repetition"] += 1
-            continue
-        if config.data.domain_keywords and not any(
-                word.casefold() in text.casefold() for word in config.data.domain_keywords):
-            counts["domain"] += 1
-            continue
-        if c.pii != "off" and PII.search(text):
-            if c.pii == "drop":
-                counts["pii_dropped"] += 1
-                continue
-            text, matches = PII.subn("[REDACTED]", text)
-            counts["pii_redactions"] += matches
-        if benchmark and benchmark & ngrams(text, c.decontamination_ngram_words):
-            counts["benchmark_overlap"] += 1
-            continue
+        text = cleaned['text']
         fingerprint = digest(text.casefold().encode())
         if c.exact_dedup and fingerprint in exact:
             counts["exact_duplicates"] += 1

@@ -24,7 +24,7 @@ jobs:
       - name: Install CPU PyTorch and project extras
         run: |
           python -m pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install numpy==2.3.5 -e '.[dev,pipeline,pretrained,peft,aws]'
+          python -m pip install numpy==2.3.5 -e '.[dev,pipeline,pretrained,peft,aws,multimodal]'
       - name: Check code and documentation
         run: |
           python -m ruff check src tests scripts/check_docs.py
@@ -45,6 +45,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install -e '.[dev,pipeline,aws]'
+      - run: python -m pip install -e '.[dev,pipeline,aws,multimodal]'
       - run: python -m pytest -q
       - run: python scripts/check_docs.py
