@@ -2,6 +2,65 @@
 
 Build your own LLM from scratch, fine-tune a pretrained model, or distill a larger model into a smaller one. AshayLLM lets you prepare data, train and evaluate models, chat with them in the CLI, and serve them through a vLLM API with authentication and TLS. Experiment with kernel-level optimization using configurable execution settings and custom CUDA kernels. Run locally or on AWS EC2 Spot with the same Python/PyTorch codebase and configurable cloud budgets.
 
+## Quick Start
+
+These examples run on your current machine and do not launch AWS resources. Start with a small experiment; the default training run tests the pipeline rather than producing a useful assistant.
+
+### Set up once
+
+With Git and [uv](https://docs.astral.sh/uv/getting-started/installation/) installed, run these commands in Linux, WSL or macOS Terminal. Windows GPU users should first follow the [WSL setup](#windows-with-an-nvidia-gpu-prepare-wsl2). The repository currently requires GitHub access.
+
+```bash
+git clone https://github.com/ashaytamhane/ashayllm.git
+cd ashayllm
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -e '.[dev,pipeline]'
+python -m ashayllm.cli setup
+python -m ashayllm.cli setup --apply
+python -m ashayllm.cli doctor
+python -m ashayllm.cli smoke
+```
+
+`setup` previews the PyTorch installation; `--apply` installs it. Review the preview for your hardware. If prerequisites are missing, see [local setup](#local-setup). Package installation requires internet access.
+
+### 1. Train a small model from scratch
+
+```bash
+python -m ashayllm.cli pipeline configs/pretrain-local.yaml
+python -m ashayllm.cli pipeline configs/pretrain-local.yaml --run
+```
+
+The first command validates the recipe without downloading anything. The second acquires up to 256 FineWeb-Edu documents within a 16 MB corpus-response cap, runs preprocessing and BPE training, trains an approximately 18.6M-parameter model for 40 steps, and evaluates it on held-out data and a bounded benchmark sample. It explains each stage and prints the completed run directory. Read that directory's `report.json` for results.
+
+### 2. Try the trained checkpoint
+
+Replace `RUN_DIR` with the completed directory printed by workflow 1:
+
+```bash
+python -m ashayllm.cli chat RUN_DIR --prompt "Education helps people" --max-tokens 24
+python -m ashayllm.cli chat RUN_DIR
+python -m ashayllm.cli export RUN_DIR
+```
+
+Interactive mode supports `/reset` and `/exit`. Export creates `RUN_DIR/export/` for compatible inference tools. Expect poor text quality from this short training test. To serve the export to clients, continue with [vLLM API serving](#inference-and-api-serving); remote access requires TLS and authentication.
+
+### 3. Fine-tune a pretrained model on your own data
+
+Use an existing compatible local Hugging Face model directory and a UTF-8 JSONL file containing `prompt` and `response` strings. Supply at least ten distinct accepted examples, with answers short enough for the configured context. [Data preparation](#prepare-your-own-data) covers text/CSV conversion; [pretrained acquisition](#start-from-a-pretrained-model) covers an explicit capped download if you do not already have a model.
+
+```bash
+uv pip install -e '.[pretrained]'
+python -m ashayllm.cli import-model LOCAL_MODEL_DIR --context 128
+# Replace PARENT_RUN with the imported run directory printed above.
+python -m ashayllm.cli stage-config PARENT_RUN --kind sft --data data/raw/sft.jsonl --output configs/sft.local.yaml --steps 40
+python -m ashayllm.cli pipeline configs/sft.local.yaml
+python -m ashayllm.cli pipeline configs/sft.local.yaml --run
+python -m ashayllm.cli chat NEW_RUN_DIR
+```
+
+This keeps the pretrained tokenizer and weights and learns from your supplied responses. Import and training use local model files; they do not fetch weights implicitly. Choose a model that fits available memory; this workflow uses full-parameter fine-tuning. Later sections cover domain midtraining, preferences, verifiable rewards, distillation and AWS execution.
+
 ## Overview
 
 The central workflow is a YAML recipe executed by `pipeline`: acquire a bounded sample, prepare and split documents, train or reuse a tokenizer, initialize or load a model, optimize it, evaluate it, and save a reproducible run. The script explains each step on screen and records the same explanations alongside the artifacts.
