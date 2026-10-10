@@ -1,8 +1,6 @@
 # AshayLLM
 
-Imagine building an offline study buddy, a game character with its own voice, a personal writing assistant, a code explainer, or a finance-news summarizer. AshayLLM provides the model experimentation tools for these future projects; useful application quality will depend on suitable data, training and evaluation.
-
-AshayLLM is a configurable language-model experimentation workbench: acquire bounded corpus samples, prepare data, train a custom tokenizer, pretrain a decoder-only transformer, evaluate it and interact with its trained checkpoints. One Python/PyTorch codebase supports local development and cloud execution, with a separate budget-controlled EC2 Spot smoke-test runner.
+Build your own LLM from scratch, fine-tune a pretrained model, or distill a larger model into a smaller one. AshayLLM lets you prepare data, train and evaluate models, chat with them in the CLI, and serve them through a vLLM API with authentication and TLS. Experiment with kernel-level optimization using configurable execution settings and custom CUDA kernels. Run locally or on AWS EC2 Spot with the same Python/PyTorch codebase and configurable cloud budgets.
 
 **Available workflows:** hardware-aware setup; bounded data acquisition and preparation with filtering, deduplication, PII heuristics and sampled benchmark decontamination; custom byte-level BPE training; from-scratch pretraining; checkpoint recovery; midtraining, response-masked SFT, DPO, experimental verifiable-reward training and distillation; capped pretrained-model acquisition/import; domain-selected sample benchmarks, local baseline comparisons and an optional standard evaluation harness; Hugging Face-compatible export; CLI inference through PyTorch or optional vLLM; and budget-controlled EC2 Spot smoke tests and S3-backed native training stages.
 
