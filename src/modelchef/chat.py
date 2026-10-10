@@ -15,27 +15,44 @@ def export_model(folder):
     import torch
     from safetensors.torch import save_file
 
-    from loomlm.run_config import RunConfig
+    from modelchef.run_config import RunConfig
 
     folder = Path(folder).resolve()
     config = RunConfig.model_validate_json((folder / "config.json").read_text())
     c = config.model
     state = torch.load(checkpoint_for(folder), map_location="cpu", weights_only=True)["model"]
+    if c.backend == 'native' and c.peft.method == 'lora':
+        from modelchef.adapters import merged_state
+        adapter_dir = folder / 'adapter'
+        adapter_dir.mkdir(exist_ok=True)
+        save_file({name: value.contiguous() for name, value in state.items() if '.lora_' in name},
+                  str(adapter_dir / 'adapter.safetensors'))
+        (adapter_dir / 'config.json').write_text(c.peft.model_dump_json(indent=2))
+        state = merged_state(state, c.peft)
     output = folder / "export"
     output.mkdir(exist_ok=True)
     if c.quantization != 'none':
-        (output / 'loomlm-quantization.json').write_text(json.dumps({
+        (output / 'modelchef-quantization.json').write_text(json.dumps({
             'training': c.quantization, 'export': 'full_precision_master_weights',
             'note': 'Export does not preserve fake-quantization forward behavior or produce packed FP4 weights.'}),
             encoding='utf-8')
     if c.backend == 'huggingface':
         from transformers import AutoTokenizer
 
-        from loomlm.engines import create_model, load_tokenizer
+        from modelchef.engines import create_model, load_tokenizer
         tokenizer = load_tokenizer(folder)
-        model = create_model(c, tokenizer.get_vocab_size())
-        model.load_state_dict(state)
-        if c.peft.method == 'lora':
+        load_config = c.model_copy(deep=True)
+        if c.peft.method == 'qlora':
+            load_config.peft.method = 'lora'
+        model = create_model(load_config, tokenizer.get_vocab_size())
+        if c.peft.method == 'qlora':
+            adapters = {name: value for name, value in state.items() if 'lora_' in name}
+            _, unexpected = model.load_state_dict(adapters, strict=False)
+            if unexpected or not adapters:
+                raise ValueError('QLoRA checkpoint adapter tensors do not match the export model')
+        else:
+            model.load_state_dict(state)
+        if c.peft.method in {'lora', 'qlora'}:
             model.model.save_pretrained(folder / 'adapter', safe_serialization=True)
             model.model = model.model.merge_and_unload(safe_merge=True)
         model.model.save_pretrained(output, safe_serialization=True)
@@ -56,6 +73,13 @@ def export_model(folder):
                "gate": "mlp.gate_proj", "up": "mlp.up_proj", "down": "mlp.down_proj",
                "attention.q": "self_attn.q_proj", "attention.k": "self_attn.k_proj",
                "attention.v": "self_attn.v_proj", "attention.out": "self_attn.o_proj"}
+    if c.type == 'decoder_moe':
+        for key in ['gate', 'up', 'down']:
+            del mapping[key]
+        mapping['moe.router.weight'] = 'block_sparse_moe.gate.weight'
+        for expert in range(c.num_experts):
+            for original, target in [('gate', 'w1'), ('down', 'w2'), ('up', 'w3')]:
+                mapping[f'moe.experts.{expert}.{original}'] = f'block_sparse_moe.experts.{expert}.{target}'
     for layer in range(c.layers):
         for original, target in mapping.items():
             for suffix in ([""] if original.endswith(".weight") else
@@ -66,7 +90,7 @@ def export_model(folder):
                                             else c.kv_heads)
                 weights[f"model.layers.{layer}.{target}{suffix}"] = weight.contiguous()
     save_file(weights, str(output / "model.safetensors"), metadata={"format": "pt"})
-    from loomlm.engines import load_tokenizer
+    from modelchef.engines import load_tokenizer
     tokenizer = load_tokenizer(folder)
     (output / "tokenizer.json").write_bytes((folder / "tokenizer.json").read_bytes())
     hf_config = {"model_type": "llama", "architectures": ["LlamaForCausalLM"],
@@ -80,6 +104,10 @@ def export_model(folder):
         "bos_token_id": tokenizer.token_to_id("<bos>"),
         "eos_token_id": tokenizer.token_to_id("<eos>"),
         "pad_token_id": tokenizer.token_to_id("<pad>"), "initializer_range": c.init_std}
+    if c.type == 'decoder_moe':
+        hf_config.update(model_type='mixtral', architectures=['MixtralForCausalLM'],
+                         num_local_experts=c.num_experts, num_experts_per_tok=c.experts_per_token,
+                         router_aux_loss_coef=c.router_aux_loss_coef, sliding_window=None)
     (output / "config.json").write_text(json.dumps(hf_config, indent=2), encoding="utf-8")
     tokenizer_config = {"tokenizer_class": "PreTrainedTokenizerFast",
                         **{role + '_token': tokenizer.id_to_token(tokenizer.token_to_id('<' + role + '>'))
@@ -92,9 +120,9 @@ def export_model(folder):
 def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, top_k=30):
     import torch
 
-    from loomlm.engines import create_model, load_tokenizer
-    from loomlm.hardware import detect_hardware, resolve_runtime
-    from loomlm.run_config import RunConfig
+    from modelchef.engines import create_model, load_tokenizer
+    from modelchef.hardware import detect_hardware, resolve_runtime
+    from modelchef.run_config import RunConfig
 
     if max_tokens < 1 or temperature <= 0 or top_k < 0:
         raise ValueError("max_tokens/temperature must be positive; top_k must be nonnegative")
@@ -147,7 +175,7 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
           "Short validation runs do not produce a useful assistant.", flush=True)
     if prompt is not None:
         if config.stage.kind in {'sft', 'dpo', 'rlvr', 'distill'}:
-            from loomlm.objectives import format_prompt
+            from modelchef.objectives import format_prompt
             prompt = format_prompt(prompt)
         print(generate(prompt), flush=True)
         return

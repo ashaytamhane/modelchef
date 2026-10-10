@@ -53,12 +53,14 @@ class Tokenization(Section):
 
 
 class PEFT(Section):
-    method: Literal['none', 'lora'] = 'none'
+    method: Literal['none', 'lora', 'qlora'] = 'none'
     rank: int = Field(default=8, gt=0)
     alpha: int = Field(default=16, gt=0)
     dropout: float = Field(default=0, ge=0, lt=1)
     target_modules: list[str] = Field(default_factory=lambda: ['q_proj', 'v_proj'])
     use_rslora: bool = False
+    compute_dtype: Literal['bf16', 'fp16'] = 'bf16'
+    double_quant: bool = True
 
 
 class Architecture(Section):
@@ -66,10 +68,13 @@ class Architecture(Section):
     backend: Literal["native", "huggingface"] = "native"
     pretrained_path: str | None = None
     pretrained_config_sha256: str | None = None
-    quantization: Literal["none", "fp4_fake"] = "none"
+    quantization: Literal["none", "fp4_fake", "nvfp4"] = "none"
     attention_kernel: Literal['auto', 'math', 'flash', 'efficient', 'cudnn'] = 'auto'
     custom_swiglu_path: str | None = None
-    type: Literal["decoder_rope"] = "decoder_rope"
+    type: Literal["decoder_rope", "decoder_moe"] = "decoder_rope"
+    num_experts: int = Field(default=4, ge=2)
+    experts_per_token: int = Field(default=2, ge=1)
+    router_aux_loss_coef: float = Field(default=0.01, ge=0)
     layers: int = Field(default=6, ge=1, le=48)
     hidden_size: int = Field(default=512, gt=0)
     attention_heads: int = Field(default=8, gt=0)
@@ -89,6 +94,8 @@ class Architecture(Section):
 
 
 class Training(Section):
+    distributed: Literal['none', 'ddp'] = 'none'
+    distributed_timeout_seconds: int = Field(default=300, gt=0)
     compile: bool = False
     compile_backend: Literal['inductor', 'aot_eager', 'eager'] = 'inductor'
     compile_mode: Literal['default', 'reduce-overhead', 'max-autotune'] = 'default'
@@ -194,10 +201,23 @@ class RunConfig(Section):
         if m.backend == 'huggingface' and not m.pretrained_path:
             raise ValueError('Hugging Face backend requires a local pretrained_path')
         if m.peft.method != 'none':
-            if m.backend != 'huggingface' or self.stage.kind not in {'midtrain', 'sft'}:
-                raise ValueError('LoRA currently requires a Hugging Face parent and midtrain or sft stage')
+            if self.stage.kind == 'pretrain':
+                raise ValueError('PEFT requires a trained parent; use a continuation/post-training stage')
             if not m.peft.target_modules or any(not name.strip() for name in m.peft.target_modules):
                 raise ValueError('LoRA requires explicit nonempty target_modules')
             if m.quantization != 'none':
-                raise ValueError('LoRA with FP4 fake quantization is not supported; QLoRA is not implemented')
+                raise ValueError('PEFT and FP4 projection quantization cannot be combined')
+        if m.peft.method == 'qlora' and m.backend != 'huggingface':
+            raise ValueError('QLoRA requires the Hugging Face backend')
+        if m.experts_per_token > m.num_experts:
+            raise ValueError('experts_per_token must not exceed num_experts')
+        if m.type == 'decoder_moe' and m.bias:
+            raise ValueError('Native MoE requires bias: false for Mixtral-compatible export')
+        if m.quantization == 'nvfp4' and (m.backend != 'native' or m.type != 'decoder_rope'):
+            raise ValueError('NVFP4 currently requires a native dense decoder')
+        if m.quantization == 'nvfp4' and (m.gradient_checkpointing or m.custom_swiglu_path):
+            raise ValueError('NVFP4 currently excludes gradient checkpointing and custom SwiGLU')
+        if t.distributed == 'ddp' and (t.compile or m.peft.method == 'qlora' or
+                                      m.quantization == 'nvfp4' or self.stage.kind == 'rlvr'):
+            raise ValueError('DDP currently excludes compile, QLoRA, NVFP4 and RLVR')
         return self

@@ -4,7 +4,7 @@ import tempfile
 from contextlib import nullcontext
 from pathlib import Path
 
-from loomlm.hardware import detect_hardware, resolve_runtime
+from modelchef.hardware import detect_hardware, resolve_runtime
 
 
 def run_smoke(accelerator="auto", precision="auto"):

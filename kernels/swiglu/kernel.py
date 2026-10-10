@@ -12,7 +12,7 @@ def extension():
     source = Path(__file__).parent
     sources = [source / 'swiglu.cpp', source / 'swiglu.cu']
     fingerprint = hashlib.sha256(b''.join(p.read_bytes() for p in sources)).hexdigest()[:12]
-    name = 'loomlm_swiglu_' + fingerprint
+    name = 'modelchef_swiglu_' + fingerprint
     build = Path.cwd() / 'artifacts/cuda-extensions' / name
     build.mkdir(parents=True, exist_ok=True)
     # NVIDIA runtime wheels may provide only the versioned shared library.

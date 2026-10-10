@@ -1,5 +1,5 @@
 project:
-  name: loomlm
+  name: modelchef
   seed: 42
 runtime:
   accelerator: auto  # cpu/cuda/rocm/mps/auto

@@ -1,5 +1,5 @@
 aws_test:
-  profile: loomlm
+  profile: modelchef
   region: us-east-1
   instance_type: g4dn.xlarge
   total_budget_usd: '10.00'
@@ -20,7 +20,7 @@ aws_test:
   pipeline_config: configs/pretrain-local.yaml
   artifact_bucket: YOUR_ARTIFACT_BUCKET
   instance_profile_name: YOUR_INSTANCE_PROFILE
-  artifact_prefix: loomlm-training
+  artifact_prefix: modelchef-training
   max_bundle_bytes: 512000000
   max_result_bytes: 512000000
   artifact_cost_reserve_usd: '0.05'

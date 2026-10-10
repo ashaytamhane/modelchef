@@ -1,5 +1,5 @@
 aws_serving:
-  profile: loomlm
+  profile: modelchef
   region: us-east-1
   instance_type: g4dn.xlarge
   ami_id: YOUR_PREPARED_X86_GPU_DLAMI

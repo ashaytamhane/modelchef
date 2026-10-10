@@ -5,12 +5,12 @@ from pathlib import Path
 
 import torch
 
-from loomlm.benchmarks import evaluate_choices
-from loomlm.chat import checkpoint_for
-from loomlm.corpus import digest
-from loomlm.engines import create_model, load_tokenizer
-from loomlm.hardware import detect_hardware, resolve_runtime
-from loomlm.run_config import RunConfig
+from modelchef.benchmarks import evaluate_choices
+from modelchef.chat import checkpoint_for
+from modelchef.corpus import digest
+from modelchef.engines import create_model, load_tokenizer
+from modelchef.hardware import detect_hardware, resolve_runtime
+from modelchef.run_config import RunConfig
 
 
 def compare(run_dir, baselines, output):
@@ -31,7 +31,7 @@ def compare(run_dir, baselines, output):
         else:
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
-            from loomlm.engines import TokenizerRoles
+            from modelchef.engines import TokenizerRoles
             tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
             if not tokenizer.is_fast:
                 raise ValueError('Comparison requires fast tokenizers')

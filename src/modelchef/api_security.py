@@ -10,7 +10,7 @@ from collections import deque
 class SecurityMiddleware:
     def __init__(self, app):
         self.app = app
-        self.settings = json.loads(os.environ['LOOMLM_API_SECURITY'])
+        self.settings = json.loads(os.environ['MODELCHEF_API_SECURITY'])
         self.secret = os.environ[self.settings['api_key_env']]
         if len(self.secret) < 32 or any(c.isspace() for c in self.secret):
             raise ValueError('API token must contain at least 32 non-whitespace characters')

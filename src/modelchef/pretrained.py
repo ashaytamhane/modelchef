@@ -3,7 +3,7 @@ import json
 import uuid
 from pathlib import Path
 
-from loomlm.corpus import digest
+from modelchef.corpus import digest
 
 
 def download_model(repo, root, revision='main', max_bytes=500_000_000, run=False):
@@ -37,8 +37,8 @@ def register_model(path, root, context=128):
     import torch
     from transformers import AutoConfig, AutoTokenizer
 
-    from loomlm.engines import create_model
-    from loomlm.run_config import RunConfig
+    from modelchef.engines import create_model
+    from modelchef.run_config import RunConfig
 
     path = Path(path).resolve()
     hf = AutoConfig.from_pretrained(path, local_files_only=True, trust_remote_code=False)
@@ -84,8 +84,8 @@ def register_model(path, root, context=128):
 def initialize_student(teacher, root, architecture=None):
     import torch
 
-    from loomlm.engines import create_model, load_tokenizer
-    from loomlm.run_config import Architecture, RunConfig
+    from modelchef.engines import create_model, load_tokenizer
+    from modelchef.run_config import Architecture, RunConfig
 
     teacher = Path(teacher).resolve()
     parent = RunConfig.model_validate_json((teacher / 'config.json').read_text())
@@ -117,7 +117,7 @@ def initialize_student(teacher, root, architecture=None):
 def stage_config(parent, kind, data, output, steps=40, teacher=None, reasoning='plain'):
     import yaml
 
-    from loomlm.run_config import RunConfig
+    from modelchef.run_config import RunConfig
     parent = Path(parent).resolve()
     config = RunConfig.model_validate_json((parent / 'config.json').read_text())
     recipe = config.model_dump(mode='json')

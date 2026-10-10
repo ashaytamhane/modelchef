@@ -8,13 +8,13 @@ from unittest.mock import Mock
 import pytest
 import yaml
 
-from loomlm.aws_serving import ServingRunner, bundle, guest_script
+from modelchef.aws_serving import ServingRunner, bundle, guest_script
 
 
 @pytest.fixture
 def hosting(tmp_path):
-    (tmp_path / 'src/loomlm').mkdir(parents=True)
-    (tmp_path / 'src/loomlm/__init__.py').write_text('')
+    (tmp_path / 'src/modelchef').mkdir(parents=True)
+    (tmp_path / 'src/modelchef/__init__.py').write_text('')
     (tmp_path / 'pyproject.toml').write_text('')
     model = tmp_path / 'model'
     model.mkdir()
@@ -41,7 +41,7 @@ def test_plan_bundle_and_service_have_no_deadline(hosting):
     with tarfile.open(fileobj=io.BytesIO(bundle(runner.root, runner.settings))) as archive:
         assert 'private.key' not in archive.getnames()
         config = yaml.safe_load(archive.extractfile('configs/serving.yaml').read())
-        assert config['inference']['security']['api_key_env'] == 'LOOMLM_API_KEY'
+        assert config['inference']['security']['api_key_env'] == 'MODELCHEF_API_KEY'
     script = guest_script(runner.settings, 'source.tar.gz', 'a' * 64)
     assert 'Restart=on-failure' in script and 'systemctl enable --now' in script
     assert 'shutdown' not in script and 'terminate' not in script
@@ -51,7 +51,7 @@ def test_plan_bundle_and_service_have_no_deadline(hosting):
 
 def test_deploy_is_on_demand_and_does_not_cleanup_after_launch(hosting, monkeypatch):
     runner, clients = hosting
-    monkeypatch.setattr('loomlm.aws_runner.local_preflight', lambda root: {'passed': True})
+    monkeypatch.setattr('modelchef.aws_runner.local_preflight', lambda root: {'passed': True})
     clients['ec2'].run_instances.return_value = {'Instances': [{'InstanceId': 'i-example'}]}
     record = runner.deploy()
     args = clients['ec2'].run_instances.call_args.kwargs
@@ -70,7 +70,7 @@ def test_lifecycle_checks_ownership_and_status_never_stops(hosting):
     path.write_text(json.dumps({'region': runner.settings['region']}))
     instance = {'InstanceId': 'i-example', 'State': {'Name': 'running'},
         'LaunchTime': datetime(2020, 1, 1, tzinfo=UTC), 'Tags': [
-            {'Key': 'Project', 'Value': 'LoomLM'},
+            {'Key': 'Project', 'Value': 'ModelChef'},
             {'Key': 'Lifecycle', 'Value': 'persistent-serving'},
             {'Key': 'DeploymentId', 'Value': deployment}]}
     clients['ec2'].describe_instances.return_value = {'Reservations': [{'Instances': [instance]}]}

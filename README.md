@@ -1,29 +1,31 @@
-# LoomLM
+# ModelChef
 
-**One recipe. From data to a served language model.**
+**Your ingredients. Your recipe. Your model.**
 
-LoomLM is a configurable platform for language-model development: prepare data, build an LLM from scratch or adapt a pretrained model, evaluate it, and run it through CLI inference or a vLLM API. Use the same Python/PyTorch codebase locally and on AWS, with recipes controlling the model, training objectives, precision and execution kernels. Extend experiments with distillation, optional reasoning supervision, custom CUDA kernels and explicit cloud lifecycle controls.
+With ModelChef, **pick your ingredients, choose a recipe, cook your model and serve it**. Your ingredients are datasets and optional pretrained weights; your recipe defines processing, architecture and training. Cook from scratch or refine an existing model, taste-test it with evaluation, then serve it through CLI inference or a secured vLLM API. The same Python/PyTorch codebase runs locally and on AWS, with precision, kernels and execution settings exposed in versioned configuration.
 
-The platform connects these workflows through reusable model/tokenizer adapters, stage recipes, manifests and checkpoints. You choose the starting model, data and objective; a run explains its steps and records its outputs. Hardware detection resolves available devices and precision, while model sizing, dataset suitability and deployment choices remain explicit.
+Think of the workflow as **ingredients → recipe → training → evaluation → serving**. Start with one small experiment, then compose stages with `cook`: domain midtraining, instruction tuning, preference learning or distillation. ModelChef records manifests, checkpoints and lineage and explains progress as it runs. You decide what to build and how much to spend; the platform executes the declared steps.
+
+![ModelChef kitchen: datasets and a recipe become a trained model ready for serving.](docs/assets/modelchef-kitchen.png)
 
 ## Quick Start
 
-The Quick Start examples below run on your current machine. LoomLM can also launch AWS instances: see [the Spot training example](#run-a-managed-native-training-stage) for a temporary training job that terminates when finished, or [the API hosting example](#persistent-api-hosting-on-ec2) for persistent on-demand serving. AWS launches require configured credentials and explicit execution with `--run`, and incur charges. Start with a small local experiment; the default training run tests the pipeline rather than producing a useful assistant.
+The Quick Start examples below run on your current machine. ModelChef can also launch AWS instances: see [the Spot training example](#run-a-managed-native-training-stage) for a temporary training job that terminates when finished, or [the API hosting example](#persistent-api-hosting-on-ec2) for persistent on-demand serving. AWS launches require configured credentials and explicit execution with `--run`, and incur charges. Start with a small local experiment; the default training run tests the pipeline rather than producing a useful assistant.
 
-### Set up once
+### Prepare your kitchen: set up once
 
 With Git and [uv](https://docs.astral.sh/uv/getting-started/installation/) installed, run these commands in Linux, WSL or macOS Terminal. Windows GPU users should first follow the [WSL setup](#windows-with-an-nvidia-gpu-prepare-wsl2). The repository currently requires GitHub access.
 
 ```bash
-git clone https://github.com/ashaytamhane/loomlm.git
-cd loomlm
+git clone https://github.com/ashaytamhane/modelchef.git
+cd modelchef
 uv venv --python 3.12
 source .venv/bin/activate
 uv pip install -e '.[dev,pipeline]'
-python -m loomlm.cli setup
-python -m loomlm.cli setup --apply
-python -m loomlm.cli doctor
-python -m loomlm.cli smoke
+python -m modelchef.cli setup
+python -m modelchef.cli setup --apply
+python -m modelchef.cli doctor
+python -m modelchef.cli smoke
 ```
 
 CLI commands print immediate progress, elapsed-time updates every 10 seconds during longer operations, and a completion message to stderr. `doctor` explains its Python/PyTorch import, device discovery and GPU calculation checks as they happen. Use `--quiet` to suppress CLI progress; result output remains on stdout. Training retains its recipe-controlled detailed or brief narration.
@@ -34,7 +36,7 @@ CLI commands print immediate progress, elapsed-time updates every 10 seconds dur
 
 `smoke` performs one training update on a tiny synthetic model, saves a temporary checkpoint, and verifies that model weights and optimizer state reload correctly. Look for `training_step: passed` and `checkpoint_recovery: passed`. Run it after `doctor` to verify that training and checkpointing work before starting a language-model experiment. Neither command downloads datasets or launches AWS resources.
 
-### Write your run recipe
+### Choose your recipe
 
 A recipe is a YAML file describing the data, preprocessing, tokenizer, model, training settings, evaluation and training stage. Start from a complete example:
 
@@ -67,41 +69,52 @@ stage:
   kind: pretrain
 ```
 
-This is an edit guide, not a replacement for the complete copied recipe. Validate with `python -m loomlm.cli pipeline configs/my-run.local.yaml`; add `--run` to execute it. Fields you omit use defaults; some become required when you select another workflow. See [required versus optional](#required-versus-optional). Unsupported fields and incompatible settings fail validation. `*.local.yaml` files stay out of Git. For fine-tuning, use `stage-config` in workflow 3 to generate a recipe matching the parent model instead of manually copying its architecture. See [published recipe patterns](#published-recipes-and-small-scale-adaptations) for starting points and the [complete annotated recipe](#complete-annotated-recipe) for every training field and its alternatives, and [data and recipes](#data-and-recipes) for local-data examples.
+This is an edit guide, not a replacement for the complete copied recipe. Validate with `python -m modelchef.cli pipeline configs/my-run.local.yaml`; add `--run` to execute it. Fields you omit use defaults; some become required when you select another workflow. See [required versus optional](#required-versus-optional). Unsupported fields and incompatible settings fail validation. `*.local.yaml` files stay out of Git. For fine-tuning, use `stage-config` in workflow 3 to generate a recipe matching the parent model instead of manually copying its architecture. See [published recipe patterns](#published-recipes-and-small-scale-adaptations) for starting points and the [complete annotated recipe](#complete-annotated-recipe) for every training field and its alternatives, and [data and recipes](#data-and-recipes) for local-data examples.
 
-### 1. Train a small model from scratch
+### Combine recipes into one cook
+
+A training recipe controls one stage. A workflow recipe connects stages and exports the final model, so you do not have to copy run paths by hand:
 
 ```bash
-python -m loomlm.cli pipeline configs/pretrain-local.yaml
-python -m loomlm.cli pipeline configs/pretrain-local.yaml --run
+python -m modelchef.cli cook configs/workflow-local.yaml
+python -m modelchef.cli cook configs/workflow-local.yaml --run
+```
+
+Inspect the provided workflow and supply its local instruction dataset before executing it. The first command validates stage configurations and shows the plan; `--run` trains them in order. `cook` runs locally and can acquire data allowed by its recipes; it does not launch AWS or start an API. See [compose a complete workflow](#compose-a-complete-workflow) for the stage links and pretrained starting point.
+
+### 1. Cook from scratch: train a small model
+
+```bash
+python -m modelchef.cli pipeline configs/pretrain-local.yaml
+python -m modelchef.cli pipeline configs/pretrain-local.yaml --run
 ```
 
 The first command validates the recipe without downloading anything. The second acquires up to 256 FineWeb-Edu documents within a 16 MB corpus-response cap, runs preprocessing and BPE training, trains an approximately 18.6M-parameter model for 40 steps, and evaluates it on held-out data and a bounded benchmark sample. It explains each stage and prints the completed run directory. Read that directory's `report.json` for results.
 
-### 2. Try the trained checkpoint
+### 2. Taste the result: try your checkpoint
 
 Replace `RUN_DIR` with the completed directory printed by workflow 1:
 
 ```bash
-python -m loomlm.cli chat RUN_DIR --prompt "Education helps people" --max-tokens 24
-python -m loomlm.cli chat RUN_DIR
-python -m loomlm.cli export RUN_DIR
+python -m modelchef.cli chat RUN_DIR --prompt "Education helps people" --max-tokens 24
+python -m modelchef.cli chat RUN_DIR
+python -m modelchef.cli export RUN_DIR
 ```
 
-Interactive mode supports `/reset` and `/exit`. Export creates `RUN_DIR/export/` for compatible inference tools. Expect poor text quality from this short training test. To serve the export to clients, continue with [vLLM API serving](#inference-and-api-serving); remote access requires TLS and authentication.
+Interactive mode supports `/reset` and `/exit`. Export creates `RUN_DIR/export/` for compatible inference tools. Expect poor text quality from this short training test. To serve the export to clients, continue with [vLLM API serving](#serve-your-model-inference-and-api); remote access requires TLS and authentication.
 
-### 3. Fine-tune a pretrained model on your own data
+### 3. Refine an existing model: fine-tune on your data
 
-Use an existing compatible local Hugging Face model directory and a UTF-8 JSONL file containing `prompt` and `response` strings. Supply at least ten distinct accepted examples, with answers short enough for the configured context. [Data preparation](#prepare-your-own-data) covers text/CSV conversion; [pretrained acquisition](#start-from-a-pretrained-model) covers an explicit capped download if you do not already have a model.
+Use an existing compatible local Hugging Face model directory and a UTF-8 JSONL file containing `prompt` and `response` strings. Supply at least ten distinct accepted examples, with answers short enough for the configured context. [Data preparation](#prepare-your-own-ingredients-data) covers text/CSV conversion; [pretrained acquisition](#start-from-a-pretrained-model) covers an explicit capped download if you do not already have a model.
 
 ```bash
 uv pip install -e '.[pretrained]'
-python -m loomlm.cli import-model LOCAL_MODEL_DIR --context 128
+python -m modelchef.cli import-model LOCAL_MODEL_DIR --context 128
 # Replace PARENT_RUN with the imported run directory printed above.
-python -m loomlm.cli stage-config PARENT_RUN --kind sft --data data/raw/sft.jsonl --output configs/sft.local.yaml --steps 40
-python -m loomlm.cli pipeline configs/sft.local.yaml
-python -m loomlm.cli pipeline configs/sft.local.yaml --run
-python -m loomlm.cli chat NEW_RUN_DIR
+python -m modelchef.cli stage-config PARENT_RUN --kind sft --data data/raw/sft.jsonl --output configs/sft.local.yaml --steps 40
+python -m modelchef.cli pipeline configs/sft.local.yaml
+python -m modelchef.cli pipeline configs/sft.local.yaml --run
+python -m modelchef.cli chat NEW_RUN_DIR
 ```
 
 This keeps the pretrained tokenizer and weights and learns from your supplied responses. Import and training use local model files; they do not fetch weights implicitly. Choose a model that fits available memory; this workflow defaults to full-parameter fine-tuning; see [optional LoRA](#parameter-efficient-fine-tuning-with-lora) to train adapters instead. Later sections cover domain midtraining, preferences, verifiable rewards, distillation and AWS execution.
@@ -122,7 +135,7 @@ There are two starting points. **From scratch** learns both the tokenizer and mo
 | Transfer behavior to a smaller model | Teacher and student | Sequence or token distillation |
 | Share a trained model | Compatible local export | Authenticated vLLM API; TLS for remote access |
 
-Start with the local pipeline test before increasing data, model size or cloud spend. A successful short run establishes that the software works; it does not produce a capable assistant or establish benchmark quality. Local CPU/CUDA paths and the example CUDA kernel have been exercised. Real-device macOS/ROCm, live managed AWS training, full standard suites and native Blackwell FP4 need separate validation.
+Start with the local pipeline test before increasing data, model size or cloud spend. A successful short run establishes that the software works; it does not produce a capable assistant or establish benchmark quality. Local CPU/CUDA paths, native LoRA objectives, CUDA QLoRA recovery/export, CPU DDP dense/MoE recovery and the example CUDA kernel have been exercised. Real-device macOS/ROCm, live managed AWS training, full standard suites and native Blackwell FP4 need separate validation.
 
 ## Choose your learning path
 
@@ -223,12 +236,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 mkdir -p ~/projects
 cd ~/projects
-git clone https://github.com/ashaytamhane/loomlm.git
-cd loomlm
+git clone https://github.com/ashaytamhane/modelchef.git
+cd modelchef
 uv venv --python 3.12
 source .venv/bin/activate
 uv pip install -e '.[dev,pipeline]'
-python -m loomlm.cli --help
+python -m modelchef.cli --help
 python -m pytest -q
 python -m ruff check .
 ```
@@ -240,12 +253,12 @@ The repository is private, so GitHub authentication is needed to clone it. Keep 
 A Windows controller does not need PyTorch or a GPU to launch AWS tests. With Python 3.12 and Git installed:
 
 ```powershell
-git clone https://github.com/ashaytamhane/loomlm.git
-cd loomlm
+git clone https://github.com/ashaytamhane/modelchef.git
+cd modelchef
 py -3.12 -m venv .venv-aws
 .\.venv-aws\Scripts\Activate.ps1
 python -m pip install -e '.[dev,aws]'
-python -m loomlm.cli --help
+python -m modelchef.cli --help
 python -m pytest -q
 ```
 
@@ -258,31 +271,31 @@ macOS runs the same Python codebase directly; WSL and CUDA are not required. The
 Install Git and `uv` using your preferred method, then run these commands in Terminal. The repository requires GitHub authentication:
 
 ```bash
-git clone https://github.com/ashaytamhane/loomlm.git
-cd loomlm
+git clone https://github.com/ashaytamhane/modelchef.git
+cd modelchef
 uv venv --python 3.12
 source .venv/bin/activate
 uv pip install -e '.[dev,pipeline]'
 # Preview the macOS PyTorch installation before applying it.
-python -m loomlm.cli setup
-python -m loomlm.cli setup --apply
-python -m loomlm.cli doctor
-python -m loomlm.cli smoke --precision fp32
+python -m modelchef.cli setup
+python -m modelchef.cli setup --apply
+python -m modelchef.cli doctor
+python -m modelchef.cli smoke --precision fp32
 python -m pytest -q
 ```
 
 Check `doctor` for `backend: mps` and `mps_available: true` to confirm GPU availability. An Apple Silicon Mac can use MPS when its OS and PyTorch build support it; Intel Macs can use CPU and may expose MPS on supported GPUs. If an operation fails on MPS, verify the CPU path explicitly:
 
 ```bash
-python -m loomlm.cli smoke --accelerator cpu --precision fp32
+python -m modelchef.cli smoke --accelerator cpu --precision fp32
 ```
 
 To preview and then execute a bounded pretraining run on the Mac itself:
 
 ```bash
-python -m loomlm.cli pipeline configs/pretrain-local.yaml
+python -m modelchef.cli pipeline configs/pretrain-local.yaml
 # This downloads the configured small corpus/benchmark samples and trains locally.
-python -m loomlm.cli pipeline configs/pretrain-local.yaml --run
+python -m modelchef.cli pipeline configs/pretrain-local.yaml --run
 ```
 
 The recipe's `training.accelerator: auto` selects the available backend. To force CPU training, copy the recipe and set `training.accelerator: cpu` and `training.precision: fp32`. Reduce model dimensions, context length or microbatch size if memory is insufficient; hardware detection does not automatically resize the model.
@@ -290,7 +303,7 @@ The recipe's `training.accelerator: auto` selects the available backend. To forc
 After training, replace `PATH_TO_COMPLETED_RUN` with the run directory printed by the pipeline:
 
 ```bash
-python -m loomlm.cli chat PATH_TO_COMPLETED_RUN --backend torch
+python -m modelchef.cli chat PATH_TO_COMPLETED_RUN --backend torch
 ```
 
 The CLI supports `/reset` and `/exit`. A short training test produces limited text quality; SFT support does not make a tiny validation model a useful assistant. Use the PyTorch backend on macOS: the project's automatic vLLM installation targets Linux/WSL with NVIDIA CUDA. A Mac can also act as an AWS controller after installing `.[aws]` and following the AWS section.
@@ -311,19 +324,19 @@ The automatic vLLM installer supports Linux/WSL NVIDIA CUDA only. Backend detect
 Creating the base environment does not install PyTorch. First preview the installation:
 
 ```bash
-python -m loomlm.cli setup
+python -m modelchef.cli setup
 # Or deliberately choose a CPU-only environment:
-python -m loomlm.cli setup --backend cpu
+python -m modelchef.cli setup --backend cpu
 ```
 
 Review the detected backend, driver and proposed command. Install into the active environment only when ready:
 
 ```bash
-python -m loomlm.cli setup --apply
-python -m loomlm.cli doctor
-python -m loomlm.cli check-config configs/local.yaml
-python -m loomlm.cli resolve-runtime configs/local.yaml --output artifacts/environment/resolved-local.json
-python -m loomlm.cli smoke
+python -m modelchef.cli setup --apply
+python -m modelchef.cli doctor
+python -m modelchef.cli check-config configs/local.yaml
+python -m modelchef.cli resolve-runtime configs/local.yaml --output artifacts/environment/resolved-local.json
+python -m modelchef.cli smoke
 ```
 
 Expected results: `doctor` describes the available backend; on CUDA it also checks matrix multiplication. `smoke` reports `training_step: passed` and `checkpoint_recovery: passed`. These are synthetic checks, not language-model training or throughput measurements.
@@ -338,6 +351,8 @@ The default stack pins PyTorch 2.13.0 and NumPy 2.3.5. The default CUDA 13.0 ins
 | `precision: auto` | BF16 when PyTorch reports support on CUDA/ROCm; otherwise FP32 |
 | `fp16` | Explicit CUDA/ROCm training with gradient scaling |
 | `fp32` | Default fallback; useful for CPU checks |
+| Native NVFP4 training | `model.quantization: nvfp4`; native dense Blackwell/Transformer Engine integration |
+| QLoRA | Imported-model CUDA NF4 base with trainable adapters |
 | FP4 simulation | `model.quantization: fp4_fake`; experimental software fake quantization with FP32/BF16 master weights |
 | Native NVFP4 inference | `inference.quantization: nvfp4_per_token`; supported Blackwell CUDA hardware and vLLM required |
 
@@ -349,33 +364,33 @@ Examples:
 
 ```bash
 # Debug checkpoint behavior without using the GPU.
-python -m loomlm.cli smoke --accelerator cpu --precision fp32
+python -m modelchef.cli smoke --accelerator cpu --precision fp32
 # Check mixed-precision training on your current CUDA machine.
-python -m loomlm.cli smoke --accelerator cuda --precision fp16
+python -m modelchef.cli smoke --accelerator cuda --precision fp16
 ```
 
 ## Beginner: run and understand the pipeline
 
-**Goal:** complete one bounded experiment on your own machine. Start with the provided native model and public corpus recipe; no pretrained weights or AWS resources are required.
+**Start with the ingredients:** complete one bounded experiment on your own machine. Start with the provided native model and public corpus recipe; no pretrained weights or AWS resources are required.
 
-### Data: understand the input before running
+### Pick the ingredients: understand your data
 
 `configs/pretrain-local.yaml` selects an ordered FineWeb-Edu sample through the public dataset viewer. The document, response-byte and token caps keep the experiment small; this is not representative random sampling or a full corpus download. Quality filters, regex PII handling and lexical deduplication run before seeded document splits. Benchmark sample text is also excluded by word n-gram overlap checks.
 
 Keep the defaults for your first run. Previewing the recipe does not fetch data; `--run` does. To work offline, follow the intermediate local-document example after installing dependencies.
 
 
-### Your first training run
+### Cook your first model: run training
 
 Complete [local setup](#local-setup) and PyTorch installation, then install pipeline dependencies in the same environment:
 
 ```bash
 uv pip install -e '.[dev,pipeline]'
-python -m loomlm.cli doctor
+python -m modelchef.cli doctor
 # Validate every recipe section; this command performs no download or training.
-python -m loomlm.cli pipeline configs/pretrain-local.yaml
+python -m modelchef.cli pipeline configs/pretrain-local.yaml
 # Download the bounded samples and execute on the current machine.
-python -m loomlm.cli pipeline configs/pretrain-local.yaml --run
+python -m modelchef.cli pipeline configs/pretrain-local.yaml --run
 ```
 
 The default recipe requests at most 256 FineWeb-Edu documents, caps corpus responses at 16 MB and benchmark downloads at 2 MB, and caps packed data at 200,000 tokens. It creates an approximately 18.6M-parameter decoder and runs 40 optimizer steps. This is a pipeline test, not enough training for useful conversation. Dataset access uses the public Hugging Face viewer; no pretrained model weights are downloaded.
@@ -397,26 +412,26 @@ The run separates training, validation and test documents before fitting the tok
 Use the original configuration and a saved checkpoint path:
 
 ```bash
-python -m loomlm.cli pipeline configs/pretrain-local.yaml --run --resume PATH_TO_CHECKPOINT
+python -m modelchef.cli pipeline configs/pretrain-local.yaml --run --resume PATH_TO_CHECKPOINT
 ```
 
 Resume restores model, optimizer, scaler, sampler and random states and checks configuration/data/tokenizer fingerprints. The configuration must match exactly, and the original data snapshot must remain available. It continues toward the original step target; changing the target or dataset is a new experiment, not checkpoint recovery. CPU tests verify uninterrupted versus resumed weights agree; exact behavior across different hardware/software is not guaranteed.
 
-### Evaluation: read the evidence
+### Taste-test the model: read evaluation results
 
 Open the printed run directory and inspect `report.json`: compare `initial_validation` with final `validation`, inspect `test`, and check `checkpoint_recovery`. `processing.json` explains which documents were rejected, while source and benchmark manifests identify the exact saved inputs. `metrics.jsonl` records loss, learning rate, gradient norm and estimated throughput over optimizer steps.
 
 Validation and test loss measure next-token prediction on this sample/tokenizer. The small task benchmark checks evaluation wiring; it is not a reliable application-quality estimate. Decide whether data preparation and optimization behaved as intended before increasing scale.
 
 
-### Interact with or export the trained model
+### Serve the result: interact or export
 
 Replace `PATH_TO_COMPLETED_RUN` with the directory printed after successful training:
 
 ```bash
-python -m loomlm.cli chat PATH_TO_COMPLETED_RUN --backend torch
-python -m loomlm.cli chat PATH_TO_COMPLETED_RUN --prompt "Education helps people" --max-tokens 24
-python -m loomlm.cli export PATH_TO_COMPLETED_RUN
+python -m modelchef.cli chat PATH_TO_COMPLETED_RUN --backend torch
+python -m modelchef.cli chat PATH_TO_COMPLETED_RUN --prompt "Education helps people" --max-tokens 24
+python -m modelchef.cli export PATH_TO_COMPLETED_RUN
 ```
 
 Interactive mode supports `/reset` and `/exit`. This is a CLI completion/chat loop with bounded history, not a tool agent. A pretrained base model has not learned instruction following; the tiny test model will mostly produce incoherent text.
@@ -424,7 +439,7 @@ Interactive mode supports `/reset` and `/exit`. This is a CLI completion/chat lo
 Export writes compatible Llama configuration, tokenizer and safetensors weights into the run's `export/` directory. On supported Linux/WSL CUDA hardware, install the optional inference stack using the [intermediate vLLM setup](#install-and-serve-with-vllm), then run:
 
 ```bash
-python -m loomlm.cli chat PATH_TO_COMPLETED_RUN --backend vllm --max-tokens 24
+python -m modelchef.cli chat PATH_TO_COMPLETED_RUN --backend vllm --max-tokens 24
 ```
 
 The vLLM chat backend exports the trained weights if necessary and loads them locally. For a separate server, copy `configs/inference.yaml` to ignored `configs/inference.local.yaml`, point it at that export and use `serve-vllm`. On macOS or CPU, use the PyTorch chat backend.
@@ -434,7 +449,7 @@ The vLLM chat backend exports the trained weights if necessary and loads them lo
 
 ## Intermediate: adapt models to your data
 
-**Goal:** choose data and an objective for a concrete model behavior, then evaluate and expose the result. You can reuse the beginner checkpoint or start from a compatible pretrained model. These are alternative starting points; you do not need to pretrain a new model before fine-tuning an imported one.
+**Refine the recipe:** choose data and an objective for a concrete model behavior, then evaluate and serve the result. You can reuse the beginner checkpoint or start from a compatible pretrained model. These are alternative starting points; you do not need to pretrain a new model before fine-tuning an imported one.
 
 
 ### Data and recipes
@@ -458,11 +473,11 @@ Change one family of settings at a time. Document and byte caps control acquisit
 
 From-scratch experiments use the native causal RoPE decoder with GQA, RMSNorm and SwiGLU, plus a trained byte-level BPE tokenizer. Imported Hugging Face models use their original architecture and tokenizer through the local pretrained adapter. Optional reasoning supervision, execution kernels and stage objectives are configured in the same recipe. The runtime limit is checked between training steps, not a deadline for the entire acquisition/evaluation workflow. Hardware detection does not automatically choose a model size that fits memory.
 
-### Prepare your own data
+### Prepare your own ingredients: data
 
 ```bash
-python -m loomlm.cli convert-data documents.txt --format text --output data/raw/documents.jsonl --max-bytes 10000000 --max-documents 1000
-python -m loomlm.cli convert-data instructions.csv --format csv --output data/raw/sft.jsonl
+python -m modelchef.cli convert-data documents.txt --format text --output data/raw/documents.jsonl --max-bytes 10000000 --max-documents 1000
+python -m modelchef.cli convert-data instructions.csv --format csv --output data/raw/sft.jsonl
 ```
 
 Text conversion treats blank-line-separated paragraphs as documents. CSV headers become JSON field names: use `text` for midtraining or `prompt,response` for SFT. JSONL conversion also exists. Conversion preserves records; training performs objective-specific validation and filtering. PDFs, images, audio and arbitrary schemas require a separate extraction/mapping step. Outputs refuse to overwrite existing files. Choose source licenses and training rights appropriate to your intended use.
@@ -470,8 +485,8 @@ Text conversion treats blank-line-separated paragraphs as documents. CSV headers
 ### Finance-focused experiment
 
 ```bash
-python -m loomlm.cli pipeline configs/pretrain-finance.yaml
-python -m loomlm.cli pipeline configs/pretrain-finance.yaml --run
+python -m modelchef.cli pipeline configs/pretrain-finance.yaml
+python -m modelchef.cli pipeline configs/pretrain-finance.yaml --run
 ```
 
 This recipe searches a bounded FineWeb-Edu slice using explicit finance keywords. It is a domain-filtering experiment, not a curated financial corpus. Filtering can leave too few documents; increase the approved sample limit or supply appropriate local data if that occurs.
@@ -508,10 +523,10 @@ Install the optional adapter dependencies alongside your PyTorch environment:
 ```bash
 uv pip install -e '.[pipeline,pretrained]'
 # Metadata-only preview: pins the resolved upstream revision and checks total file size.
-python -m loomlm.cli download-model HuggingFaceTB/SmolLM2-135M --max-bytes 500000000
+python -m modelchef.cli download-model HuggingFaceTB/SmolLM2-135M --max-bytes 500000000
 # Explicitly execute only after reviewing model license, size and disk/memory requirements.
-python -m loomlm.cli download-model HuggingFaceTB/SmolLM2-135M --max-bytes 500000000 --run
-python -m loomlm.cli import-model PATH_TO_DOWNLOADED_MODEL --context 128
+python -m modelchef.cli download-model HuggingFaceTB/SmolLM2-135M --max-bytes 500000000 --run
+python -m modelchef.cli import-model PATH_TO_DOWNLOADED_MODEL --context 128
 ```
 
 Import registers local model weights and tokenizer as a parent run; it does not train them. Use the printed imported run directory as `PATH_TO_PARENT` in the next section. `midtrain` uses your raw text; `sft` uses your instruction/response data; DPO/RLVR use their corresponding formats. This reuses the pretrained tokenizer and weights, rather than starting from random initialization. Models supported by Transformers' causal-language-model auto classes with fast tokenizers can use the adapter; remote model code and implicit model downloads are disabled. Compatibility and memory use still depend on the selected architecture. A local tiny GPT-2 fixture tests import, SFT and export; this is not a claim that every Hub model has been validated.
@@ -520,19 +535,19 @@ The downloader selects safetensors weights and tokenizer/configuration assets, r
 
 Hugging Face supplies dataset/model distribution, tokenizer tooling and a compatibility format. The native model and training loop are project code; starting from scratch does not load pretrained weights. Imported models use the optional Transformers adapter.
 
-### Continue training
+### Refine your model: continue training
 
 Midtraining keeps the next-token objective but changes the corpus, for example to domain documents. SFT instead learns supplied responses while masking prompt tokens from the loss. DPO increases the relative likelihood of a chosen response compared with a rejected response, using a frozen reference to anchor the change. RLVR samples answers and obtains a reward from a deterministic verifier; it needs the model to produce enough varied, sometimes-correct answers for a useful learning signal.
 
-These are separate experiment choices, not a mandatory sequence. Full-parameter fine-tuning is the default. Imported Hugging Face models also support optional LoRA for midtraining and SFT; QLoRA is not implemented.
+These are separate experiment choices, not a mandatory sequence. Full-parameter fine-tuning is the default. Native and imported models support optional LoRA across continuation stages; imported models additionally support CUDA NF4 QLoRA. Choose the objective and adaptation method independently within the supported combinations.
 
 Use a completed or imported run as the parent. `stage-config` copies its architecture and tokenizer settings, avoiding manual mismatches. Write personal recipes to ignored `configs/*.local.yaml` files:
 
 ```bash
-python -m loomlm.cli stage-config PATH_TO_PARENT --kind sft --data data/raw/sft.jsonl --output configs/sft.local.yaml --steps 40
-python -m loomlm.cli pipeline configs/sft.local.yaml
-python -m loomlm.cli pipeline configs/sft.local.yaml --run
-python -m loomlm.cli chat PATH_TO_NEW_COMPLETED_RUN
+python -m modelchef.cli stage-config PATH_TO_PARENT --kind sft --data data/raw/sft.jsonl --output configs/sft.local.yaml --steps 40
+python -m modelchef.cli pipeline configs/sft.local.yaml
+python -m modelchef.cli pipeline configs/sft.local.yaml --run
+python -m modelchef.cli chat PATH_TO_NEW_COMPLETED_RUN
 ```
 
 Each stage creates a new run and optimizer; it retains the parent's weights and vocabulary. `--resume` recovers a stage using that stage's own saved optimizer and random states. Parent and teacher checkpoint hashes are recorded and checked during recovery. Parent artifacts must remain available.
@@ -561,7 +576,7 @@ Copy `configs/posttrain-*.yaml` for full native defaults, or prefer `stage-confi
 
 LoRA freezes the pretrained weights and trains small low-rank updates in selected layers. This reduces trainable parameters and optimizer memory while preserving the base model. See the original [LoRA paper](https://arxiv.org/abs/2106.09685) and [Hugging Face PEFT documentation](https://huggingface.co/docs/peft/en/package_reference/lora).
 
-Install `uv pip install -e '.[pipeline,pretrained,peft]'`. Generate an SFT or midtraining recipe with `stage-config` as above, then add this block inside its existing `model:` section:
+Install `uv pip install -e '.[pipeline,pretrained,peft]'`. Generate a continuation-stage recipe with `stage-config` as above, then add this block inside its existing `model:` section:
 
 ```yaml
   peft:
@@ -573,9 +588,28 @@ Install `uv pip install -e '.[pipeline,pretrained,peft]'`. Generate an SFT or mi
     use_rslora: false
 ```
 
-Target names depend on the imported architecture: Llama-style models use `q_proj`/`v_proj`; GPT-2 uses `c_attn`. Validate and run using the same `pipeline` commands. The report includes total and trainable parameter counts. PyTorch CLI chat restores the adapter automatically. `export RUN_DIR` writes separate adapter files under `RUN_DIR/adapter/` and a merged dense model under `RUN_DIR/export/` for vLLM.
+Target names depend on the architecture: the native decoder and Llama-style models use `q_proj`/`v_proj`; GPT-2 uses `c_attn`. Validate and run using the same `pipeline` commands. The report includes total and trainable parameter counts. PyTorch CLI chat restores the adapter automatically. `export RUN_DIR` writes separate adapter files under `RUN_DIR/adapter/` and a merged dense model under `RUN_DIR/export/` for vLLM.
 
-Checkpoints retain the full base and adapter state for reproducible resume, so they are not adapter-sized. Keep the original local model directory. Continuing an adapter requires the same adapter settings; changing rank or targets requires exporting, importing the merged model, and starting a new adapter. This implementation supports imported HF midtraining/SFT only, without quantized base weights; native-model LoRA, adapter DPO/RLVR/distillation and QLoRA are not supported.
+Checkpoints retain the full base and adapter state for reproducible resume, so they are not adapter-sized. Keep the original local model directory. Continuing an adapter requires the same adapter settings; changing rank or targets requires exporting, importing the merged model, and starting a new adapter. LoRA supports native and imported models for midtraining, SFT, DPO, RLVR and distillation. It requires an existing parent rather than adapter-only pretraining from random weights. Native adapters use the built-in implementation; imported adapters use PEFT.
+
+#### QLoRA: adapters on a 4-bit base
+
+QLoRA keeps the base in NF4 storage and trains LoRA adapters, reducing base-weight memory as well as optimizer memory. NF4 is a quantization format; it is different from native NVFP4 training arithmetic. See the [QLoRA paper](https://arxiv.org/abs/2305.14314) and [PEFT quantization guide](https://huggingface.co/docs/peft/en/developer_guides/quantization).
+
+Install `uv pip install -e '.[pipeline,pretrained,qlora]'` on a compatible NVIDIA CUDA environment. In a parent-derived Hugging Face continuation recipe, set:
+
+```yaml
+model:
+  peft:
+    method: qlora
+    rank: 8
+    alpha: 16
+    target_modules: [q_proj, v_proj]
+    compute_dtype: bf16     # OPTIONAL: bf16 | fp16; choose supported compute precision.
+    double_quant: true     # OPTIONAL: quantize the quantization scales too.
+```
+
+This fragment edits the existing recipe, not its complete replacement. QLoRA supports the same continuation objectives as LoRA. The original model and quantization metadata remain necessary for recovery. Export merges adapters into a dense HF model for vLLM; allow memory for that full-precision export. The CUDA path has been exercised with a tiny local GPT-2 fixture, including training, export and resume. It does not imply every pretrained architecture or bitsandbytes build is compatible. QLoRA is currently single-device and cannot be combined with projection FP4 simulation or native NVFP4.
 
 #### Optional reasoning supervision
 
@@ -594,37 +628,60 @@ Two methods are available:
 For sequence distillation, create a JSONL file with `prompt` strings:
 
 ```bash
-python -m loomlm.cli teacher-data PATH_TO_TEACHER --prompts data/raw/prompts.jsonl --output data/raw/teacher-sft.jsonl --max-documents 32 --max-tokens 32
-python -m loomlm.cli stage-config PATH_TO_STUDENT --kind sft --data data/raw/teacher-sft.jsonl --output configs/sequence-distill.local.yaml
-python -m loomlm.cli pipeline configs/sequence-distill.local.yaml --run
+python -m modelchef.cli teacher-data PATH_TO_TEACHER --prompts data/raw/prompts.jsonl --output data/raw/teacher-sft.jsonl --max-documents 32 --max-tokens 32
+python -m modelchef.cli stage-config PATH_TO_STUDENT --kind sft --data data/raw/teacher-sft.jsonl --output configs/sequence-distill.local.yaml
+python -m modelchef.cli pipeline configs/sequence-distill.local.yaml --run
 ```
 
-For a new smaller native student, run `python -m loomlm.cli init-student PATH_TO_TEACHER` first. It creates random weights and copies the teacher vocabulary; use the printed directory as `PATH_TO_STUDENT`. `--architecture FILE` accepts an architecture YAML mapping. A large teacher vocabulary can still dominate student parameter count.
+For a new smaller native student, run `python -m modelchef.cli init-student PATH_TO_TEACHER` first. It creates random weights and copies the teacher vocabulary; use the printed directory as `PATH_TO_STUDENT`. `--architecture FILE` accepts an architecture YAML mapping. A large teacher vocabulary can still dominate student parameter count.
 
 For token distillation:
 
 ```bash
-python -m loomlm.cli stage-config PATH_TO_STUDENT --kind distill --teacher PATH_TO_TEACHER --data data/raw/sft.jsonl --output configs/distill.local.yaml
-python -m loomlm.cli pipeline configs/distill.local.yaml --run
+python -m modelchef.cli stage-config PATH_TO_STUDENT --kind distill --teacher PATH_TO_TEACHER --data data/raw/sft.jsonl --output configs/distill.local.yaml
+python -m modelchef.cli pipeline configs/distill.local.yaml --run
 ```
 
 Configure `stage.distillation_temperature` and `stage.distillation_alpha` in the recipe. Alpha weights the soft teacher loss; the remaining weight applies to response cross entropy. A weak teacher can teach poor behavior; a short execution test does not establish distillation benefit.
 
 KL divergence measures the mismatch between the student's and teacher's token distributions. A higher temperature softens those distributions so alternatives to the most likely token carry more signal; the implementation scales the soft loss by temperature squared. This requires the same token IDs to mean the same things, which is why token distillation enforces identical tokenizers. Sequence distillation transfers generated text instead and avoids that constraint.
 
-### Evaluation and comparison
+### Compose a complete workflow
+
+`cook` joins independently reviewable stage recipes. Paths are relative to the project root. A stage normally inherits the preceding model geometry and tokenizer, while explicit adapter and execution choices can override inherited settings. Here is the composition shape; use the checked-in example for execution:
+
+```yaml
+schema_version: 1               # OPTIONAL: only version 1.
+name: my-model                  # OPTIONAL: artifact prefix.
+output_dir: artifacts/workflows # OPTIONAL: workflow reports.
+imported_model: null            # OPTIONAL: local HF directory instead of a scratch start.
+imported_context: 128           # OPTIONAL: context for an imported starting model.
+export: true                    # OPTIONAL: export the final completed stage.
+stages:                         # REQUIRED: at least one ordered stage.
+  - name: base                  # REQUIRED: unique stage name.
+    recipe: configs/pretrain-local.yaml # REQUIRED: training recipe path.
+  - name: instructions
+    recipe: configs/sft-recipe.yaml
+    parent_stage: base          # OPTIONAL: earlier stage; otherwise previous output.
+    teacher_stage: null         # CONDITIONAL: earlier teacher stage for distillation.
+    inherit_architecture: true  # OPTIONAL: preserve parent geometry/tokenizer.
+```
+
+The workflow persists its plan and a report linking each stage to its run. Failed execution records the error and preserves completed artifacts. Recover an individual stage with its checkpoint using `pipeline --resume`; `cook` does not yet resume the entire workflow automatically. Run DDP stages separately with `torchrun`. Training, export and API launch remain explicit operations: use [AWS training](#run-a-managed-native-training-stage) or [API serving](#serve-your-model-inference-and-api) when those are your chosen execution environments.
+
+### Taste-test and compare: evaluation
 
 Perplexity is the exponentiated mean next-token loss: lower is better on the same held-out data and tokenization, but it is not a fair cross-tokenizer quality ranking. Task benchmarks check specific behavior; use the same dataset/protocol and report sample size, context and truncation. DPO stages additionally report preference accuracy, while RLVR reports verifier-based accuracy.
 
 After downloading/importing any approved baseline models separately:
 
 ```bash
-python -m loomlm.cli compare PATH_TO_COMPLETED_RUN --baseline PATH_TO_LOCAL_GPT2 --baseline PATH_TO_LOCAL_PYTHIA --baseline PATH_TO_LOCAL_SMOLLM2 --output artifacts/comparison.json
+python -m modelchef.cli compare PATH_TO_COMPLETED_RUN --baseline PATH_TO_LOCAL_GPT2 --baseline PATH_TO_LOCAL_PYTHIA --baseline PATH_TO_LOCAL_SMOLLM2 --output artifacts/comparison.json
 ```
 
-This uses the run's saved benchmark examples for every candidate, retaining each model's own tokenizer. Baselines can be completed LoomLM runs or local HF exports. Custom continuation scoring differs from published-suite protocols; tokenizers and context/truncation choices affect comparisons. No baseline weights are fetched by `compare`.
+This uses the run's saved benchmark examples for every candidate, retaining each model's own tokenizer. Baselines can be completed ModelChef runs or local HF exports. Custom continuation scoring differs from published-suite protocols; tokenizers and context/truncation choices affect comparisons. No baseline weights are fetched by `compare`.
 
-### Inference and API serving
+### Serve your model: inference and API
 
 Use the candidate run you evaluated above. Start with the PyTorch CLI to check model behavior, then export it for vLLM. The inference engine changes execution and serving; it does not improve learned model behavior by itself.
 
@@ -633,8 +690,8 @@ Use the candidate run you evaluated above. Start with the PyTorch CLI to check m
 Use the Linux/WSL `.venv` from local setup, a compatible NVIDIA GPU/driver, and a C compiler:
 
 ```bash
-python -m loomlm.cli setup-vllm
-python -m loomlm.cli setup-vllm --apply
+python -m modelchef.cli setup-vllm
+python -m modelchef.cli setup-vllm --apply
 python scripts/vllm_smoke.py
 ```
 
@@ -642,13 +699,13 @@ The installer targets `.venv` in the project root and pins vLLM 0.31.0 with the 
 
 vLLM is an inference engine that manages generation and batching; it does not replace the PyTorch training loop. This setup reuses the project environment.
 
-Set `LOOMLM_API_KEY` to a random token of at least 32 non-whitespace characters before starting even a loopback server; it is required at launch.
+Set `MODELCHEF_API_KEY` to a random token of at least 32 non-whitespace characters before starting even a loopback server; it is required at launch.
 
 To serve an existing compatible Hugging Face export, set `inference.model_path` in `configs/inference.yaml` to a local directory containing `config.json`, `tokenizer.json` and safetensors or `pytorch_model.bin` weights:
 
 ```bash
-python -m loomlm.cli serve-vllm configs/inference.yaml
-python -m loomlm.cli serve-vllm configs/inference.yaml --run
+python -m modelchef.cli serve-vllm configs/inference.yaml
+python -m modelchef.cli serve-vllm configs/inference.yaml --run
 ```
 
 The first command validates files and prints a plan. The second starts foreground serving at `http://127.0.0.1:8000/v1`. Stop it with Ctrl+C. Downloads and remote model code are disabled. A `.pt` checkpoint alone is insufficient; use `export RUN_DIR` to create the compatible model directory. Default memory utilization is 50%, context 2048 and scheduler sequence limit 4; the API boundary separately allows 2 concurrent requests. Set `max_model_len` no higher than your trained context (128 for the local test recipe); adjust for your model, and avoid simultaneous training/serving on a small GPU.
@@ -657,14 +714,14 @@ The first command validates files and prints a plan. The second starts foregroun
 
 Serving runs on the machine where you invoke it: a prepared Linux/WSL CUDA laptop, an existing EC2 host, or another compatible vLLM host. It does not provision a machine. Keep the process running while clients use it; AWS running costs continue for the lifetime of the host.
 
-1. Export a completed run: `python -m loomlm.cli export RUN_DIR`. Use the printed export directory as `inference.model_path`, and set `max_model_len` to the trained context or less. Install the optional vLLM environment using the [vLLM setup instructions](#install-and-serve-with-vllm).
+1. Export a completed run: `python -m modelchef.cli export RUN_DIR`. Use the printed export directory as `inference.model_path`, and set `max_model_len` to the trained context or less. Install the optional vLLM environment using the [vLLM setup instructions](#install-and-serve-with-vllm).
 2. Obtain a trusted TLS certificate for the hostname clients will use. Keep its full certificate chain and private key outside Git, restrict the private key's file permissions, and put their paths in a copy of `configs/inference-public.yaml`, named `configs/inference-public.local.yaml`. Do not disable certificate verification on clients.
-3. Set `LOOMLM_API_KEY` in the serving process environment to a cryptographically random token of at least 32 characters. For example, generate a token with `python -c 'import secrets; print(secrets.token_urlsafe(48))'` and load it through your secret manager or a private environment file. Do not put the token in YAML, shell command arguments, Git or shared logs. All clients holding this token share access; rotate it by changing the environment and restarting the server.
-4. Preview: `python -m loomlm.cli serve-vllm configs/inference-public.local.yaml`. Then start: `python -m loomlm.cli serve-vllm configs/inference-public.local.yaml --run`. The default local config binds loopback; the public example binds port 8443 with TLS. A missing token or missing TLS files prevents startup. Plans contain the secret's variable name, never its value.
+3. Set `MODELCHEF_API_KEY` in the serving process environment to a cryptographically random token of at least 32 characters. For example, generate a token with `python -c 'import secrets; print(secrets.token_urlsafe(48))'` and load it through your secret manager or a private environment file. Do not put the token in YAML, shell command arguments, Git or shared logs. All clients holding this token share access; rotate it by changing the environment and restarting the server.
+4. Preview: `python -m modelchef.cli serve-vllm configs/inference-public.local.yaml`. Then start: `python -m modelchef.cli serve-vllm configs/inference-public.local.yaml --run`. The default local config binds loopback; the public example binds port 8443 with TLS. A missing token or missing TLS files prevents startup. Plans contain the secret's variable name, never its value.
 5. Allow inbound TCP 8443 only from intended client networks in your host firewall and, on EC2, its security group. For a laptop, WSL/Windows forwarding and your router or VPN must make that port reachable. The code does not open firewall rules or router ports. Prefer a private VPN for a small group.
-6. Clients send `Authorization: Bearer <token>` to `https://YOUR_HOSTNAME:8443/v1/models` or POST text requests to `/v1/completions` and `/v1/chat/completions`. For example, a completions body is `{"model":"artifacts/exports/loomlm","prompt":"Explain gravity","max_tokens":64}`; use the model ID returned by `/v1/models`. Chat requires a suitable model chat template and instruction training; a base checkpoint can use completions.
+6. Clients send `Authorization: Bearer <token>` to `https://YOUR_HOSTNAME:8443/v1/models` or POST text requests to `/v1/completions` and `/v1/chat/completions`. For example, a completions body is `{"model":"artifacts/exports/modelchef","prompt":"Explain gravity","max_tokens":64}`; use the model ID returned by `/v1/models`. Chat requires a suitable model chat template and instruction training; a base checkpoint can use completions.
 
-The middleware in `src/loomlm/api_security.py` authenticates every exposed HTTP request and blocks all routes except these three, including administrative routes and alternate inference paths. It enforces bounded request bodies, process-wide rate/concurrency limits, timeouts, and text-only inputs; request prompt logging and interactive API docs are disabled. TLS files and tokens stay local. Native vLLM API keys alone do not cover all routes; see the [vLLM serving security guidance](https://docs.vllm.ai/en/latest/cli/serve/).
+The middleware in `src/modelchef/api_security.py` authenticates every exposed HTTP request and blocks all routes except these three, including administrative routes and alternate inference paths. It enforces bounded request bodies, process-wide rate/concurrency limits, timeouts, and text-only inputs; request prompt logging and interactive API docs are disabled. TLS files and tokens stay local. Native vLLM API keys alone do not cover all routes; see the [vLLM serving security guidance](https://docs.vllm.ai/en/latest/cli/serve/).
 
 These controls are a secure starting point, not a guarantee of complete security. This mode supports one API process and a shared token; it does not provide individual identities, billing quotas, distributed rate limits, or protection against network-level denial of service. For public multi-user production access, place it behind a managed gateway with identity, quotas and network protection, keep the backend private, and review the deployment. No public endpoint is opened automatically.
 
@@ -684,23 +741,23 @@ Supply your own evaluation text through `processing.benchmark_files` and preserv
 
 ### Published recipes and small-scale adaptations
 
-Start with a published training pattern, then size the experiment for your hardware. These are reference recipes, not a universal best configuration or a reconstruction of unpublished proprietary frontier training. Each linked paper describes the original model; the YAML files below are deliberately small **LoomLM adaptations**, with project-chosen learning rates and budgets.
+Start with a published training pattern, then size the experiment for your hardware. These are reference recipes, not a universal best configuration or a reconstruction of unpublished proprietary frontier training. Each linked paper describes the original model; the YAML files below are deliberately small **ModelChef adaptations**, with project-chosen learning rates and budgets.
 
-| Pattern | Published recipe / original source | What to carry into an experiment | LoomLM example and limits |
+| Pattern | Published recipe / original source | What to carry into an experiment | ModelChef example and limits |
 | --- | --- | --- | --- |
 | Small, data-focused dense model | [SmolLM2 paper](https://arxiv.org/abs/2502.02737): 1.7B model, approximately 11T tokens, staged web/math/code data curation | Start with clean general text; evaluate, then specialize using curated domain data; finish with instruction examples | [SmolLM2-inspired](configs/recipe-smollm2-inspired.yaml): bounded FineWeb-Edu sample and small native decoder. Later `midtrain`/`sft` runs use separate recipes; this does not reproduce the original mixtures or token budget. |
 | Open, staged foundation training | [OLMo 2 paper](https://arxiv.org/abs/2501.00656), [original Ai2 post](https://allenai.org/blog/olmo2), and [official training recipes](https://github.com/allenai/OLMo-core/tree/main/src/scripts/official/OLMo2) | Broad pretraining followed by curated late training; evaluate domain gains and general capability; use SFT/preferences/verifiable rewards when suitable | [OLMo-inspired](configs/recipe-olmo-inspired.yaml): local curated corpus, then separate stages. Native architecture and cosine schedule differ from OLMo 2; its linear annealing and training infrastructure are not reproduced. |
 | Large dense frontier-scale reference | [The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783): released family includes a 405B model; report describes pretraining and post-training | Decoder with grouped-query attention, careful data quality, staged capability development and instruction/preference training | [Llama-inspired](configs/recipe-llama-inspired.yaml): small RoPE/RMSNorm/SwiGLU/GQA decoder. No distributed frontier-scale training, original tokenizer/data mixture or long-context curriculum reproduction. |
 | Efficient pretrained specialization | [LoRA paper](https://arxiv.org/abs/2106.09685) | Freeze the base and train low-rank updates rather than all weights | Generate an imported-model SFT recipe and enable [LoRA](#parameter-efficient-fine-tuning-with-lora). This is an adaptation method, not a foundation pretraining recipe. |
 
-For frontier architectures beyond dense decoders, the [DeepSeek-V3 technical report](https://arxiv.org/abs/2412.19437) documents MoE, latent attention and multi-token prediction; LoomLM does not implement those architectures or objectives. The [DeepSeek-R1 paper](https://arxiv.org/abs/2501.12948) provides a reasoning/RL reference. LoomLM's optional reasoning supervision, distillation and small verifier-based RLVR experiments are learning workflows, not reproductions of R1's training algorithm or capability. These references help identify future extensions without presenting unsupported options as runnable recipes.
+For frontier architectures beyond dense decoders, the [DeepSeek-V3 technical report](https://arxiv.org/abs/2412.19437) documents MoE, latent attention and multi-token prediction; ModelChef does not implement those architectures or objectives. The [DeepSeek-R1 paper](https://arxiv.org/abs/2501.12948) provides a reasoning/RL reference. ModelChef's optional reasoning supervision, distillation and small verifier-based RLVR experiments are learning workflows, not reproductions of R1's training algorithm or capability. These references help identify future extensions without presenting unsupported options as runnable recipes.
 
 **Try a recipe:** copy one to an ignored personal file, inspect its data source and limits, and validate before execution:
 
 ```bash
 cp configs/recipe-smollm2-inspired.yaml configs/my-small-model.local.yaml
-python -m loomlm.cli pipeline configs/my-small-model.local.yaml
-python -m loomlm.cli pipeline configs/my-small-model.local.yaml --run
+python -m modelchef.cli pipeline configs/my-small-model.local.yaml
+python -m modelchef.cli pipeline configs/my-small-model.local.yaml --run
 ```
 
 The SmolLM2 example downloads only a bounded sample when executed. The other two use `data/raw/corpus.jsonl`: provide your own JSONL records with a `text` field before execution. Validation does not launch AWS. Use [managed AWS training](#run-a-managed-native-training-stage) for an explicitly configured cloud run; these recipes themselves execute locally.
@@ -732,9 +789,9 @@ All selected values must still satisfy cross-field rules: for example, structure
 
 ```bash
 cp configs/recipe-reference.yaml configs/full-run.local.yaml
-python -m loomlm.cli pipeline configs/full-run.local.yaml
+python -m modelchef.cli pipeline configs/full-run.local.yaml
 # After reviewing data limits and hardware requirements:
-python -m loomlm.cli pipeline configs/full-run.local.yaml --run
+python -m modelchef.cli pipeline configs/full-run.local.yaml --run
 ```
 
 ```yaml
@@ -786,19 +843,24 @@ tokenizer:  # OPTIONAL: defaults are supplied when omitted.
   append_eos: true  # OPTIONAL: Raw-text document separator; structured stages always append response EOS.
 model:  # OPTIONAL: defaults are supplied when omitted.
   peft:  # OPTIONAL: Parameter-efficient training; imported HF midtrain/SFT only.
-    method: none  # OPTIONAL: none | lora; QLoRA is not implemented.
+    method: none  # OPTIONAL: none | lora | qlora; adapters require a continuation parent.
     rank: 8  # OPTIONAL: Positive adapter rank.
     alpha: 16  # OPTIONAL: Positive adapter scaling factor.
     dropout: 0.0  # OPTIONAL: Adapter dropout in [0, 1).
     target_modules: [q_proj, v_proj]  # OPTIONAL: Must match the imported model; GPT-2 uses c_attn.
     use_rslora: false  # OPTIONAL: Rank-stabilized scaling.
+    compute_dtype: bf16  # OPTIONAL: QLoRA compute: bf16 | fp16.
+    double_quant: true  # OPTIONAL: QLoRA nested quantization.
   backend: native  # OPTIONAL: native | huggingface; use import-model to configure a local pretrained adapter.
   pretrained_path: null  # CONDITIONAL: Required local source directory for the huggingface backend.
   pretrained_config_sha256: null  # OPTIONAL: Filled by import-model; validates the original HF config on loading.
-  quantization: none  # OPTIONAL: none | fp4_fake; software simulation, not packed/native FP4 training.
+  quantization: none  # OPTIONAL: none | fp4_fake | nvfp4; nvfp4 requires native dense Blackwell integration.
   attention_kernel: auto  # OPTIONAL: auto | math | flash | efficient | cudnn; explicit optimized choices require a compatible GPU.
   custom_swiglu_path: null  # OPTIONAL: Native CUDA only: set kernels/swiglu after correctness checks; rejected by managed aws-train.
-  type: decoder_rope  # OPTIONAL: Only decoder_rope for the native model; not a free-form architecture selector.
+  type: decoder_rope  # OPTIONAL: decoder_rope | decoder_moe; applies to native architecture.
+  num_experts: 4  # OPTIONAL: MoE expert count.
+  experts_per_token: 2  # OPTIONAL: MoE top-k; <= num_experts.
+  router_aux_loss_coef: 0.01  # OPTIONAL: MoE load-balancing loss weight.
   layers: 6  # OPTIONAL: defaults are supplied when omitted.
   hidden_size: 512  # OPTIONAL: Must divide evenly by attention_heads; head dimension must be even.
   attention_heads: 8  # OPTIONAL: Must divide evenly by kv_heads.
@@ -816,6 +878,8 @@ model:  # OPTIONAL: defaults are supplied when omitted.
   init_std: 0.02  # OPTIONAL: defaults are supplied when omitted.
   gradient_checkpointing: false  # OPTIONAL: Recompute activations during backward to trade compute for memory.
 training:  # OPTIONAL: defaults are supplied when omitted.
+  distributed: none  # OPTIONAL: none | ddp; DDP launches with torchrun.
+  distributed_timeout_seconds: 300  # OPTIONAL: process-group timeout.
   compile: false  # OPTIONAL: Opt in to torch.compile; default leaves execution eager.
   compile_backend: inductor  # OPTIONAL: inductor | aot_eager | eager.
   compile_mode: default  # OPTIONAL: default | reduce-overhead | max-autotune; used only with inductor.
@@ -892,7 +956,7 @@ Keep performance changes separate at first: custom CUDA, compilation, fake FP4, 
 | Configuration | Full settings / workflow |
 | --- | --- |
 | [inference.yaml](configs/inference.yaml) | Local vLLM model path, dtype, quantization, GPU memory, context, sequence limits and API resource limits |
-| [inference-public.yaml](configs/inference-public.yaml) | Remote bind/port, token environment variable, TLS files and request limits; [serving instructions](#inference-and-api-serving) |
+| [inference-public.yaml](configs/inference-public.yaml) | Remote bind/port, token environment variable, TLS files and request limits; [serving instructions](#serve-your-model-inference-and-api) |
 | [aws-test.yaml](configs/aws-test.yaml) | Temporary Spot instance, per-run/overall reservations, runtime/rate ceilings, storage and cleanup |
 | [aws-training.yaml](configs/aws-training.yaml) | Spot lifecycle plus training recipe, S3/profile, source/result caps and artifact reserve |
 | [aws-serving.yaml](configs/aws-serving.yaml) | Persistent on-demand host, existing network/image/profile, secret, export config and cost-warning threshold |
@@ -909,7 +973,7 @@ The temporary AWS runner reads several template keys directly; unlike `RunConfig
 
 These files compose: for example, `aws_test.pipeline_config` in the AWS training template points to a training recipe, while `aws_serving.inference_config` points to a serving recipe. Temporary training ends with termination; persistent hosting stays up until an explicit lifecycle action. Tokens, certificates, private paths and account-specific settings belong outside Git or in ignored local configs.
 
-### Performance and precision experiments
+### Tune the execution: performance and precision
 
 Establish a correctness baseline before changing execution settings. Architecture changes affect what model you train; kernel and compiler choices affect how its operations execute. Compare tokens/second, peak memory and validation behavior under the same recipe, and include compilation/warmup overhead when evaluating short runs.
 
@@ -926,7 +990,7 @@ Custom CUDA is opt-in for the native decoder. The included example replaces the 
 3. Run the forward/gradient check before training:
 
    ```bash
-   python -m loomlm.cli check-cuda-kernel kernels/swiglu
+   python -m modelchef.cli check-cuda-kernel kernels/swiglu
    ```
 
 4. Start with `configs/pretrain-custom-cuda.yaml`, or copy your training recipe and edit the following fields within its existing sections:
@@ -943,9 +1007,9 @@ Custom CUDA is opt-in for the native decoder. The included example replaces the 
      allow_tf32: false
    ```
 
-5. Run `python -m loomlm.cli pipeline configs/YOUR_RECIPE.yaml --run`. Startup validates FP32, FP16 and supported BF16 outputs and gradients against PyTorch before acquiring data. Source hashes are recorded and checked when resuming. Build products stay under ignored `artifacts/cuda-extensions/`.
+5. Run `python -m modelchef.cli pipeline configs/YOUR_RECIPE.yaml --run`. Startup validates FP32, FP16 and supported BF16 outputs and gradients against PyTorch before acquiring data. Source hashes are recorded and checked when resuming. Build products stay under ignored `artifacts/cuda-extensions/`.
 
-`src/loomlm/execution.py` loads the trusted local plugin and runs checks; `model.py` selects it; `kernels/swiglu/kernel.py` provides the autograd wrapper; `swiglu.cpp` exposes bindings; and `swiglu.cu` implements the CUDA operations. Your own directory must export `swiglu(gate, up)` from `kernel.py` with autograd support. Selecting a plugin executes its local code, so use a source directory you trust. Set `custom_swiglu_path: null` to restore the built-in activation.
+`src/modelchef/execution.py` loads the trusted local plugin and runs checks; `model.py` selects it; `kernels/swiglu/kernel.py` provides the autograd wrapper; `swiglu.cpp` exposes bindings; and `swiglu.cu` implements the CUDA operations. Your own directory must export `swiglu(gate, up)` from `kernel.py` with autograd support. Selecting a plugin executes its local code, so use a source directory you trust. Set `custom_swiglu_path: null` to restore the built-in activation.
 
 Other optional execution controls are `model.attention_kernel: auto|math|flash|efficient|cudnn`, `training.compile`, `compile_backend: inductor|aot_eager|eager`, `compile_mode: default|reduce-overhead|max-autotune`, and `optimizer_kernel: default|fused|foreach`. Explicit optimized attention and fused optimizer selections require a compatible GPU. Measure throughput and memory for your workload; compilation can add startup time. Custom CUDA is currently limited to native-model SwiGLU and prepared hosts; managed `aws-train` packaging rejects it. Native FP4 kernels are a separate capability.
 
@@ -956,13 +1020,32 @@ The included kernel has passed FP32, FP16 and BF16 forward/backward checks on an
 For portable software experiments:
 
 ```bash
-python -m loomlm.cli pipeline configs/pretrain-fp4-fake.yaml
-python -m loomlm.cli pipeline configs/pretrain-fp4-fake.yaml --run
+python -m modelchef.cli pipeline configs/pretrain-fp4-fake.yaml
+python -m modelchef.cli pipeline configs/pretrain-fp4-fake.yaml --run
 ```
 
 `model.quantization: fp4_fake` applies block-scaled E2M1-style fake quantization to compatible linear weights and activations, using straight-through gradients. It requires linear input dimensions divisible by 16. It can run on the current laptop, but **does not pack checkpoints, accelerate GEMMs or guarantee bitwise parity with NVIDIA's NVFP4 recipes**. Master weights, optimizer state and accumulation remain at the configured higher precision. Chat through PyTorch reproduces fake quantization; HF export writes full-precision master weights and records that distinction.
 
-For native online NVFP4 inference, set `inference.quantization: nvfp4_per_token` in a serving recipe and use `serve-vllm`. The project checks for Blackwell CUDA compute capability before selecting it; vLLM performs final kernel/model checks. The RTX 4060 and macOS do not have this native path. Native FP4 training kernels are not implemented. See [vLLM online NVFP4](https://docs.vllm.ai/en/latest/api/vllm/model_executor/layers/quantization/online/nvfp4/) and [TorchAO workflows](https://docs.pytorch.org/ao/stable/workflows/index.html).
+For native online NVFP4 inference, set `inference.quantization: nvfp4_per_token` in a serving recipe and use `serve-vllm`. The project checks for Blackwell CUDA compute capability before selecting it; vLLM performs final kernel/model checks. The RTX 4060 and macOS do not have this native path. Native training is available through the optional Transformer Engine integration described below. See [vLLM online NVFP4](https://docs.vllm.ai/en/latest/api/vllm/model_executor/layers/quantization/online/nvfp4/) and [TorchAO workflows](https://docs.pytorch.org/ao/stable/workflows/index.html).
+
+#### Native NVFP4 training on Blackwell
+
+Install `uv pip install -e '.[nvfp4]'` with a compatible Linux Blackwell CUDA and Transformer Engine stack. Start from [configs/pretrain-nvfp4.yaml](configs/pretrain-nvfp4.yaml), or set `model.quantization: nvfp4` in a **native dense** recipe. Linear projection dimensions must be multiples of 16; Transformer Engine supplies NVFP4 block-scaled arithmetic while master parameters remain FP32. See [Transformer Engine FP8/FP4 training](https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/examples/fp8_primer.html).
+
+This integration requires actual Blackwell hardware; CPU simulation checks dispatch and configuration rather than numerical hardware behavior. Compatible users can run it even though real-device Blackwell validation is pending. It currently excludes MoE, PEFT, gradient checkpointing, custom SwiGLU and DDP. Use fake FP4 for software experiments on other hardware, and report it as simulation.
+
+### Mixture of experts and distributed training
+
+A mixture-of-experts (MoE) decoder routes each token to a subset of feed-forward experts. This increases total parameter capacity without activating every expert for every token. Start from [configs/pretrain-moe.yaml](configs/pretrain-moe.yaml), or set `model.type: decoder_moe`, then configure `num_experts`, `experts_per_token` and `router_aux_loss_coef`. The last setting weights an auxiliary load-balancing loss. Keep `bias: false` for Mixtral-compatible HF export. This is a small top-k routed architecture, not a reproduction of DeepSeek's full system; see [Mixtral](https://arxiv.org/abs/2401.04088).
+
+DDP gives each process a complete model replica and synchronizes gradients. It improves data throughput; it does not shard weights or make an oversized model fit on one device. Copy [configs/pretrain-ddp.yaml](configs/pretrain-ddp.yaml) to `configs/ddp.local.yaml`, or edit a stage recipe to set `training.distributed: ddp`, choose CPU or compatible GPUs, then launch:
+
+```bash
+torchrun --standalone --nproc_per_node=2 -m modelchef.cli pipeline configs/ddp.local.yaml --run
+```
+
+Each rank samples training blocks; the global sequence batch is `micro_batch_size × gradient_accumulation × world_size`. Rank zero prepares shared artifacts and writes reports/checkpoints; recovery preserves per-rank random state and requires the same world size. Dense and MoE two-rank CPU execution and resume have been tested. GPU DDP uses NCCL and needs its own throughput and device validation; MPS DDP is unavailable. DDP currently excludes QLoRA, NVFP4, compilation and RLVR. See [PyTorch DDP](https://docs.pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html) and [torchrun](https://docs.pytorch.org/docs/stable/elastic/run.html).
+
 
 ### Evaluation: run standard suites
 
@@ -970,10 +1053,10 @@ For the optional [EleutherAI evaluation harness](https://github.com/EleutherAI/l
 
 ```bash
 uv pip install -e '.[evaluation]'
-python -m loomlm.cli export PATH_TO_COMPLETED_RUN
-python -m loomlm.cli evaluate-standard PATH_TO_EXPORT --tasks hellaswag piqa arc_easy --limit 100
+python -m modelchef.cli export PATH_TO_COMPLETED_RUN
+python -m modelchef.cli evaluate-standard PATH_TO_EXPORT --tasks hellaswag piqa arc_easy --limit 100
 # Explicit execution can download benchmark datasets.
-python -m loomlm.cli evaluate-standard PATH_TO_EXPORT --tasks hellaswag piqa arc_easy --limit 100 --run
+python -m modelchef.cli evaluate-standard PATH_TO_EXPORT --tasks hellaswag piqa arc_easy --limit 100 --run
 ```
 
 The default command only prints a plan. `--limit` caps scored examples, **not dataset download bytes**; obtain approval for large datasets before executing. The harness is an optional external integration: full suite execution and real GPT-2/Pythia/SmolLM2 comparisons have not been run in the bounded local validation. Finance selection in the built-in pipeline uses FinancialPhraseBank; choose additional harness tasks explicitly when needed.
@@ -1011,13 +1094,13 @@ There are two identities:
 | Identity | Responsibility |
 | --- | --- |
 | Your configured CLI profile | Discover images/prices/subnets, provision EC2, monitor results, manage temporary schedules and clean up |
-| `loomlm-spot-deadline` scheduler role | Permit AWS Scheduler to terminate project-tagged instances at the deadline |
+| `modelchef-spot-deadline` scheduler role | Permit AWS Scheduler to terminate project-tagged instances at the deadline |
 
 Use an IAM administrator for one-time permission setup. Do not use root access keys or put `AdministratorAccess` on the everyday controller just to avoid configuring permissions.
 
 For an IAM user workflow:
 
-1. In AWS Console, open **IAM > Users > Create user** and create a dedicated controller user, such as `loomlm-controller`. Console access is unnecessary for CLI-only use.
+1. In AWS Console, open **IAM > Users > Create user** and create a dedicated controller user, such as `modelchef-controller`. Console access is unnecessary for CLI-only use.
 2. Generate a baseline permission policy from the current AWS runner rather than relying on a stale copied policy. With uv installed, use the command below. It analyzes code; it does not launch EC2 or attach policies.
 3. Have the administrator review the generated policies, replace wildcard resources where feasible with your account/region/project resources, and validate them in IAM. Static analysis is a starting point: dynamically constructed service clients, paginator/waiter operations and dependent permissions need review.
 4. In **IAM > Policies > Create policy > JSON**, create the reviewed customer-managed policy or policies. Attach them to the controller user (or its group/role). Regenerate/review when AWS runner behavior changes.
@@ -1027,16 +1110,16 @@ From the repository root on Linux/WSL, replace `YOUR_ACCOUNT_ID` with your accou
 
 ```bash
 uvx iam-policy-autopilot@latest generate-policies \
-  "$PWD/src/loomlm/aws_runner.py" \
+  "$PWD/src/modelchef/aws_runner.py" \
   --region us-east-1 --account YOUR_ACCOUNT_ID \
   --service-hints ec2 iam scheduler ssm sts --pretty
 ```
 
-See [AWS IAM Policy Autopilot](https://github.com/awslabs/iam-policy-autopilot) for supported inputs and policy review guidance. PowerShell uses `(Resolve-Path src/loomlm/aws_runner.py).Path` for the source path and backticks for line continuation, or place the command on one line.
+See [AWS IAM Policy Autopilot](https://github.com/awslabs/iam-policy-autopilot) for supported inputs and policy review guidance. PowerShell uses `(Resolve-Path src/modelchef/aws_runner.py).Path` for the source path and backticks for line continuation, or place the command on one line.
 
-The administrator must cover EC2 discovery, Spot launch/tagging, security-group creation/deletion, console retrieval and termination, including operations used by waiters. Scheduler access covers the `loomlm` group and its run schedules. Passing the role needs `iam:PassRole` restricted to `arn:aws:iam::YOUR_ACCOUNT_ID:role/loomlm-spot-deadline` and `iam:PassedToService = scheduler.amazonaws.com`; see [AWS PassRole guidance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_passrole.html). First-time Spot accounts may also need the EC2 Spot service-linked role created by an administrator.
+The administrator must cover EC2 discovery, Spot launch/tagging, security-group creation/deletion, console retrieval and termination, including operations used by waiters. Scheduler access covers the `modelchef` group and its run schedules. Passing the role needs `iam:PassRole` restricted to `arn:aws:iam::YOUR_ACCOUNT_ID:role/modelchef-spot-deadline` and `iam:PassedToService = scheduler.amazonaws.com`; see [AWS PassRole guidance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_passrole.html). First-time Spot accounts may also need the EC2 Spot service-linked role created by an administrator.
 
-The runner creates the scheduler group/role if missing. Role creation requires the corresponding IAM role creation, tagging, inline-policy and read permissions. Alternatively, an administrator can pre-create `loomlm-spot-deadline` using the trust and inline-policy definitions in `SpotRunner.prepare_deadline_role` in [aws_runner.py](src/loomlm/aws_runner.py). Its trust permits `scheduler.amazonaws.com`, restricted to the caller account and the exact regional `schedule-group/loomlm` ARN. Its policy permits only `ec2:TerminateInstances` on regional account instances tagged `Project=LoomLM`. The EC2 guest receives no controller keys or instance profile in this recipe. See [Scheduler execution role setup](https://docs.aws.amazon.com/scheduler/latest/UserGuide/setting-up.html).
+The runner creates the scheduler group/role if missing. Role creation requires the corresponding IAM role creation, tagging, inline-policy and read permissions. Alternatively, an administrator can pre-create `modelchef-spot-deadline` using the trust and inline-policy definitions in `SpotRunner.prepare_deadline_role` in [aws_runner.py](src/modelchef/aws_runner.py). Its trust permits `scheduler.amazonaws.com`, restricted to the caller account and the exact regional `schedule-group/modelchef` ARN. Its policy permits only `ec2:TerminateInstances` on regional account instances tagged `Project=ModelChef`. The EC2 guest receives no controller keys or instance profile in this recipe. See [Scheduler execution role setup](https://docs.aws.amazon.com/scheduler/latest/UserGuide/setting-up.html).
 
 An existing scheduler role is reused without repairing its policy. Have the administrator verify it, particularly if switching regions: the current role name is shared but its trust/policy are region-specific.
 
@@ -1045,15 +1128,15 @@ An existing scheduler role is reused without repairing its policy. Have the admi
 If you use IAM user keys, open the user's **Security credentials > Access keys > Create access key** and choose CLI use. Enter the key pair only in your own terminal:
 
 ```bash
-aws configure --profile loomlm
+aws configure --profile modelchef
 ```
 
-Supply the access key ID, secret access key, default region (for example `us-east-1`) and output format `json`. The CLI stores credentials under your user profile, outside this repository. They are stored as plaintext there, so protect that directory. Never paste keys into chat, YAML, scripts or Git. AWS recommends temporary credentials where available; an IAM Identity Center profile can instead be configured using `aws configure sso --profile loomlm` and authenticated with `aws sso login --profile loomlm`. See [AWS credential guidance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html).
+Supply the access key ID, secret access key, default region (for example `us-east-1`) and output format `json`. The CLI stores credentials under your user profile, outside this repository. They are stored as plaintext there, so protect that directory. Never paste keys into chat, YAML, scripts or Git. AWS recommends temporary credentials where available; an IAM Identity Center profile can instead be configured using `aws configure sso --profile modelchef` and authenticated with `aws sso login --profile modelchef`. See [AWS credential guidance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html).
 
 Check identity without launching compute:
 
 ```bash
-aws sts get-caller-identity --profile loomlm
+aws sts get-caller-identity --profile modelchef
 ```
 
 Already have a differently named profile? Set `aws_test.profile` in your ignored local configuration; no new keys are required.
@@ -1076,7 +1159,7 @@ In PowerShell use `Copy-Item configs/aws-test.yaml configs/aws-test.local.yaml`.
 
 | Field | Template value | What it controls |
 | --- | --- | --- |
-| `profile`, `region` | `loomlm`, `us-east-1` | Controller credentials and deployment region |
+| `profile`, `region` | `modelchef`, `us-east-1` | Controller credentials and deployment region |
 | `instance_type` | `g4dn.xlarge` | Requested Spot GPU machine |
 | `total_budget_usd` | `10.00` | Total reservation limit for this ledger/account/region |
 | `per_run_budget_usd` | `0.50` | Full amount reserved for every attempt |
@@ -1092,9 +1175,9 @@ In PowerShell use `Copy-Item configs/aws-test.yaml configs/aws-test.local.yaml`.
 Preview first:
 
 ```bash
-python -m loomlm.cli aws-test configs/aws-test.local.yaml
+python -m modelchef.cli aws-test configs/aws-test.local.yaml
 # Temporary instance-type override without editing YAML:
-python -m loomlm.cli aws-test configs/aws-test.local.yaml --instance-type g6.xlarge
+python -m modelchef.cli aws-test configs/aws-test.local.yaml --instance-type g6.xlarge
 ```
 
 This prints the selected AMI, subnet, zone, current Spot price and reservation. It uses read-only AWS requests and does not provision resources or run the local test suite. Check rates and budget before launching. Pin `ami_id` from the plan when you need the same image on subsequent runs.
@@ -1106,7 +1189,7 @@ The budget validator includes the requested duration, three extra minutes, confi
 **This command creates billable AWS resources:**
 
 ```bash
-python -m loomlm.cli aws-test configs/aws-test.local.yaml --run
+python -m modelchef.cli aws-test configs/aws-test.local.yaml --run
 ```
 
 The runner performs this sequence automatically:
@@ -1120,16 +1203,16 @@ The runner performs this sequence automatically:
 7. Power off on success or failure; EC2 shutdown behavior is `terminate`. The controller monitors termination and its cleanup can escalate to force termination after a stalled shutdown.
 8. Save the report and remove the temporary schedule/security group after confirmed termination. The reusable scheduler role/group remain.
 
-The guest timeout starts during bootstrap; the cloud deadline is computed before launch. The controller's elapsed timeout includes provisioning setup. These safeguards reduce runaway costs but cannot guarantee instantaneous shutdown during AWS/API failures. No datasets are downloaded. The current cloud recipe runs source via PYTHONPATH in the DLAMI's preinstalled Python; it does not validate editable package installation there. DLAMI Python may differ from the project's local Python 3.11/3.12 target.
+The guest timeout starts during bootstrap; the cloud deadline is computed before launch. The controller's elapsed timeout includes provisioning setup. These safeguards reduce runaway costs but cannot guarantee instantaneous shutdown during AWS/API failures. No datasets are downloaded. The readiness test intentionally sends a minimal bundle: `guest_cli.py` provides the readiness commands while `diagnostics.py`, `progress.py` and smoke components share production checks. This fits EC2's user-data size limit; it is not a full training installation. The managed `aws-train` and `aws-serve` workflows package the full project. The current cloud recipe runs source via PYTHONPATH in the DLAMI's preinstalled Python; it does not validate editable package installation there. DLAMI Python may differ from the project's local Python 3.11/3.12 target.
 
 #### Recover cloud results and cleanup
 
-A run report under `artifacts/aws-runs/LOOMLM_RUN_ID/report.json` records the resolved image, source hash, instance ID, local preflight, console output and status. Look for **both** `test_passed: true` and `terminated: true`. Cloud tests exclude AWS controller tests because the controller is not installed on the guest. Tests may pass while cleanup is still pending.
+A run report under `artifacts/aws-runs/MODELCHEF_RUN_ID/report.json` records the resolved image, source hash, instance ID, local preflight, console output and status. Look for **both** `test_passed: true` and `terminated: true`. Cloud tests exclude AWS controller tests because the controller is not installed on the guest. Tests may pass while cleanup is still pending.
 
 If the terminal was interrupted or the termination waiter timed out:
 
 ```bash
-python -m loomlm.cli aws-reconcile LOOMLM_RUN_ID --path configs/aws-test.local.yaml
+python -m modelchef.cli aws-reconcile MODELCHEF_RUN_ID --path configs/aws-test.local.yaml
 ```
 
 Use the run ID from the saved ledger/report/error context. Reconciliation queries the journaled instance, saves console/results, and removes its temporary schedule/security group only when already terminated. **It does not terminate a still-running instance or launch anything.** Inspect the `terminated` field; command exit alone does not prove cleanup.
@@ -1137,8 +1220,8 @@ Use the run ID from the saved ledger/report/error context. Reconciliation querie
 If needed, explicitly terminate the instance using its saved ID, then reconcile again:
 
 ```bash
-aws ec2 terminate-instances --profile loomlm --region us-east-1 --instance-ids INSTANCE_ID
-aws ec2 describe-instances --profile loomlm --region us-east-1 --instance-ids INSTANCE_ID
+aws ec2 terminate-instances --profile modelchef --region us-east-1 --instance-ids INSTANCE_ID
+aws ec2 describe-instances --profile modelchef --region us-east-1 --instance-ids INSTANCE_ID
 ```
 
 A successful termination request can still report `shutting-down`. Confirm `terminated` and root-volume removal in EC2. The ledger is local and run-ID recovery after an early crash is limited; it is not a distributed job service.
@@ -1155,9 +1238,9 @@ Copy `configs/aws-training.yaml` to ignored `configs/aws-training.local.yaml`. F
 Your controller also needs S3 PutObject/GetObject permissions on that prefix and IAM PassRole for the selected instance role. The EC2 role must trust `ec2.amazonaws.com`; use temporary instance-role credentials rather than placing IAM keys in the bundle. Have your IAM administrator scope permissions to the actual bucket/prefix and role. This workflow does not create the bucket or instance profile.
 
 ```bash
-python -m loomlm.cli aws-train configs/aws-training.local.yaml
+python -m modelchef.cli aws-train configs/aws-training.local.yaml
 # Explicit provisioning, upload and cloud training:
-python -m loomlm.cli aws-train configs/aws-training.local.yaml --run
+python -m modelchef.cli aws-train configs/aws-training.local.yaml --run
 ```
 
 Before provisioning, the runner performs local tests/lint and an actual bounded two-step CPU data/training preflight. The controller therefore needs PyTorch and pipeline dependencies for `aws-train`, unlike the lightweight `aws-test` controller. It allowlists source/configuration and declared inputs, checks bundle size, reserves budget, uploads encrypted source, launches one Spot instance and attaches the supplied profile. It packages native pretraining and native parent/teacher stages; the managed bundler currently rejects external pretrained-model paths.
@@ -1168,7 +1251,7 @@ The guest arms a shutdown timer before package/data work, verifies the source ch
 
 This workflow packages a local compatible export and launches one on-demand NVIDIA G-series instance. A systemd service starts vLLM at boot and restarts it after failure. There is no training deadline, shutdown trap, Spot interruption policy or automatic cost-based shutdown. It is a single-host deployment, without autoscaling or high availability.
 
-1. Complete the local export and API configuration described in [inference and API serving](#inference-and-api-serving). Copy `configs/inference-public.yaml` to `configs/inference-public.local.yaml`; set the export path, port and context length. The serving bundle rewrites certificate paths for the guest and does not upload your local certificates or token.
+1. Complete the local export and API configuration described in [inference and API serving](#serve-your-model-inference-and-api). Copy `configs/inference-public.yaml` to `configs/inference-public.local.yaml`; set the export path, port and context length. The serving bundle rewrites certificate paths for the guest and does not upload your local certificates or token.
 2. Prepare an Amazon Linux-compatible x86 GPU image with working drivers, `/opt/pytorch/bin/activate`, systemd, a C compiler and an SSM agent. Supply its AMI ID and actual root-device name explicitly. Provide an existing subnet with outbound package/S3/Secrets Manager access, a restricted security group allowing only intended clients on the API TLS port, and an instance profile. No SSH port is opened by this code.
 3. Create a private S3 artifact bucket and a Secrets Manager secret with a JSON object containing `api_key`, `tls_cert` and `tls_key`. The token must be a random URL-safe string of at least 32 characters; the certificate chain and key are PEM strings, with escaped newlines in the JSON. Use a certificate trusted by clients for the hostname they will call. Store the secret through your own secure AWS tooling; never commit its values.
 4. Have your IAM administrator grant the controller scoped S3 uploads, EC2 launch/tag/read/stop/start/terminate, PassRole for the serving profile, and SSM SendCommand/read permissions. The instance role needs GetObject for its source prefix, GetSecretValue for this secret, and SSM managed-instance permissions; customer-managed encryption keys also need suitable decrypt permissions. The role receives temporary credentials; controller keys never enter the bundle. This runner reuses existing infrastructure and does not create IAM roles, secrets, buckets or security groups.
@@ -1176,19 +1259,19 @@ This workflow packages a local compatible export and launches one on-demand NVID
 6. Preview and deploy:
 
    ```bash
-   python -m loomlm.cli aws-serve configs/aws-serving.local.yaml
-   python -m loomlm.cli aws-serve configs/aws-serving.local.yaml --run
+   python -m modelchef.cli aws-serve configs/aws-serving.local.yaml
+   python -m modelchef.cli aws-serve configs/aws-serving.local.yaml --run
    ```
 
    Preview checks the local bundle without making service API calls. Deployment runs local tests/lint, uploads source/model with server-side encryption, launches on-demand EC2 with IMDSv2 and encrypted EBS, and records a deployment ID under ignored `artifacts/aws-serving/`. The guest fetches secret material into a protected directory and runs the API as a dedicated user. A successful launch response means provisioned, not API-ready; check the service logs and make an authenticated TLS request before sharing it.
 7. Manage the recorded deployment:
 
    ```bash
-   python -m loomlm.cli aws-serve configs/aws-serving.local.yaml --action status --deployment HOSTING_ID
-   python -m loomlm.cli aws-serve configs/aws-serving.local.yaml --action logs --deployment HOSTING_ID --run
-   python -m loomlm.cli aws-serve configs/aws-serving.local.yaml --action stop --deployment HOSTING_ID --run
-   python -m loomlm.cli aws-serve configs/aws-serving.local.yaml --action start --deployment HOSTING_ID --run
-   python -m loomlm.cli aws-serve configs/aws-serving.local.yaml --action delete --deployment HOSTING_ID --run
+   python -m modelchef.cli aws-serve configs/aws-serving.local.yaml --action status --deployment HOSTING_ID
+   python -m modelchef.cli aws-serve configs/aws-serving.local.yaml --action logs --deployment HOSTING_ID --run
+   python -m modelchef.cli aws-serve configs/aws-serving.local.yaml --action stop --deployment HOSTING_ID --run
+   python -m modelchef.cli aws-serve configs/aws-serving.local.yaml --action start --deployment HOSTING_ID --run
+   python -m modelchef.cli aws-serve configs/aws-serving.local.yaml --action delete --deployment HOSTING_ID --run
    ```
 
    Logs returns an SSM command ID; retrieve its output with `aws ssm get-command-invocation --command-id COMMAND_ID --instance-id INSTANCE_ID --profile YOUR_PROFILE --region YOUR_REGION`. Lifecycle commands report the requested transition; poll `status` to confirm it. Stop retains EBS and interrupts the API; start boots the installed service again. Delete terminates the host and deletes its configured root volume. Source objects, secrets and other pre-existing infrastructure remain.
@@ -1207,6 +1290,10 @@ Live hosting has not been deployed during development. Tests cover bundle bounda
 ```mermaid
 flowchart TD
     CLI[cli.py: parse commands] --> Config[run_config.py: strict recipe validation]
+    CLI --> Cook[workflow.py: ordered cook stages and final export]
+    Cook --> Pipeline
+    Config --> DDP[distributed.py: torchrun replicas and recovery]
+    DDP --> Pipeline
     CLI --> HW[hardware.py: detect and resolve device / precision]
     CLI --> PT[pretrained.py: download, import and stage recipes]
     CLI --> Tools[data_tools.py: format conversion and teacher responses]
@@ -1241,8 +1328,12 @@ flowchart TD
 | Code | Responsibility |
 | --- | --- |
 | `cli.py`, `run_config.py` | Command dispatch and strict, versioned configuration |
+| `diagnostics.py`, `guest_cli.py` | Shared environment checks and minimal EC2 readiness command entry point |
 | `hardware.py`, `engines.py` | Backend selection and native/local pretrained model adapters |
 | `corpus.py` | Bounded source snapshots, quality/PII/dedup/decontamination heuristics and document splits |
+| `workflow.py` | Ordered `cook` stages, parent/teacher links, reports and final export |
+| `distributed.py` | CPU/GPU DDP synchronization and per-rank checkpoint recovery |
+| `adapters.py`, `low_precision.py` | Native LoRA and optional CUDA QLoRA/NVFP4 integration |
 | `pipeline.py` | Stage explanations, BPE/packing, optimizer loop, checkpoints, recovery and run reports |
 | `model.py` | Custom decoder implementation used for from-scratch experiments |
 | `objectives.py` | Response masking, DPO reference likelihoods, verifiable-reward rollouts and teacher KL |
@@ -1279,6 +1370,7 @@ flowchart TD
 
 | Command | Purpose |
 | --- | --- |
+| `cook WORKFLOW [--run]` | Plan or execute ordered local stage recipes and final export |
 | `pipeline CONFIG [--run] [--resume CHECKPOINT]` | Strict recipe validation or narrated training stage on the current host |
 | `chat RUN_DIR [--backend torch\|vllm]` | CLI inference from a completed training run |
 | `export RUN_DIR` | Export trained model/tokenizer for HF-compatible inference |
@@ -1303,9 +1395,9 @@ flowchart TD
 | `aws-test [CONFIG] [--instance-type TYPE] [--run]` | Preview or execute a budget-reserved Spot test |
 | `aws-reconcile RUN_ID [--path CONFIG]` | Recover cloud results and finish cleanup after termination |
 
-Use `python -m loomlm.cli COMMAND --help` for flags.
+Use `python -m modelchef.cli COMMAND --help` for flags.
 
-- `src/loomlm/`: CLI, corpus processing, tokenizer/model training, benchmarks, inference, hardware policy and AWS runner.
+- `src/modelchef/`: CLI, corpus processing, tokenizer/model training, benchmarks, inference, hardware policy and AWS runner.
 - `configs/`: versioned portable defaults; `*.local.yaml` stays local.
 - `tests/`: unit tests and small integration checks.
 - `scripts/`: optional setup and diagnostic helpers.

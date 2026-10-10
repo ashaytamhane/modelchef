@@ -1,0 +1,19 @@
+# A continuation template for cook; parent geometry/tokenizer are inherited.
+name: instructions
+data:
+  provider: local_jsonl
+  local_path: data/raw/sft.jsonl
+  max_documents: 256
+  max_tokens: 200000
+processing:
+  min_chars: 1
+  near_dedup: false
+training:
+  steps: 40
+  warmup_steps: 4
+  learning_rate: 0.00005
+evaluation:
+  benchmark: none
+stage:
+  kind: sft
+  parent_run: RESOLVED_BY_COOK

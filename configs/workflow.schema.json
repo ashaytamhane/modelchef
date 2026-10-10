@@ -1,0 +1,108 @@
+{
+  "$defs": {
+    "WorkflowStage": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "title": "Name",
+          "type": "string"
+        },
+        "recipe": {
+          "title": "Recipe",
+          "type": "string"
+        },
+        "parent_stage": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Stage"
+        },
+        "teacher_stage": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Teacher Stage"
+        },
+        "inherit_architecture": {
+          "default": true,
+          "title": "Inherit Architecture",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "recipe"
+      ],
+      "title": "WorkflowStage",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "name": {
+      "default": "cook",
+      "pattern": "^[a-zA-Z0-9_-]+$",
+      "title": "Name",
+      "type": "string"
+    },
+    "output_dir": {
+      "default": "artifacts/workflows",
+      "title": "Output Dir",
+      "type": "string"
+    },
+    "imported_model": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Imported Model"
+    },
+    "imported_context": {
+      "default": 128,
+      "minimum": 8,
+      "title": "Imported Context",
+      "type": "integer"
+    },
+    "stages": {
+      "items": {
+        "$ref": "#/$defs/WorkflowStage"
+      },
+      "minItems": 1,
+      "title": "Stages",
+      "type": "array"
+    },
+    "export": {
+      "default": true,
+      "title": "Export",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "stages"
+  ],
+  "title": "Workflow",
+  "type": "object"
+}

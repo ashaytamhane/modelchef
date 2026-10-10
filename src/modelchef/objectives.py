@@ -6,7 +6,7 @@ import unicodedata
 import torch
 import torch.nn.functional as F
 
-from loomlm.corpus import PII, process
+from modelchef.corpus import PII, process
 
 
 def format_prompt(text):
@@ -227,7 +227,13 @@ def objective(model, parts, c, reference=None, tokenizer=None):
         with torch.no_grad():
             reference_chosen = sequence_logps(reference, cx, cy)
             reference_rejected = sequence_logps(reference, rx, ry)
-        return dpo_loss(sequence_logps(model, cx, cy), sequence_logps(model, rx, ry),
+        # One policy forward keeps DDP's unused-parameter traversal correct for sparse experts.
+        logits = model(torch.cat((cx, rx))).float()
+        targets = torch.cat((cy, ry))
+        mask = targets != -100
+        logps = logits.log_softmax(-1).gather(-1, targets.clamp_min(0).unsqueeze(-1)).squeeze(-1)
+        chosen, rejected = (logps * mask).sum(-1).split(len(cx))
+        return dpo_loss(chosen, rejected,
                         reference_chosen, reference_rejected, c.stage.dpo_beta), {}
     if c.stage.kind == 'rlvr':
         return rlvr_loss(model, reference, *parts, tokenizer, c)

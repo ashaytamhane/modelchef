@@ -4,7 +4,7 @@ import io
 import json
 from pathlib import Path
 
-from loomlm.corpus import digest
+from modelchef.corpus import digest
 
 
 def convert_data(source, output, format='jsonl', max_bytes=10_000_000, max_documents=1000):
@@ -38,11 +38,11 @@ def teacher_responses(teacher, prompts, output, max_documents=32, max_bytes=1_00
                       max_tokens=32, temperature=0.8):
     import torch
 
-    from loomlm.chat import checkpoint_for
-    from loomlm.engines import create_model, load_tokenizer
-    from loomlm.hardware import detect_hardware, resolve_runtime
-    from loomlm.objectives import format_prompt
-    from loomlm.run_config import RunConfig
+    from modelchef.chat import checkpoint_for
+    from modelchef.engines import create_model, load_tokenizer
+    from modelchef.hardware import detect_hardware, resolve_runtime
+    from modelchef.objectives import format_prompt
+    from modelchef.run_config import RunConfig
 
     if min(max_documents, max_bytes, max_tokens) < 1 or temperature <= 0:
         raise ValueError('Teacher generation limits/temperature must be positive')

@@ -1,5 +1,5 @@
 inference:
-  model_path: artifacts/exports/loomlm  # Local Hugging Face export; not a .pt checkpoint
+  model_path: artifacts/exports/modelchef  # Local Hugging Face export; not a .pt checkpoint
   dtype: auto
   quantization: none  # nvfp4_per_token requires supported Blackwell CUDA hardware.
   gpu_memory_utilization: 0.5
@@ -9,7 +9,7 @@ inference:
   port: 8000
   host: 127.0.0.1
   security:
-    api_key_env: LOOMLM_API_KEY
+    api_key_env: MODELCHEF_API_KEY
     max_body_bytes: 1048576
     requests_per_minute: 30
     max_concurrent_requests: 2

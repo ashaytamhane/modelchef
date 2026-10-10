@@ -3,13 +3,13 @@ import json
 
 import pytest
 
-from loomlm.api_security import SecurityMiddleware
+from modelchef.api_security import SecurityMiddleware
 
 
 def test_security_boundary(monkeypatch):
     token = 'x' * 48
     monkeypatch.setenv('TEST_KEY', token)
-    monkeypatch.setenv('LOOMLM_API_SECURITY', json.dumps({
+    monkeypatch.setenv('MODELCHEF_API_SECURITY', json.dumps({
         'api_key_env': 'TEST_KEY', 'requests_per_minute': 20,
         'max_concurrent_requests': 1, 'max_body_bytes': 100,
         'request_timeout_seconds': 1}))
@@ -46,7 +46,7 @@ def test_security_boundary(monkeypatch):
 
 
 def test_weak_secret_rejected(monkeypatch):
-    monkeypatch.setenv('LOOMLM_API_SECURITY', '{"api_key_env":"TEST_KEY"}')
+    monkeypatch.setenv('MODELCHEF_API_SECURITY', '{"api_key_env":"TEST_KEY"}')
     monkeypatch.setenv('TEST_KEY', 'weak')
     with pytest.raises(ValueError, match='32'):
         SecurityMiddleware(None)
@@ -54,7 +54,7 @@ def test_weak_secret_rejected(monkeypatch):
 
 def test_timeout_releases_capacity(monkeypatch):
     monkeypatch.setenv('TEST_KEY', 'x' * 48)
-    monkeypatch.setenv('LOOMLM_API_SECURITY', json.dumps({
+    monkeypatch.setenv('MODELCHEF_API_SECURITY', json.dumps({
         'api_key_env': 'TEST_KEY', 'requests_per_minute': 20,
         'max_concurrent_requests': 1, 'max_body_bytes': 100,
         'request_timeout_seconds': 0.01}))

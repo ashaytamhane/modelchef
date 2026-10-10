@@ -43,7 +43,8 @@
           "default": "none",
           "enum": [
             "none",
-            "fp4_fake"
+            "fp4_fake",
+            "nvfp4"
           ],
           "title": "Quantization",
           "type": "string"
@@ -73,10 +74,31 @@
           "title": "Custom Swiglu Path"
         },
         "type": {
-          "const": "decoder_rope",
           "default": "decoder_rope",
+          "enum": [
+            "decoder_rope",
+            "decoder_moe"
+          ],
           "title": "Type",
           "type": "string"
+        },
+        "num_experts": {
+          "default": 4,
+          "minimum": 2,
+          "title": "Num Experts",
+          "type": "integer"
+        },
+        "experts_per_token": {
+          "default": 2,
+          "minimum": 1,
+          "title": "Experts Per Token",
+          "type": "integer"
+        },
+        "router_aux_loss_coef": {
+          "default": 0.01,
+          "minimum": 0,
+          "title": "Router Aux Loss Coef",
+          "type": "number"
         },
         "layers": {
           "default": 6,
@@ -344,7 +366,8 @@
           "default": "none",
           "enum": [
             "none",
-            "lora"
+            "lora",
+            "qlora"
           ],
           "title": "Method",
           "type": "string"
@@ -378,6 +401,20 @@
         "use_rslora": {
           "default": false,
           "title": "Use Rslora",
+          "type": "boolean"
+        },
+        "compute_dtype": {
+          "default": "bf16",
+          "enum": [
+            "bf16",
+            "fp16"
+          ],
+          "title": "Compute Dtype",
+          "type": "string"
+        },
+        "double_quant": {
+          "default": true,
+          "title": "Double Quant",
           "type": "boolean"
         }
       },
@@ -653,6 +690,21 @@
     "Training": {
       "additionalProperties": false,
       "properties": {
+        "distributed": {
+          "default": "none",
+          "enum": [
+            "none",
+            "ddp"
+          ],
+          "title": "Distributed",
+          "type": "string"
+        },
+        "distributed_timeout_seconds": {
+          "default": 300,
+          "exclusiveMinimum": 0,
+          "title": "Distributed Timeout Seconds",
+          "type": "integer"
+        },
         "compile": {
           "default": false,
           "title": "Compile",

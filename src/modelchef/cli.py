@@ -8,32 +8,17 @@ from pathlib import Path
 
 import yaml
 
-from loomlm.hardware import detect_hardware, resolve_runtime, setup_plan
-from loomlm.progress import operation, report
-
-
-def check_environment() -> dict:
-    result = detect_hardware(progress=report)
-    try:
-        import torch
-    except ImportError:
-        result["next_action"] = "Run loomlm setup to inspect a hardware-aware installation plan."
-        return result
-    result["torch_installed"] = True
-    result["torch_version"] = torch.__version__
-    result["cuda_build"] = torch.version.cuda
-    result["cuda_available"] = torch.cuda.is_available()
-    if result["cuda_available"]:
-        report('Running a small GPU matrix multiplication and checking finite results.')
-        x = torch.randn(256, 256, device="cuda")
-        result["cuda_matmul_smoke_test"] = bool(torch.isfinite(x @ x).all().item())
-        report('GPU matrix multiplication check finished.')
-    return result
+from modelchef.diagnostics import check_environment
+from modelchef.hardware import detect_hardware, resolve_runtime, setup_plan
+from modelchef.progress import operation
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="loomlm")
+    parser = argparse.ArgumentParser(prog="modelchef")
     command = parser.add_subparsers(dest="command", required=True)
+    workflow_parser = command.add_parser('cook', help='Plan/run a sequence of local stage recipes')
+    workflow_parser.add_argument('path', type=Path)
+    workflow_parser.add_argument('--run', action='store_true')
     command.add_parser("doctor", help="Inspect Python, PyTorch and CUDA")
     config_parser = command.add_parser("check-config", help="Validate initial YAML config")
     config_parser.add_argument("path", type=Path)
@@ -135,8 +120,11 @@ def main() -> None:
                                help="Hide CLI progress on stderr")
     args = parser.parse_args()
     with operation(args.command, args.quiet):
-        if args.command == 'aws-serve':
-            from loomlm.aws_serving import ServingRunner
+        if args.command == 'cook':
+            from modelchef.workflow import cook
+            print(json.dumps(cook(args.path, Path.cwd(), args.run), indent=2, default=str))
+        elif args.command == 'aws-serve':
+            from modelchef.aws_serving import ServingRunner
             settings = yaml.safe_load(args.path.read_text())['aws_serving']
             runner = ServingRunner(settings, Path.cwd())
             if args.action == 'deploy':
@@ -150,57 +138,57 @@ def main() -> None:
                           'note': 'Add --run to execute this hosting lifecycle command'}
             print(json.dumps(result, indent=2, default=str))
         elif args.command == 'convert-data':
-            from loomlm.data_tools import convert_data
+            from modelchef.data_tools import convert_data
             print(json.dumps(convert_data(args.source, args.output, args.format, args.max_bytes,
                                           args.max_documents), indent=2))
         elif args.command == 'teacher-data':
-            from loomlm.data_tools import teacher_responses
+            from modelchef.data_tools import teacher_responses
             print(json.dumps(teacher_responses(args.teacher, args.prompts, args.output,
                                               args.max_documents, max_tokens=args.max_tokens), indent=2))
         elif args.command == 'compare':
-            from loomlm.comparison import compare
+            from modelchef.comparison import compare
             print(json.dumps(compare(args.run_dir, args.baseline, args.output), indent=2))
         elif args.command == 'evaluate-standard':
-            from loomlm.comparison import standard_plan
+            from modelchef.comparison import standard_plan
             print(json.dumps(standard_plan(args.model_path, args.tasks, args.limit,
                                            args.output, args.run), indent=2))
         elif args.command == 'download-model':
-            from loomlm.pretrained import download_model
+            from modelchef.pretrained import download_model
             print(json.dumps(download_model(args.repo, Path.cwd(), args.revision,
                                             args.max_bytes, args.run), indent=2))
         elif args.command == 'import-model':
-            from loomlm.pretrained import register_model
+            from modelchef.pretrained import register_model
             print(register_model(args.path, Path.cwd(), args.context))
         elif args.command == 'init-student':
-            from loomlm.pretrained import initialize_student
+            from modelchef.pretrained import initialize_student
             architecture = yaml.safe_load(args.architecture.read_text()) if args.architecture else None
             print(initialize_student(args.teacher, Path.cwd(), architecture))
         elif args.command == 'stage-config':
-            from loomlm.pretrained import stage_config
+            from modelchef.pretrained import stage_config
             print(stage_config(args.parent, args.kind, args.data, args.output, args.steps, args.teacher,
                                args.reasoning))
         elif args.command == 'check-cuda-kernel':
-            from loomlm.execution import check_custom_kernel
+            from modelchef.execution import check_custom_kernel
             print(json.dumps(check_custom_kernel(args.path), indent=2))
         elif args.command == "chat":
-            from loomlm.chat import chat
+            from modelchef.chat import chat
             chat(args.run_dir, args.backend, args.prompt, args.max_tokens, args.temperature, args.top_k)
         elif args.command == "export":
-            from loomlm.chat import export_model
+            from modelchef.chat import export_model
             print(export_model(args.run_dir))
         elif args.command == "pipeline":
-            from loomlm.run_config import RunConfig
+            from modelchef.run_config import RunConfig
             with args.path.open(encoding="utf-8") as stream:
                 config = RunConfig.model_validate(yaml.safe_load(stream))
             if args.run:
-                from loomlm.pipeline import run_pipeline
+                from modelchef.pipeline import run_pipeline
                 run_pipeline(config, Path.cwd(), args.resume)
             else:
                 print("Validated plan only: no dataset download, training or AWS launch. "
                       "Add --run to execute on this machine.")
                 print(json.dumps(config.model_dump(mode="json"), indent=2))
         elif args.command in {"aws-test", "aws-train", "aws-reconcile"}:
-            from loomlm.aws_runner import SpotRunner
+            from modelchef.aws_runner import SpotRunner
             with args.path.open(encoding="utf-8") as stream:
                 settings = yaml.safe_load(stream)["aws_test"]
             if args.command == 'aws-train' and not settings.get('pipeline_config'):
@@ -219,7 +207,7 @@ def main() -> None:
             if getattr(args, "run", False) and not result.get("test_passed"):
                 parser.exit(1, "Spot instance terminated; test success not confirmed in console output\n")
         elif args.command in {"setup-vllm", "serve-vllm"}:
-            from loomlm.inference import launch_server, serve_plan, vllm_setup_plan
+            from modelchef.inference import launch_server, serve_plan, vllm_setup_plan
             try:
                 if args.command == "setup-vllm":
                     plan = vllm_setup_plan(args.root, detect_hardware(), args.version)
@@ -259,7 +247,7 @@ def main() -> None:
             except (ValueError, subprocess.SubprocessError) as error:
                 parser.error(str(error))
         elif args.command == "smoke":
-            from loomlm.smoke import run_smoke
+            from modelchef.smoke import run_smoke
             try:
                 print(json.dumps(run_smoke(args.accelerator, args.precision), indent=2))
             except (ValueError, ImportError) as error:

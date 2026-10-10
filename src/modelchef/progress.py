@@ -7,6 +7,7 @@ from contextlib import contextmanager
 _state = threading.local()
 
 _activities = {
+    'cook': 'Planning or executing the configured sequence of local training-stage recipes.',
     'doctor': 'Checking Python, PyTorch, hardware availability and GPU arithmetic.',
     'setup': 'Inspecting hardware and preparing the requested PyTorch installation.',
     'setup-vllm': 'Checking inference prerequisites and preparing the vLLM installation.',
@@ -36,7 +37,7 @@ _activities = {
 def report(message):
     import sys
     if not getattr(_state, 'quiet', False):
-        print(f'[LoomLM] {message}', file=sys.stderr, flush=True)
+        print(f'[ModelChef] {message}', file=sys.stderr, flush=True)
 
 
 @contextmanager
@@ -49,7 +50,7 @@ def operation(command, quiet=False, interval=10):
     def heartbeat():
         while not stop.wait(interval):
             import sys
-            print(f'[LoomLM] {command} still running ({time.monotonic() - started:.0f}s elapsed).',
+            print(f'[ModelChef] {command} still running ({time.monotonic() - started:.0f}s elapsed).',
                   file=sys.stderr, flush=True)
 
     worker = None

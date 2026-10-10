@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from loomlm.aws_runner import Ledger, SpotRunner, budget_reservation, user_data
+from modelchef.aws_runner import Ledger, SpotRunner, budget_reservation, user_data
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ def test_run_terminates_after_test_or_watchdog_failure(
     from botocore.exceptions import WaiterError
 
     calls = []
-    monkeypatch.setattr("loomlm.aws_runner.local_preflight", lambda _: {"passed": True})
+    monkeypatch.setattr("modelchef.aws_runner.local_preflight", lambda _: {"passed": True})
     runner = SpotRunner.__new__(SpotRunner)
     runner.root, runner.settings, runner.account = tmp_path, settings, "test-account"
     runner.plan = lambda: {"user_data": "test", "vpc_id": "vpc-test", "ami_id": "ami-test",
@@ -79,7 +79,7 @@ def test_run_terminates_after_test_or_watchdog_failure(
             {"InstanceId": "i-test", "State": {"Name": "terminated"}}]}]},
         terminate_instances=lambda **kw: calls.append("force" if kw.get("Force") else "terminate"),
         get_waiter=lambda _: SimpleNamespace(wait=wait),
-        get_console_output=lambda **kw: {"Output": "LOOMLM_RESULT=0"},
+        get_console_output=lambda **kw: {"Output": "MODELCHEF_RESULT=0"},
         delete_security_group=lambda **kw: calls.append("delete-sg"))
     if scheduler_fails:
         with pytest.raises(RuntimeError, match="schedule failed"):
@@ -95,9 +95,9 @@ def test_run_terminates_after_test_or_watchdog_failure(
 def test_failed_local_preflight_prevents_cloud_plan(settings, tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from loomlm.aws_runner import local_preflight
+    from modelchef.aws_runner import local_preflight
 
-    monkeypatch.setattr("loomlm.aws_runner.subprocess.run", lambda *a, **kw:
+    monkeypatch.setattr("modelchef.aws_runner.subprocess.run", lambda *a, **kw:
                         SimpleNamespace(returncode=1, stdout="test failed", stderr=""))
     runner = SpotRunner.__new__(SpotRunner)
     runner.settings, runner.root = settings, tmp_path
@@ -113,14 +113,14 @@ def test_training_uploads_bundle_and_terminates_before_result_fetch(settings, tm
     import io
     from types import SimpleNamespace
 
-    from loomlm.aws_runner import SpotRunner
+    from modelchef.aws_runner import SpotRunner
 
     calls = []
     settings.update(pipeline_config='job.yaml', artifact_bucket='test-bucket',
                     instance_profile_name='test-profile')
-    monkeypatch.setattr('loomlm.aws_runner.local_preflight', lambda _: {'passed': True})
-    monkeypatch.setattr('loomlm.aws_training.build_bundle', lambda *a: b'allowed-source')
-    monkeypatch.setattr('loomlm.aws_training.training_preflight', lambda *a: {'passed': True})
+    monkeypatch.setattr('modelchef.aws_runner.local_preflight', lambda _: {'passed': True})
+    monkeypatch.setattr('modelchef.aws_training.build_bundle', lambda *a: b'allowed-source')
+    monkeypatch.setattr('modelchef.aws_training.training_preflight', lambda *a: {'passed': True})
     runner = SpotRunner.__new__(SpotRunner)
     runner.root, runner.settings, runner.account = tmp_path, settings, 'test-account'
     runner.plan = lambda: {'user_data': 'preview', 'vpc_id': 'vpc-test', 'ami_id': 'ami-test',
@@ -136,7 +136,7 @@ def test_training_uploads_bundle_and_terminates_before_result_fetch(settings, tm
         create_security_group=lambda **kw: {'GroupId': 'sg-test'}, run_instances=launch,
         describe_instances=lambda **kw: {'Reservations': [{'Instances': [
             {'InstanceId': 'i-test', 'State': {'Name': 'terminated'}}]}]},
-        get_console_output=lambda **kw: {'Output': 'LOOMLM_RESULT=0'},
+        get_console_output=lambda **kw: {'Output': 'MODELCHEF_RESULT=0'},
         delete_security_group=lambda **kw: calls.append(('cleanup', kw)))
     runner.scheduler = SimpleNamespace(create_schedule=lambda **kw: None,
                                       delete_schedule=lambda **kw: None)
@@ -163,7 +163,7 @@ def test_reconcile_preserves_watchdog_until_terminated(settings, tmp_path, state
     runner.ec2 = SimpleNamespace(
         describe_instances=lambda **kw: {"Reservations": [{"Instances": [
             {"State": {"Name": state}}]}]},
-        get_console_output=lambda **kw: {"Output": "LOOMLM_RESULT=0"},
+        get_console_output=lambda **kw: {"Output": "MODELCHEF_RESULT=0"},
         describe_security_groups=lambda **kw: {"SecurityGroups": [{"GroupId": "sg-test"}]},
         delete_security_group=lambda **kw: calls.append("delete-sg"))
     runner.scheduler = SimpleNamespace(delete_schedule=lambda **kw: calls.append("delete-schedule"))

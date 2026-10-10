@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
-from loomlm.execution import attention_context, custom_swiglu
+from modelchef.execution import attention_context, custom_swiglu
 
 
 class RMSNorm(nn.Module):
@@ -60,10 +60,16 @@ class Block(nn.Module):
         self.up = nn.Linear(c.hidden_size, c.intermediate_size, bias=c.bias)
         self.down = nn.Linear(c.intermediate_size, c.hidden_size, bias=c.bias)
         self.dropout = nn.Dropout(c.residual_dropout)
+        if c.type == 'decoder_moe':
+            from modelchef.moe import SparseExperts
+            del self.gate, self.up, self.down
+            self.moe = SparseExperts(c)
 
     def forward(self, x):
         x = x + self.dropout(self.attention(self.attention_norm(x)))
         y = self.ffn_norm(x)
+        if self.config.type == 'decoder_moe':
+            return x + self.dropout(self.moe(y))
         gate, up = self.gate(y), self.up(y)
         activation = (custom_swiglu(self.config.custom_swiglu_path, gate, up)
                       if self.config.custom_swiglu_path else F.silu(gate) * up)
@@ -96,3 +102,9 @@ class Decoder(nn.Module):
             x = checkpoint(block, x, use_reentrant=False) if (
                 self.training and self.config.gradient_checkpointing) else block(x)
         return self.head(self.norm(x))
+
+    @property
+    def auxiliary_loss(self):
+        losses = [block.moe.auxiliary_loss for block in self.blocks
+                  if hasattr(block, 'moe') and block.moe.auxiliary_loss is not None]
+        return sum(losses) if losses else None

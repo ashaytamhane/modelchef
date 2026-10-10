@@ -44,7 +44,7 @@ def plugin_fingerprint(path):
 
 @lru_cache(maxsize=8)
 def _load_plugin(path, fingerprint):
-    spec = importlib.util.spec_from_file_location('loomlm_cuda_' + fingerprint[:12],
+    spec = importlib.util.spec_from_file_location('modelchef_cuda_' + fingerprint[:12],
                                                  Path(path) / 'kernel.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

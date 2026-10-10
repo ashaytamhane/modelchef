@@ -9,10 +9,10 @@ import yaml
 
 pytest.importorskip('pydantic')
 
-from loomlm.aws_training import build_bundle, training_user_data
-from loomlm.data_tools import convert_data
-from loomlm.pretrained import download_model
-from loomlm.run_config import RunConfig
+from modelchef.aws_training import build_bundle, training_user_data
+from modelchef.data_tools import convert_data
+from modelchef.pretrained import download_model
+from modelchef.run_config import RunConfig
 
 
 def test_converter_is_bounded_and_does_not_overwrite(tmp_path):
@@ -45,8 +45,8 @@ def test_download_plan_pins_revision_and_enforces_cap_before_download(tmp_path, 
 
 
 def test_aws_bundle_allowlists_code_and_declared_data(tmp_path):
-    (tmp_path / 'src/loomlm').mkdir(parents=True)
-    (tmp_path / 'src/loomlm/__init__.py').write_text('')
+    (tmp_path / 'src/modelchef').mkdir(parents=True)
+    (tmp_path / 'src/modelchef/__init__.py').write_text('')
     (tmp_path / 'pyproject.toml').write_text('[project]\nname="test"')
     (tmp_path / '.env').write_text('DO_NOT_UPLOAD=secret')
     (tmp_path / 'data.jsonl').write_text('{"text":"Example"}\n')
@@ -87,7 +87,7 @@ def test_stage_configuration_requires_parent_and_teacher():
 
 
 def test_peft_requires_supported_backend_stage_and_quantization():
-    with pytest.raises(ValueError, match='Hugging Face'):
+    with pytest.raises(ValueError, match='trained parent'):
         RunConfig(model={'peft': {'method': 'lora'}})
     settings = {'model': {'backend': 'huggingface', 'pretrained_path': 'local',
                          'peft': {'method': 'lora'}},
@@ -95,5 +95,5 @@ def test_peft_requires_supported_backend_stage_and_quantization():
                 'stage': {'kind': 'sft', 'parent_run': 'parent'}}
     assert RunConfig.model_validate(settings).model.peft.rank == 8
     settings['model']['quantization'] = 'fp4_fake'
-    with pytest.raises(ValueError, match='QLoRA'):
+    with pytest.raises(ValueError, match='FP4'):
         RunConfig.model_validate(settings)

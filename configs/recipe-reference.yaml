@@ -46,19 +46,24 @@ tokenizer:  # OPTIONAL: defaults are supplied when omitted.
   append_eos: true  # OPTIONAL: Raw-text document separator; structured stages always append response EOS.
 model:  # OPTIONAL: defaults are supplied when omitted.
   peft:  # OPTIONAL: Parameter-efficient training; imported HF midtrain/SFT only.
-    method: none  # OPTIONAL: none | lora; QLoRA is not implemented.
+    method: none  # OPTIONAL: none | lora | qlora; adapters require a continuation parent.
     rank: 8  # OPTIONAL: Positive adapter rank.
     alpha: 16  # OPTIONAL: Positive adapter scaling factor.
     dropout: 0.0  # OPTIONAL: Adapter dropout in [0, 1).
     target_modules: [q_proj, v_proj]  # OPTIONAL: Must match the imported model; GPT-2 uses c_attn.
     use_rslora: false  # OPTIONAL: Rank-stabilized scaling.
+    compute_dtype: bf16  # OPTIONAL: QLoRA compute: bf16 | fp16.
+    double_quant: true  # OPTIONAL: QLoRA nested quantization.
   backend: native  # OPTIONAL: native | huggingface; use import-model to configure a local pretrained adapter.
   pretrained_path: null  # CONDITIONAL: Required local source directory for the huggingface backend.
   pretrained_config_sha256: null  # OPTIONAL: Filled by import-model; validates the original HF config on loading.
-  quantization: none  # OPTIONAL: none | fp4_fake; software simulation, not packed/native FP4 training.
+  quantization: none  # OPTIONAL: none | fp4_fake | nvfp4; nvfp4 requires native dense Blackwell integration.
   attention_kernel: auto  # OPTIONAL: auto | math | flash | efficient | cudnn; explicit optimized choices require a compatible GPU.
   custom_swiglu_path: null  # OPTIONAL: Native CUDA only: set kernels/swiglu after correctness checks; rejected by managed aws-train.
-  type: decoder_rope  # OPTIONAL: Only decoder_rope for the native model; not a free-form architecture selector.
+  type: decoder_rope  # OPTIONAL: decoder_rope | decoder_moe; applies to native architecture.
+  num_experts: 4  # OPTIONAL: MoE expert count.
+  experts_per_token: 2  # OPTIONAL: MoE top-k; <= num_experts.
+  router_aux_loss_coef: 0.01  # OPTIONAL: MoE load-balancing loss weight.
   layers: 6  # OPTIONAL: defaults are supplied when omitted.
   hidden_size: 512  # OPTIONAL: Must divide evenly by attention_heads; head dimension must be even.
   attention_heads: 8  # OPTIONAL: Must divide evenly by kv_heads.
@@ -76,6 +81,8 @@ model:  # OPTIONAL: defaults are supplied when omitted.
   init_std: 0.02  # OPTIONAL: defaults are supplied when omitted.
   gradient_checkpointing: false  # OPTIONAL: Recompute activations during backward to trade compute for memory.
 training:  # OPTIONAL: defaults are supplied when omitted.
+  distributed: none  # OPTIONAL: none | ddp; DDP launches with torchrun.
+  distributed_timeout_seconds: 300  # OPTIONAL: process-group timeout.
   compile: false  # OPTIONAL: Opt in to torch.compile; default leaves execution eager.
   compile_backend: inductor  # OPTIONAL: inductor | aot_eager | eager.
   compile_mode: default  # OPTIONAL: default | reduce-overhead | max-autotune; used only with inductor.

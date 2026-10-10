@@ -1,6 +1,6 @@
 import pytest
 
-from loomlm.hardware import resolve_runtime, setup_plan
+from modelchef.hardware import resolve_runtime, setup_plan
 
 
 @pytest.mark.parametrize("backend,bf16,device,precision", [
@@ -29,24 +29,24 @@ def test_reject_invalid_or_unavailable(runtime):
 
 
 def test_cpu_install_plan(monkeypatch):
-    monkeypatch.setattr("loomlm.hardware.shutil.which", lambda _: None)
-    monkeypatch.setattr("loomlm.hardware.platform.system", lambda: "Linux")
+    monkeypatch.setattr("modelchef.hardware.shutil.which", lambda _: None)
+    monkeypatch.setattr("modelchef.hardware.platform.system", lambda: "Linux")
     plan = setup_plan()
     assert plan["backend"] == "cpu"
     assert "https://download.pytorch.org/whl/cpu" in plan["command"]
 
 
 def test_rocm_requires_explicit_wheel_index(monkeypatch):
-    monkeypatch.setattr("loomlm.hardware.shutil.which", lambda _: None)
-    monkeypatch.setattr("loomlm.hardware.platform.system", lambda: "Linux")
+    monkeypatch.setattr("modelchef.hardware.shutil.which", lambda _: None)
+    monkeypatch.setattr("modelchef.hardware.platform.system", lambda: "Linux")
     with pytest.raises(ValueError, match="index-url"):
         setup_plan("rocm")
 
 
 def test_old_nvidia_driver_rejected(monkeypatch):
     from types import SimpleNamespace
-    monkeypatch.setattr("loomlm.hardware.shutil.which", lambda _: "/usr/bin/nvidia-smi")
-    monkeypatch.setattr("loomlm.hardware.subprocess.run",
+    monkeypatch.setattr("modelchef.hardware.shutil.which", lambda _: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr("modelchef.hardware.subprocess.run",
                         lambda *a, **kw: SimpleNamespace(returncode=0, stdout="535.0\n"))
     with pytest.raises(ValueError, match="580"):
         setup_plan("cuda")
@@ -54,7 +54,7 @@ def test_old_nvidia_driver_rejected(monkeypatch):
 
 def test_cpu_training_checkpoint():
     pytest.importorskip("torch")
-    from loomlm.smoke import run_smoke
+    from modelchef.smoke import run_smoke
     result = run_smoke("cpu", "fp32")
     assert result["checkpoint_recovery"] == "passed"
 
@@ -68,12 +68,12 @@ def test_fp16_requires_scaler():
 def test_setup_default_does_not_install(monkeypatch, capsys):
     import sys
 
-    from loomlm.cli import main
+    from modelchef.cli import main
 
-    monkeypatch.setattr(sys, "argv", ["loomlm", "setup", "--backend", "cpu"])
-    monkeypatch.setattr("loomlm.hardware.shutil.which", lambda _: None)
+    monkeypatch.setattr(sys, "argv", ["modelchef", "setup", "--backend", "cpu"])
+    monkeypatch.setattr("modelchef.hardware.shutil.which", lambda _: None)
     def forbidden_install(*args, **kwargs):
         pytest.fail("Dry-run setup attempted installation")
-    monkeypatch.setattr("loomlm.cli.subprocess.run", forbidden_install)
+    monkeypatch.setattr("modelchef.cli.subprocess.run", forbidden_install)
     main()
     assert '"command"' in capsys.readouterr().out

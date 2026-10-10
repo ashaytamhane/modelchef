@@ -13,12 +13,12 @@ import torch
 import torch.nn.functional as F
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
-from loomlm.benchmarks import acquire_benchmark, evaluate_choices, select_benchmark
-from loomlm.corpus import acquire, digest, process
-from loomlm.engines import create_model, load_parent, load_tokenizer
-from loomlm.execution import check_custom_kernel, configure_execution, plugin_fingerprint
-from loomlm.hardware import detect_hardware, resolve_runtime
-from loomlm.objectives import evaluate_stage, objective, pack_structured, prepare_structured
+from modelchef.benchmarks import acquire_benchmark, evaluate_choices, select_benchmark
+from modelchef.corpus import acquire, digest, process
+from modelchef.engines import create_model, load_parent, load_tokenizer
+from modelchef.execution import check_custom_kernel, configure_execution, plugin_fingerprint
+from modelchef.hardware import detect_hardware, resolve_runtime
+from modelchef.objectives import evaluate_stage, objective, pack_structured, prepare_structured
 
 
 class Narrator:
@@ -87,14 +87,27 @@ def evaluate(model, blocks, batches, batch_size, device, amp):
             "perplexity_capped": nll > 80}
 
 
-def run_pipeline(config, root, resume=None):
+def run_pipeline(config, root, resume=None, prepare_only=False):
     root = Path(root).resolve()
+    if config.training.distributed == 'ddp' and not prepare_only:
+        from modelchef.distributed import run_distributed
+        return run_distributed(config, root, resume)
+    if config.model.peft.method == 'qlora':
+        from modelchef.chat import export_model
+        from modelchef.run_config import RunConfig
+        parent_dir = (root / config.stage.parent_run).resolve()
+        parent_recipe = RunConfig.model_validate_json((parent_dir / 'config.json').read_text())
+        if parent_recipe.model.peft.method == 'none':
+            source = export_model(parent_dir)
+            config = config.model_copy(deep=True)
+            config.model.pretrained_path = str(source.resolve())
+            config.model.pretrained_config_sha256 = digest((source / 'config.json').read_bytes())
     recipe = config.model_dump(mode="json")
     fingerprint = digest(json.dumps(recipe, sort_keys=True).encode())
     folder = (Path(resume).resolve().parent.parent if resume else
               root / config.output_dir / (config.name + "-" + uuid.uuid4().hex[:12]))
     folder.mkdir(parents=True, exist_ok=True)
-    from loomlm.run_config import RunConfig
+    from modelchef.run_config import RunConfig
     if resume and RunConfig.model_validate_json((folder / "config.json").read_text()).model_dump(
             mode="json") != recipe:
         raise ValueError("Resume configuration differs; refusing to modify the saved run")
@@ -102,7 +115,7 @@ def run_pipeline(config, root, resume=None):
     report = {"status": "running", "run_dir": str(folder), "config_sha256": fingerprint}
     (folder / "config.json").write_text(json.dumps(recipe, indent=2), encoding="utf-8")
     try:
-        return _execute(config, root, folder, fingerprint, narrate, report, resume)
+        return _execute(config, root, folder, fingerprint, narrate, report, resume, prepare_only)
     except Exception as error:
         report.update(status="failed", error=f"{type(error).__name__}: {error}")
         (folder / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -110,7 +123,7 @@ def run_pipeline(config, root, resume=None):
         raise
 
 
-def _execute(c, root, folder, fingerprint, n, report, resume):
+def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False):
     if c.model.backend == 'huggingface' and c.stage.kind == 'pretrain':
         raise ValueError('Import the pretrained model, then choose a continuation/post-training stage')
     n.stage("1. Configuration and hardware", "Validate the complete recipe before data access. "
@@ -122,6 +135,10 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
     torch.backends.cuda.matmul.allow_tf32 = c.training.allow_tf32
     runtime = resolve_runtime(c.training.model_dump(), detect_hardware())
     device = runtime["device"]
+    if c.model.quantization == 'nvfp4' and device != 'cuda':
+        raise ValueError('NVFP4 requires a CUDA runtime')
+    if c.model.peft.method == 'qlora' and device != 'cuda':
+        raise ValueError('QLoRA requires a CUDA runtime')
     if c.model.attention_kernel not in {'auto', 'math'} and device != 'cuda':
         raise ValueError('Selected optimized attention kernel requires CUDA/ROCm')
     if c.training.optimizer_kernel == 'fused' and device != 'cuda':
@@ -196,11 +213,14 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
             "documents only. Later stages retain the parent's vocabulary and special-token identities.")
     parent = None
     if c.stage.kind != 'pretrain':
-        from loomlm.chat import checkpoint_for
-        from loomlm.run_config import RunConfig
+        from modelchef.chat import checkpoint_for
+        from modelchef.run_config import RunConfig
         parent_folder = (root / c.stage.parent_run).resolve()
         parent_config = RunConfig.model_validate_json((parent_folder / 'config.json').read_text())
-        execution_fields = {'quantization', 'attention_kernel', 'custom_swiglu_path', 'peft'}
+        execution_fields = {'quantization', 'attention_kernel', 'custom_swiglu_path', 'peft',
+                            'gradient_checkpointing'}
+        if c.model.peft.method == 'qlora':
+            execution_fields |= {'pretrained_path', 'pretrained_config_sha256'}
         if c.model.model_dump(exclude=execution_fields) != parent_config.model.model_dump(
                 exclude=execution_fields) or c.tokenizer != parent_config.tokenizer:
             raise ValueError('Parent architecture/tokenizer settings must match; copy the parent recipe')
@@ -252,7 +272,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
     reference = None
     if c.stage.kind in {'dpo', 'rlvr'}:
         reference = create_model(c.model, tokenizer.get_vocab_size()).to(device)
-        reference.load_state_dict(parent)
+        load_parent(reference, parent, parent_config.model)
         reference.requires_grad_(False).eval()
         # Preference/RL likelihoods must not fluctuate because of dropout.
         for network in [model, reference]:
@@ -265,8 +285,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
                 for block in network.blocks:
                     block.attention.c = block.attention.c.model_copy(update={'attention_dropout': 0})
     if c.stage.kind == 'distill':
-        from loomlm.chat import checkpoint_for
-        from loomlm.run_config import RunConfig
+        from modelchef.chat import checkpoint_for
+        from modelchef.run_config import RunConfig
         teacher_folder = (root / c.stage.teacher_run).resolve()
         if digest((teacher_folder / 'tokenizer.json').read_bytes()) != tokenizer_hash:
             raise ValueError('Token distillation requires identical student/teacher tokenizers')
@@ -332,6 +352,12 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
         n.say(f"Checkpoint saved at step {index}: {path.name}", detail=True)
         return path
 
+    if prepare_only:
+        report.update(status='prepared', checkpoint=str(Path(resume).resolve() if resume else save_checkpoint(step)),
+                      parameters=parameters, stage=c.stage.kind, token_counts=token_counts)
+        (folder / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+        return report
+
     explanations = {
         'pretrain': 'Next-token cross entropy from random initialization.',
         'midtrain': 'Continue next-token training with parent weights and vocabulary.',
@@ -368,6 +394,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume):
             parts = tuple(part[indices].to(device) for part in blocks["train"])
             with amp():
                 loss, objective_metrics = objective(model, parts, c, reference, tokenizer)
+                if getattr(model, 'auxiliary_loss', None) is not None:
+                    loss = loss + model.auxiliary_loss
             for key, value in objective_metrics.items():
                 auxiliary[key] = auxiliary.get(key, 0) + value / (
                     t.gradient_accumulation if key in {'reward_mean', 'teacher_kl'} else 1)

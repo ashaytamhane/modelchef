@@ -96,18 +96,23 @@ def package_source(root):
     """Allowlist code files only: never package .aws, .env, keys, or Git history."""
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-        files = ['src/loomlm/' + name for name in
-                 ['__init__.py', 'cli.py', 'hardware.py', 'inference.py', 'smoke.py']]
+        files = ['src/modelchef/' + name for name in
+                 ['__init__.py', 'cli.py', 'hardware.py', 'inference.py', 'smoke.py',
+                  'progress.py', 'diagnostics.py']]
         files += ['tests/' + name for name in ['test_cli.py', 'test_hardware.py', 'test_inference.py']]
+        files += ['configs/local.yaml']
         for filename in files:
-            path = root / filename
-            archive.add(path, arcname=filename, recursive=False)
+            path = root / ('src/modelchef/guest_cli.py' if filename == 'src/modelchef/cli.py' else filename)
+            content = path.read_bytes()
+            entry = tarfile.TarInfo(filename)
+            entry.size = len(content)
+            archive.addfile(entry, io.BytesIO(content))
     return buffer.getvalue()
 
 
 def user_data(root, settings):
     if settings.get('pipeline_config'):
-        from loomlm.aws_training import training_user_data
+        from modelchef.aws_training import training_user_data
         return training_user_data(settings)
     payload = base64.b64encode(package_source(root)).decode()
     minutes = int(settings["max_runtime_minutes"])
@@ -115,23 +120,23 @@ def user_data(root, settings):
     # Arm a guest timer before extraction or installation; poweroff terminates the instance.
     script = f'''#!/bin/bash
 set -euo pipefail
-exec > >(tee -a /var/log/loomlm-test.log /dev/console) 2>&1
-systemd-run --unit=loomlm-deadline --on-active={minutes}m /sbin/shutdown -h now
-finish() {{ code=$?; echo "LOOMLM_RESULT=$code"; /sbin/shutdown -h now; }}
+exec > >(tee -a /var/log/modelchef-test.log /dev/console) 2>&1
+systemd-run --unit=modelchef-deadline --on-active={minutes}m /sbin/shutdown -h now
+finish() {{ code=$?; echo "MODELCHEF_RESULT=$code"; /sbin/shutdown -h now; }}
 trap finish EXIT
-mkdir -p /opt/loomlm-test
-cd /opt/loomlm-test
+mkdir -p /opt/modelchef-test
+cd /opt/modelchef-test
 echo {shlex.quote(payload)} | base64 -d | tar -xz
 # The DLAMI activation script references optional unset environment variables.
 set +u
 source /opt/pytorch/bin/activate
 set -u
 python -m pip install 'pyyaml>=6,<7' 'pytest>=8,<10'
-export PYTHONPATH=/opt/loomlm-test/src
-{inference}python -m loomlm.cli doctor
+export PYTHONPATH=/opt/modelchef-test/src
+{inference}python -m modelchef.cli doctor
 python -m pytest -q
-python -m loomlm.cli smoke
-python -m loomlm.cli smoke --precision fp16
+python -m modelchef.cli smoke
+python -m modelchef.cli smoke --precision fp16
 '''
     if len(script.encode()) > 16384:
         raise ValueError("Allowlisted source exceeds EC2 user-data limit")
@@ -173,14 +178,14 @@ class SpotRunner:
         report["terminated"] = instance["State"]["Name"] == "terminated"
         report["console_output"] = self.ec2.get_console_output(
             InstanceId=instance_id, Latest=True).get("Output", "")
-        report["test_passed"] = "LOOMLM_RESULT=0" in report["console_output"]
+        report["test_passed"] = "MODELCHEF_RESULT=0" in report["console_output"]
         ledger.record(run_id, "terminated" if report["terminated"] else "cleanup-pending", report)
         out = self.root / "artifacts/aws-runs" / run_id
         out.mkdir(parents=True, exist_ok=True)
         (out / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         if report["terminated"]:
             try:
-                self.scheduler.delete_schedule(Name=run_id, GroupName="loomlm")
+                self.scheduler.delete_schedule(Name=run_id, GroupName="modelchef")
             except self.scheduler.exceptions.ResourceNotFoundException:
                 pass
             groups = self.ec2.describe_security_groups(Filters=[
@@ -241,10 +246,10 @@ class SpotRunner:
     def prepare_deadline_role(self):
         region = self.settings["region"]
         try:
-            self.scheduler.get_schedule_group(Name="loomlm")
+            self.scheduler.get_schedule_group(Name="modelchef")
         except self.scheduler.exceptions.ResourceNotFoundException:
-            self.scheduler.create_schedule_group(Name="loomlm")
-        name = "loomlm-spot-deadline"
+            self.scheduler.create_schedule_group(Name="modelchef")
+        name = "modelchef-spot-deadline"
         try:
             return self.iam.get_role(RoleName=name)["Role"]["Arn"]
         except self.iam.exceptions.NoSuchEntityException:
@@ -253,14 +258,14 @@ class SpotRunner:
                 "Action": "sts:AssumeRole", "Condition": {
                     "StringEquals": {"aws:SourceAccount": self.account},
                     "ArnEquals": {"aws:SourceArn":
-                        f"arn:aws:scheduler:{region}:{self.account}:schedule-group/loomlm"}}}]}
+                        f"arn:aws:scheduler:{region}:{self.account}:schedule-group/modelchef"}}}]}
             role = self.iam.create_role(RoleName=name, AssumeRolePolicyDocument=json.dumps(trust),
-                                       Tags=[{"Key": "Project", "Value": "LoomLM"}])["Role"]
+                                       Tags=[{"Key": "Project", "Value": "ModelChef"}])["Role"]
             policy = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
                 "Action": "ec2:TerminateInstances",
                 "Resource": f"arn:aws:ec2:{region}:{self.account}:instance/*",
-                "Condition": {"StringEquals": {"ec2:ResourceTag/Project": "LoomLM"}}}]}
-            self.iam.put_role_policy(RoleName=name, PolicyName="terminate-loomlm-only",
+                "Condition": {"StringEquals": {"ec2:ResourceTag/Project": "ModelChef"}}}]}
+            self.iam.put_role_policy(RoleName=name, PolicyName="terminate-modelchef-only",
                                      PolicyDocument=json.dumps(policy))
             self.iam.get_waiter("role_exists").wait(RoleName=name,
                                                   WaiterConfig={"Delay": 2, "MaxAttempts": 10})
@@ -272,11 +277,11 @@ class SpotRunner:
         preflight = local_preflight(self.root)
         bundle = None
         if s.get('pipeline_config'):
-            from loomlm.aws_training import build_bundle, training_preflight
+            from modelchef.aws_training import build_bundle, training_preflight
             bundle = build_bundle(self.root, s)
             preflight['training'] = training_preflight(self.root, s)
         plan = self.plan()
-        run_id = "loomlm-" + uuid.uuid4().hex
+        run_id = "modelchef-" + uuid.uuid4().hex
         ledger = Ledger(self.root / s["ledger_path"])
         scope = f"{self.account}:{s['region']}"
         ledger.reserve(run_id, scope, budget_reservation(s), s["total_budget_usd"])
@@ -290,7 +295,7 @@ class SpotRunner:
         terminated = False
         try:
             if bundle is not None:
-                prefix = s.get('artifact_prefix', 'loomlm-training').strip('/') + '/' + run_id
+                prefix = s.get('artifact_prefix', 'modelchef-training').strip('/') + '/' + run_id
                 self.s3.put_object(Bucket=s['artifact_bucket'], Key=prefix + '/source.tar.gz',
                     Body=bundle, ServerSideEncryption='AES256')
                 report.update(artifact_bucket=s['artifact_bucket'], artifact_prefix=prefix,
@@ -299,7 +304,7 @@ class SpotRunner:
                                                          '_bundle_sha256': report['bundle_sha256']})
             role = self.prepare_deadline_role()
             security_group = self.ec2.create_security_group(
-                GroupName=run_id, Description="LoomLM outbound-only test",
+                GroupName=run_id, Description="ModelChef outbound-only test",
                 VpcId=plan["vpc_id"])["GroupId"]
             deadline = datetime.now(UTC) + timedelta(minutes=s["max_runtime_minutes"])
             profile = ({'IamInstanceProfile': {'Name': s['instance_profile_name']}}
@@ -319,12 +324,12 @@ class SpotRunner:
                     "VolumeSize": s["storage_gb"], "VolumeType": "gp3", "Encrypted": True,
                     "DeleteOnTermination": True}}],
                 TagSpecifications=[{"ResourceType": kind, "Tags": [
-                    {"Key": "Project", "Value": "LoomLM"},
+                    {"Key": "Project", "Value": "ModelChef"},
                     {"Key": "RunId", "Value": run_id}]} for kind in ["instance", "volume"]])
             instance_id = launch["Instances"][0]["InstanceId"]
             report["instance_id"] = instance_id
             ledger.record(run_id, "launched", report)
-            self.scheduler.create_schedule(Name=run_id, GroupName="loomlm",
+            self.scheduler.create_schedule(Name=run_id, GroupName="modelchef",
                 ScheduleExpression="at(" + deadline.strftime("%Y-%m-%dT%H:%M:%S") + ")",
                 ScheduleExpressionTimezone="UTC", FlexibleTimeWindow={"Mode": "OFF"},
                 ActionAfterCompletion="DELETE", Target={
@@ -372,14 +377,14 @@ class SpotRunner:
             if instance_id:
                 console = self.ec2.get_console_output(InstanceId=instance_id, Latest=True)
                 report["console_output"] = console.get("Output", "")
-                report["test_passed"] = "LOOMLM_RESULT=0" in report["console_output"]
+                report["test_passed"] = "MODELCHEF_RESULT=0" in report["console_output"]
             ledger.record(run_id, "terminated" if terminated else "no-instance", report)
             out = self.root / "artifacts/aws-runs" / run_id
             out.mkdir(parents=True, exist_ok=True)
             (out / "report.json").write_text(json.dumps(report, indent=2, default=str))
             if terminated and schedule_created:
                 try:
-                    self.scheduler.delete_schedule(Name=run_id, GroupName="loomlm")
+                    self.scheduler.delete_schedule(Name=run_id, GroupName="modelchef")
                 except self.scheduler.exceptions.ResourceNotFoundException:
                     pass
             if security_group and (terminated or not instance_id):

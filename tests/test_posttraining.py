@@ -7,9 +7,9 @@ torch = pytest.importorskip('torch')
 pytest.importorskip('pydantic')
 pytest.importorskip('tokenizers')
 
-from loomlm.objectives import dpo_loss, group_advantages, grpo_loss, verified_reward
-from loomlm.pipeline import run_pipeline
-from loomlm.run_config import RunConfig
+from modelchef.objectives import dpo_loss, group_advantages, grpo_loss, verified_reward
+from modelchef.pipeline import run_pipeline
+from modelchef.run_config import RunConfig
 
 
 @pytest.fixture
@@ -53,8 +53,11 @@ def test_preference_and_reward_objectives_have_correct_direction():
 
 
 @pytest.mark.parametrize('kind', ['midtrain', 'sft', 'dpo', 'rlvr', 'distill'])
-def test_posttraining_checkpoint_recovery_and_parent_is_unchanged(parent, tmp_path, kind):
+@pytest.mark.parametrize('adapter', [False, True])
+def test_posttraining_checkpoint_recovery_and_parent_is_unchanged(parent, tmp_path, kind, adapter):
     config, base = parent
+    if adapter:
+        config.model.peft.method = 'lora'
     source = tmp_path / 'stage.jsonl'
     rows = [{'text': f'Specialized finance lesson {i}: bank revenue grows. ' * 8,
              'prompt': f'Question {i}', 'response': '1', 'chosen': '1', 'rejected': '2',
@@ -79,7 +82,7 @@ def test_posttraining_checkpoint_recovery_and_parent_is_unchanged(parent, tmp_pa
 
 
 def test_fp4_simulation_preserves_gradient_and_zero_values():
-    from loomlm.quantization import fake_nvfp4
+    from modelchef.quantization import fake_nvfp4
     value = torch.linspace(-6, 6, 32).reshape(2, 16).requires_grad_()
     quantized = fake_nvfp4(value)
     assert torch.isfinite(quantized).all()
@@ -88,12 +91,12 @@ def test_fp4_simulation_preserves_gradient_and_zero_values():
     assert torch.equal(fake_nvfp4(torch.zeros(2, 16)), torch.zeros(2, 16))
 
 
-@pytest.mark.parametrize('lora', [False, True])
+@pytest.mark.parametrize('lora', [False, True, 'qlora'])
 def test_local_pretrained_import_and_sft(parent, tmp_path, lora):
     transformers = pytest.importorskip('transformers')
     pytest.importorskip('safetensors')
-    from loomlm.chat import export_model
-    from loomlm.pretrained import register_model, stage_config
+    from modelchef.chat import export_model
+    from modelchef.pretrained import register_model, stage_config
     config, base = parent
     hf = tmp_path / 'hf-model'
     tokenizer = transformers.PreTrainedTokenizerFast(tokenizer_file=str(
@@ -116,9 +119,17 @@ def test_local_pretrained_import_and_sft(parent, tmp_path, lora):
     config.training.checkpoint_every = 1
     if lora:
         pytest.importorskip('peft')
-        config.model.peft.method = 'lora'
+        if lora == 'qlora':
+            import importlib.util
+            if not importlib.util.find_spec('bitsandbytes'):
+                pytest.skip('QLoRA requires bitsandbytes')
+            if not torch.cuda.is_available():
+                pytest.skip('QLoRA integration requires CUDA')
+            config.training.accelerator = 'cuda'
+            config.training.precision = 'bf16'
+        config.model.peft.method = 'qlora' if lora == 'qlora' else 'lora'
         config.model.peft.target_modules = ['c_attn']
-        from loomlm.engines import create_model, load_parent
+        from modelchef.engines import create_model, load_parent
         initial = create_model(config.model, len(tokenizer))
         parent_weights = torch.load(Path(imported) / 'checkpoints/step-000000.pt', weights_only=True)['model']
         parent_config = RunConfig.model_validate_json((Path(imported) / 'config.json').read_text())
@@ -141,16 +152,20 @@ def test_local_pretrained_import_and_sft(parent, tmp_path, lora):
         assert any('lora_B' in name and value.abs().sum() > 0 for name, value in weights.items())
         trained.eval()
         restored.eval()
-        ids = torch.tensor([[1, 2, 3]])
+        ids = torch.tensor([[1, 2, 3]], device='cuda' if lora == 'qlora' else 'cpu')
         with torch.no_grad():
-            assert torch.allclose(trained(ids), restored(ids).logits, atol=1e-5, rtol=1e-5)
+            if lora == 'qlora':
+                assert torch.isfinite(trained(ids)).all()
+                assert torch.isfinite(restored(ids.cpu()).logits).all()
+            else:
+                assert torch.allclose(trained(ids), restored(ids).logits, atol=1e-5, rtol=1e-5)
         resumed = run_pipeline(config, tmp_path, Path(result['run_dir']) / 'checkpoints/step-000001.pt')
         recovered = torch.load(resumed['checkpoint'], weights_only=True)['model']
         assert all(torch.equal(value, recovered[name]) for name, value in weights.items())
 
 
 def test_reasoning_is_optional_and_student_can_share_teacher_vocabulary(parent, tmp_path):
-    from loomlm.pretrained import initialize_student
+    from modelchef.pretrained import initialize_student
     _, base = parent
     student = initialize_student(base['run_dir'], tmp_path, architecture={
         'layers': 1, 'hidden_size': 16, 'attention_heads': 2, 'kv_heads': 1,
@@ -188,7 +203,7 @@ def test_math_attention_and_compile_preserve_checkpoint_names(parent, tmp_path):
 
 
 def test_custom_cuda_probe_preserves_rng_and_rejects_cpu(monkeypatch):
-    from loomlm import execution
+    from modelchef import execution
     before = torch.get_rng_state().clone()
     def probe(path):
         torch.manual_seed(42)

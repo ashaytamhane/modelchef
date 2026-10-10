@@ -56,7 +56,7 @@ def acquire(config, root, explain):
                                "offset": offset,
                                "length": min(c.page_size, c.offset + c.max_documents - offset)})
             request = Request("https://datasets-server.huggingface.co/rows?" + query,
-                              headers={"User-Agent": "LoomLM/0.1"})
+                              headers={"User-Agent": "ModelChef/0.1"})
             with urlopen(request, timeout=c.timeout_seconds) as response:
                 payload = response.read(c.max_download_bytes - downloaded + 1)
             downloaded += len(payload)

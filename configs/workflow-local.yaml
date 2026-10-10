@@ -1,0 +1,16 @@
+# Plan with: python -m modelchef.cli cook configs/workflow-local.yaml
+# Executes locally only when --run is added; provide data/raw/sft.jsonl first.
+schema_version: 1
+name: first-menu
+output_dir: artifacts/workflows
+imported_model: null
+imported_context: 128
+stages:
+  - name: foundation
+    recipe: configs/pretrain-local.yaml
+    inherit_architecture: true
+  - name: instructions
+    recipe: configs/sft-recipe.yaml
+    parent_stage: foundation
+    inherit_architecture: true
+export: true
