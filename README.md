@@ -24,6 +24,41 @@ python -m ashayllm.cli smoke
 
 `setup` previews the PyTorch installation; `--apply` installs it. Review the preview for your hardware. If prerequisites are missing, see [local setup](#local-setup). Package installation requires internet access.
 
+### Write your run recipe
+
+A recipe is a YAML file describing the data, preprocessing, tokenizer, model, training settings, evaluation and training stage. Start from a complete example:
+
+```bash
+cp configs/pretrain-local.yaml configs/my-run.local.yaml
+```
+
+Edit these fields **inside the existing sections** of the copied file, keeping the remaining settings:
+
+```yaml
+name: my-first-run
+data:
+  max_documents: 256       # Bound the corpus sample.
+  max_tokens: 200000       # Bound packed data, independently of training steps.
+tokenizer:
+  vocab_size: 4096
+model:
+  layers: 6
+  hidden_size: 512
+  context_length: 128      # Tokens per training sequence.
+training:
+  accelerator: auto
+  precision: auto
+  steps: 40
+  micro_batch_size: 1      # Reduce activation memory on a small GPU.
+  gradient_accumulation: 4 # Effective batch size: 1 * 4 = 4 sequences.
+evaluation:
+  benchmark: auto
+stage:
+  kind: pretrain
+```
+
+This is an edit guide, not a replacement for the complete copied recipe. Validate with `python -m ashayllm.cli pipeline configs/my-run.local.yaml`; add `--run` to execute it. Unsupported fields and incompatible settings fail validation. `*.local.yaml` files stay out of Git. For fine-tuning, use `stage-config` in workflow 3 to generate a recipe matching the parent model instead of manually copying its architecture. See [data and recipes](#data-and-recipes) for all configuration sections and local-data examples.
+
 ### 1. Train a small model from scratch
 
 ```bash
