@@ -199,6 +199,9 @@ The local pipeline runs where invoked; it does not choose or provision AWS autom
 | Pretrain on a bounded corpus sample | Current machine (local or an existing EC2 host) | `pipeline CONFIG --run` | No automatic provisioning |
 | Talk to a trained checkpoint | Current machine | `chat RUN_DIR` | No |
 | Export trained weights | Current machine | `export RUN_DIR` | No |
+| Fine-tune a vision-language or Whisper model | Current machine with local model and media | `multimodal CONFIG --run` | No automatic provisioning |
+| Run image or speech inference | Current machine | `predict-media CONFIG --media FILE` | No |
+| Publish a complete model export | Current machine uploads to Hugging Face | `publish-model CONFIG --run` | No; Hub authentication required |
 | Check your laptop/desktop GPU | Current machine | `doctor`, `resolve-runtime`, `smoke` | No |
 | Develop code and run unit tests | Current machine | `python -m pytest -q`, `python -m ruff check .` | No |
 | Install PyTorch or vLLM | Current machine | `setup --apply`, `setup-vllm --apply` | No |
@@ -774,6 +777,8 @@ Use `configs/multimodal-vision.yaml` for image/prompt/response fine-tuning, or
 model and manifest paths, then preview and execute:
 
 ```bash
+cp configs/multimodal-vision.yaml configs/vision.local.yaml
+# Edit model.path and data.manifest before running these commands.
 python -m modelchef.cli multimodal configs/vision.local.yaml
 python -m modelchef.cli multimodal configs/vision.local.yaml --run
 python -m modelchef.cli predict-media configs/vision.local.yaml --model-path artifacts/multimodal/YOUR_RUN/export --media data/vision/example.png --prompt "Describe this image."
@@ -791,6 +796,8 @@ Copy `configs/publish-model.yaml` to a local recipe and set the export, Hub repo
 license, training description, evaluation and limitations:
 
 ```bash
+cp configs/publish-model.yaml configs/publish.local.yaml
+# Edit export_dir, repo_id and the model-card fields before previewing.
 python -m modelchef.cli publish-model configs/publish.local.yaml
 # After reviewing the exact file list/card and authenticating with hf auth login:
 python -m modelchef.cli publish-model configs/publish.local.yaml --run
