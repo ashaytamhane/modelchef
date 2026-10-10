@@ -57,7 +57,7 @@ stage:
   kind: pretrain
 ```
 
-This is an edit guide, not a replacement for the complete copied recipe. Validate with `python -m ashayllm.cli pipeline configs/my-run.local.yaml`; add `--run` to execute it. Unsupported fields and incompatible settings fail validation. `*.local.yaml` files stay out of Git. For fine-tuning, use `stage-config` in workflow 3 to generate a recipe matching the parent model instead of manually copying its architecture. See [data and recipes](#data-and-recipes) for all configuration sections and local-data examples.
+This is an edit guide, not a replacement for the complete copied recipe. Validate with `python -m ashayllm.cli pipeline configs/my-run.local.yaml`; add `--run` to execute it. Unsupported fields and incompatible settings fail validation. `*.local.yaml` files stay out of Git. For fine-tuning, use `stage-config` in workflow 3 to generate a recipe matching the parent model instead of manually copying its architecture. See the [complete annotated recipe](#complete-annotated-recipe) for every training field and its alternatives, and [data and recipes](#data-and-recipes) for local-data examples.
 
 ### 1. Train a small model from scratch
 
@@ -387,6 +387,172 @@ Change one family of settings at a time. Document and byte caps control acquisit
 | `evaluation` | Benchmark selection/sample/download cap, loss batches and generation controls |
 
 From-scratch experiments use the native causal RoPE decoder with GQA, RMSNorm and SwiGLU, plus a trained byte-level BPE tokenizer. Imported Hugging Face models use their original architecture and tokenizer through the local pretrained adapter. Optional reasoning supervision, execution kernels and stage objectives are configured in the same recipe. The runtime limit is checked between training steps, not a deadline for the entire acquisition/evaluation workflow. Hardware detection does not automatically choose a model size that fits memory.
+
+### Complete annotated recipe
+
+The following is a complete, schema-valid training recipe with **every supported training field** explicit. A copy lives in [configs/recipe-reference.yaml](configs/recipe-reference.yaml). Comments show alternatives and when a setting applies; the selected values form a small native pretraining run. Fields for DPO, RLVR and distillation remain inactive until their stage is selected. There is no single run that applies all objectives at once.
+
+```bash
+cp configs/recipe-reference.yaml configs/full-run.local.yaml
+python -m ashayllm.cli pipeline configs/full-run.local.yaml
+# After reviewing data limits and hardware requirements:
+python -m ashayllm.cli pipeline configs/full-run.local.yaml --run
+```
+
+```yaml
+schema_version: 1
+name: full-reference  # Used as the run-directory prefix; each execution gets a unique suffix.
+output_dir: artifacts/training
+explain: detailed  # detailed | brief; event logs are retained in either mode.
+data:
+  provider: hf_rows  # hf_rows | local_jsonl; structured stages require local_jsonl.
+  dataset: HuggingFaceFW/fineweb-edu  # Viewer dataset ID; no full Parquet corpus download.
+  subset: sample-10BT  # Dataset configuration name, not a random sampling strategy.
+  split: train
+  text_field: text
+  local_path: null  # Set a JSONL path when provider is local_jsonl.
+  offset: 0  # Ordered starting row; skipped input bytes still count toward the cap.
+  max_documents: 256  # Raw records before filtering; 3..10000, but at least 10 accepted are needed.
+  page_size: 50  # Viewer page length: 1..100.
+  max_download_bytes: 16000000  # Corpus response/input-byte cap; separate from benchmark downloads.
+  timeout_seconds: 30
+  max_tokens: 200000  # Total packing budget across train/validation/test; not a training-token target.
+  domain: general  # general | finance for auto benchmarks; other names need an explicit benchmark.
+  domain_keywords: []  # Any matching keyword qualifies; required for a non-general domain.
+processing:
+  unicode_normalization: NFKC  # NFC | NFKC.
+  strip_html: true
+  min_chars: 200
+  max_chars: 20000
+  min_alnum_fraction: 0.5
+  max_repeated_line_fraction: 0.4
+  exact_dedup: true
+  near_dedup: true
+  near_dedup_jaccard: 0.9  # Word-shingle similarity threshold, not embedding similarity.
+  dedup_ngram_words: 5
+  pii: redact  # redact | drop | off; regex heuristics for emails/phone-like strings.
+  benchmark_files: []  # Local text files whose n-grams must be excluded; sample benchmark added automatically.
+  decontamination_ngram_words: 13  # Exact overlapping word n-grams; not semantic decontamination.
+  validation_fraction: 0.1  # Document fraction; validation + test must be below 1.
+  test_fraction: 0.1
+tokenizer:
+  algorithm: byte_bpe  # byte_bpe | pretrained; pretrained is reused from an imported/parent run.
+  vocab_size: 4096  # Requested BPE size (260..262144); a small corpus can learn fewer tokens.
+  min_frequency: 2
+  special_tokens:  # Required identities: pad, unk, bos, eos; all entries must be unique.
+  - <pad>
+  - <unk>
+  - <bos>
+  - <eos>
+  add_bos: false  # Raw-text packing only; structured stages apply their own prompt/EOS formatting.
+  append_eos: true  # Raw-text document separator; structured stages always append response EOS.
+model:
+  backend: native  # native | huggingface; use import-model to configure a local pretrained adapter.
+  pretrained_path: null  # Required local source directory for the huggingface backend.
+  pretrained_config_sha256: null  # Filled by import-model; validates the original HF config on loading.
+  quantization: none  # none | fp4_fake; software simulation, not packed/native FP4 training.
+  attention_kernel: auto  # auto | math | flash | efficient | cudnn; explicit optimized choices require a compatible GPU.
+  custom_swiglu_path: null  # Native CUDA only: set kernels/swiglu after correctness checks; rejected by managed aws-train.
+  type: decoder_rope  # Only decoder_rope for the native model; not a free-form architecture selector.
+  layers: 6
+  hidden_size: 512  # Must divide evenly by attention_heads; head dimension must be even.
+  attention_heads: 8  # Must divide evenly by kv_heads.
+  kv_heads: 2
+  intermediate_size: 1360
+  context_length: 128
+  norm: rmsnorm  # Native architecture supports rmsnorm only.
+  norm_eps: 1.0e-05
+  activation: swiglu  # Native architecture supports swiglu only.
+  rope_theta: 10000.0
+  attention_dropout: 0.0
+  residual_dropout: 0.0
+  bias: false
+  tie_embeddings: true  # Share input embedding and output-head weights.
+  init_std: 0.02
+  gradient_checkpointing: false  # Recompute activations during backward to trade compute for memory.
+training:
+  compile: false  # Opt in to torch.compile; default leaves execution eager.
+  compile_backend: inductor  # inductor | aot_eager | eager.
+  compile_mode: default  # default | reduce-overhead | max-autotune; used only with inductor.
+  allow_tf32: false  # Permit TF32 for eligible CUDA FP32 matrix multiplies.
+  optimizer_kernel: default  # default | fused | foreach; fused requires CUDA/ROCm.
+  accelerator: auto  # auto | cpu | cuda | rocm | mps.
+  precision: auto  # auto | fp32 | bf16 | fp16; FP16 uses gradient scaling.
+  seed: 42
+  deterministic: true  # Request deterministic PyTorch operations; not cross-platform bitwise parity.
+  steps: 40  # Optimizer updates, with training blocks sampled with replacement.
+  micro_batch_size: 2
+  gradient_accumulation: 2  # Effective single-device batch = micro_batch_size * gradient_accumulation.
+  optimizer: adamw  # adamw only; this updates full parameters, not LoRA adapters.
+  learning_rate: 0.0005
+  min_learning_rate_ratio: 0.1  # Final cosine learning-rate floor relative to learning_rate.
+  betas:
+  - 0.9
+  - 0.95
+  weight_decay: 0.1
+  optimizer_eps: 1.0e-08
+  schedule: cosine  # cosine | constant; warmup still applies.
+  warmup_steps: 4  # Must be less than steps.
+  gradient_clip_norm: 1.0
+  checkpoint_every: 20  # Optimizer-step interval; final checkpoint is also saved.
+  evaluate_every: 10
+  log_every: 5
+  max_runtime_seconds: 600  # Checked between optimization steps; not an acquisition/evaluation deadline.
+evaluation:
+  benchmark: auto  # auto | none | hellaswag | financial_phrasebank.
+  benchmark_examples: 8  # 1..100; bounded custom protocol, not a full standard suite.
+  benchmark_max_download_bytes: 2000000  # Separate benchmark payload-byte cap.
+  batches: 4  # Maximum loss-evaluation batches per split.
+  prompt: Education helps people
+  generate_tokens: 24
+  temperature: 0.8
+  top_k: 30  # 0 disables top-k filtering.
+stage:
+  kind: pretrain  # pretrain | midtrain | sft | dpo | rlvr | distill; one objective per run.
+  parent_run: null  # Required completed/imported/initialized parent directory for later stages.
+  teacher_run: null  # Required for token distillation; retain teacher artifacts for resume.
+  distillation_temperature: 2.0  # Distill only: soften token distributions; soft loss scaled by T squared.
+  distillation_alpha: 0.5  # Distill only: soft teacher weight; remaining weight is response cross entropy.
+  dpo_beta: 0.1  # DPO only: reference-adjusted preference-margin scale.
+  reward: integer  # RLVR only: exact_match | integer.
+  group_size: 4  # RLVR only: 2..32 sampled answers per prompt.
+  rollout_tokens: 16  # RLVR only: maximum sampled response length, also bounded by context.
+  kl_coefficient: 0.02  # RLVR only: frozen-reference regularization weight.
+  clip_ratio: 0.2  # RLVR only: policy-ratio clipping range.
+  reasoning_format: plain  # plain | think_answer; optional SFT/distill fields, or RLVR final-answer extraction.
+```
+
+#### Choose a compatible combination
+
+| Experiment | Changes to make | Prerequisites / constraints |
+| --- | --- | --- |
+| Offline corpus run | `data.provider: local_jsonl`, set `local_path`, `evaluation.benchmark: none` | Installed packages and enough distinct local documents for all splits |
+| Finance sample | `data.domain: finance`, supply `domain_keywords` | Auto selects FinancialPhraseBank; filters may leave too little data |
+| Continue training / SFT | Generate with `stage-config`; set `kind` and `parent_run` | Keep parent architecture/tokenizer; SFT uses prompt/response JSONL |
+| DPO | `kind: dpo`, `dpo_beta`, parent run | Local prompt/chosen/rejected JSONL; frozen reference also consumes memory |
+| RLVR | `kind: rlvr`, verifier, group size, rollout and KL controls | Local prompt/answer JSONL; enough correct/varied samples for useful rewards |
+| Token distillation | `kind: distill`, parent/student and teacher runs, temperature/alpha | Identical tokenizers and special IDs; teacher context covers student; both models fit memory |
+| Reasoning supervision | `reasoning_format: think_answer` for SFT/distill | Local prompt/reasoning/answer JSONL; enough context for both sections |
+| Pretrained adaptation | `import-model`, then `stage-config` | Import fills HF paths, original tokenizer and geometry; native geometry fields do not redesign the imported architecture |
+| Execution optimization | Compile, attention backend, optimizer kernel, optional TF32 | Profile separately; explicit GPU kernels may fail for unsupported shapes/dtypes or determinism settings |
+| Custom CUDA | `custom_swiglu_path: kernels/swiglu` | Native CUDA host with compatible toolkit; correctness probe required; speedup not established |
+| FP4 simulation | `quantization: fp4_fake` | Compatible linear input dimensions divisible by 16; no packed storage/native acceleration |
+
+Keep performance changes separate at first: custom CUDA, compilation, fake FP4, dropout and forced attention backends are not all jointly validated. Schema validation checks structure and invariants, not model memory fit, data availability or kernel compatibility. Resume uses the original recipe; changing an objective, model or step target creates a new experiment.
+
+#### Serving and AWS are separate recipes
+
+`pipeline` describes training on the current host. API deployment and cloud lifecycle settings belong in their own files rather than additional training YAML fields:
+
+| Configuration | Full settings / workflow |
+| --- | --- |
+| [inference.yaml](configs/inference.yaml) | Local vLLM model path, dtype, quantization, GPU memory, context, sequence limits and API resource limits |
+| [inference-public.yaml](configs/inference-public.yaml) | Remote bind/port, token environment variable, TLS files and request limits; [serving instructions](#inference-and-api-serving) |
+| [aws-test.yaml](configs/aws-test.yaml) | Temporary Spot instance, per-run/overall reservations, runtime/rate ceilings, storage and cleanup |
+| [aws-training.yaml](configs/aws-training.yaml) | Spot lifecycle plus training recipe, S3/profile, source/result caps and artifact reserve |
+| [aws-serving.yaml](configs/aws-serving.yaml) | Persistent on-demand host, existing network/image/profile, secret, export config and cost-warning threshold |
+
+These files compose: for example, `aws_test.pipeline_config` in the AWS training template points to a training recipe, while `aws_serving.inference_config` points to a serving recipe. Temporary training ends with termination; persistent hosting stays up until an explicit lifecycle action. Tokens, certificates, private paths and account-specific settings belong outside Git or in ignored local configs.
 
 ### Finance-focused experiment
 
