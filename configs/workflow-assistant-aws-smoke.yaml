@@ -1,0 +1,10 @@
+# Pretrain from random weights, train on instructions, evaluate, and export.
+schema_version: 1
+name: assistant-aws-smoke
+stages:
+  - name: foundation
+    recipe: configs/assistant-aws-smoke-pretrain.yaml
+  - name: instructions
+    recipe: configs/assistant-aws-smoke-sft.yaml
+    parent_stage: foundation
+export: true

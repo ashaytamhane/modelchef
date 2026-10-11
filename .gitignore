@@ -1,6 +1,7 @@
 .venv/
 .venv-vllm/
 .venv-aws/
+.venv-aws313/
 __pycache__/
 .pytest_cache/
 .ruff_cache/

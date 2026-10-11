@@ -17,6 +17,59 @@ def test_budget_reservation(settings):
     assert budget_reservation(settings) == Decimal("0.50")
 
 
+def test_on_demand_budget_uses_declared_rate(settings):
+    settings.update(market_type='on_demand', on_demand_hourly_usd='1.25',
+                    per_run_budget_usd='0.40', total_budget_usd='1.00')
+    with pytest.raises(ValueError, match='budgets'):
+        budget_reservation(settings)
+    settings['per_run_budget_usd'] = settings['total_budget_usd'] = '5.00'
+    assert budget_reservation(settings) == Decimal('5.00')
+
+
+def test_on_demand_plan_does_not_require_spot_offering(settings):
+    from types import SimpleNamespace
+
+    runner = SpotRunner.__new__(SpotRunner)
+    runner.root = Path(__file__).parents[1]
+    runner.settings = {**settings, 'market_type': 'on_demand',
+                       'on_demand_hourly_usd': '1.25', 'ami_id': 'ami-test',
+                       'subnet_id': 'subnet-test'}
+    runner.account = '123456789012'
+    runner.ec2 = SimpleNamespace(
+        describe_subnets=lambda **kw: {'Subnets': [{'SubnetId': 'subnet-test',
+            'VpcId': 'vpc-test', 'AvailabilityZone': 'us-east-1a', 'State': 'available'}]},
+        describe_images=lambda **kw: {'Images': [{'Name': 'GPU AMI', 'Architecture': 'x86_64',
+            'RootDeviceName': '/dev/xvda', 'BlockDeviceMappings': [{'DeviceName': '/dev/xvda',
+            'Ebs': {'VolumeSize': 100}}]}]},
+        get_paginator=lambda _: pytest.fail('On-Demand plan must not query Spot prices'))
+    plan = runner.plan()
+    assert plan['market_type'] == 'on_demand'
+    assert plan['spot_price_usd_hour'] is None
+    assert plan['hourly_budget_rate_usd'] == '1.25'
+
+
+def test_result_download_error_preserves_success_and_shutdown_evidence(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from botocore.exceptions import ClientError
+
+    def missing_bucket(**kwargs):
+        raise ClientError({'Error': {'Code': 'NoSuchBucket', 'Message': 'Deleted bucket'}},
+                          'GetObject')
+    runner = SpotRunner.__new__(SpotRunner)
+    runner.settings = {}
+    runner.s3 = SimpleNamespace(get_object=missing_bucket,
+                               exceptions=SimpleNamespace(NoSuchKey=type('NoSuchKey', (Exception,), {})))
+    report = {'artifact_bucket': 'deleted', 'artifact_prefix': 'run',
+              'terminated': True, 'test_passed': True}
+    with pytest.raises(RuntimeError, match='result retrieval failed'):
+        runner.fetch_training_results(report, tmp_path)
+    saved = json.loads((tmp_path / 'report.json').read_text())
+    assert saved['terminated'] and saved['test_passed']
+    assert 'NoSuchBucket' in saved['results_error']
+
+
 @pytest.mark.parametrize("key,value", [
     ("total_budget_usd", "0.10"), ("per_run_budget_usd", "0.01"),
     ("max_runtime_minutes", -1), ("max_runtime_minutes", 0.5),
@@ -35,6 +88,26 @@ def test_total_budget_survives_new_ledger_connection(tmp_path):
     Ledger(path).reserve("two", "account:region", Decimal("0.5"), "1")
     with pytest.raises(ValueError, match="Overall budget"):
         Ledger(path).reserve("three", "account:region", Decimal("0.5"), "1")
+
+
+def test_unlaunched_budget_is_released_only_with_confirmed_no_instance(tmp_path):
+    ledger = Ledger(tmp_path / 'ledger.sqlite')
+    ledger.reserve('one', 'account:region', Decimal('0.5'), '0.5')
+    with pytest.raises(ValueError, match='unconfirmed launch'):
+        ledger.release_unlaunched('one')
+    ledger.record('one', 'no-instance', {'run_id': 'one',
+                                        'launch_error_code': 'InsufficientInstanceCapacity'})
+    ledger.release_unlaunched('one')
+    assert ledger.db.execute("SELECT reserved FROM runs WHERE id='one'").fetchone()[0] == '0'
+    ledger.reserve('two', 'account:region', Decimal('0.5'), '0.5')
+    ledger.record('two', 'no-instance', {'instance_id': 'i-accepted',
+                                        'launch_error_code': 'InsufficientInstanceCapacity'})
+    with pytest.raises(ValueError, match='unconfirmed launch'):
+        ledger.release_unlaunched('two')
+    ledger.reserve('three', 'account:region', Decimal('0.5'), '1.0')
+    ledger.record('three', 'no-instance', {'launch_error_code': 'VcpuLimitExceeded'})
+    ledger.release_unlaunched('three')
+    assert ledger.db.execute("SELECT reserved FROM runs WHERE id='three'").fetchone()[0] == '0'
 
 
 def test_userdata_contains_guest_deadline_and_termination(settings):
@@ -95,6 +168,33 @@ def test_run_terminates_after_test_or_watchdog_failure(
     else:
         assert runner.run()["terminated"]
     assert "delete-sg" in calls
+
+
+def test_run_preserves_console_before_ec2_discards_it(settings, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr('modelchef.aws_runner.local_preflight', lambda _: {'passed': True})
+    runner = SpotRunner.__new__(SpotRunner)
+    runner.root, runner.settings, runner.account = tmp_path, settings, 'test-account'
+    runner.plan = lambda: {'user_data': 'test', 'vpc_id': 'vpc-test', 'ami_id': 'ami-test',
+                           'subnet_id': 'subnet-test', 'root_device': '/dev/xvda'}
+    runner.prepare_deadline_role = lambda: 'role-test'
+    outputs = iter(['MODELCHEF_RESULT=1: unsupported Python', ''])
+    runner.ec2 = SimpleNamespace(
+        create_security_group=lambda **kw: {'GroupId': 'sg-test'},
+        run_instances=lambda **kw: {'Instances': [{'InstanceId': 'i-test'}]},
+        describe_instances=lambda **kw: {'Reservations': [{'Instances': [
+            {'InstanceId': 'i-test', 'State': {'Name': 'shutting-down'}}]}]},
+        get_console_output=lambda **kw: {'Output': next(outputs)},
+        terminate_instances=lambda **kw: None,
+        get_waiter=lambda _: SimpleNamespace(wait=lambda **kw: None),
+        delete_security_group=lambda **kw: None)
+    runner.scheduler = SimpleNamespace(create_schedule=lambda **kw: None,
+                                       delete_schedule=lambda **kw: None)
+    report = runner.run()
+    assert report['terminated'] is True
+    assert report['test_passed'] is False
+    assert report['console_output'] == 'MODELCHEF_RESULT=1: unsupported Python'
 
 
 def test_lost_launch_response_remains_recoverable_when_cleanup_is_offline(settings, tmp_path, monkeypatch):
@@ -191,7 +291,8 @@ def test_training_uploads_bundle_and_terminates_before_result_fetch(settings, tm
 
 
 @pytest.mark.parametrize("state", ["shutting-down", "terminated"])
-def test_reconcile_preserves_watchdog_until_terminated(settings, tmp_path, state):
+@pytest.mark.parametrize("console", ["MODELCHEF_RESULT=0", "", None])
+def test_reconcile_preserves_watchdog_until_terminated(settings, tmp_path, state, console):
     from types import SimpleNamespace
 
     calls = []
@@ -199,11 +300,11 @@ def test_reconcile_preserves_watchdog_until_terminated(settings, tmp_path, state
     runner.root, runner.settings, runner.account = tmp_path, settings, "test-account"
     ledger = Ledger(tmp_path / settings["ledger_path"])
     ledger.reserve("run-test", "test-account:us-east-1", Decimal("0.5"), "10")
-    ledger.record("run-test", "launched", {"instance_id": "i-test"})
+    ledger.record("run-test", "launched", {"instance_id": "i-test", "console_output": "MODELCHEF_RESULT=0"})
     runner.ec2 = SimpleNamespace(
         describe_instances=lambda **kw: {"Reservations": [{"Instances": [
             {"State": {"Name": state}}]}]},
-        get_console_output=lambda **kw: {"Output": "MODELCHEF_RESULT=0"},
+        get_console_output=lambda **kw: {"Output": console},
         describe_security_groups=lambda **kw: {"SecurityGroups": [{"GroupId": "sg-test"}]},
         delete_security_group=lambda **kw: calls.append("delete-sg"))
     runner.scheduler = SimpleNamespace(delete_schedule=lambda **kw: calls.append("delete-schedule"))

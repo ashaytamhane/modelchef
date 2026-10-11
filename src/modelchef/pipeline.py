@@ -500,7 +500,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                    "gradient_norm": norm.item(), "tokens_seen": consumed,
                    "skipped_optimizer_updates": skipped_updates,
                    "tokens_per_second": (step - initial_step) * t.micro_batch_size *
-                   t.gradient_accumulation * c.model.context_length / (time.monotonic() - started)}
+                   t.gradient_accumulation * c.model.context_length /
+                   max(time.monotonic() - started, 1e-9)}
         metrics.update(auxiliary)
         if step % t.evaluate_every == 0 or step == t.steps:
             metrics["validation"] = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
@@ -520,7 +521,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             "logits. Perplexity only applies to this sample/tokenizer; it is not a standard-suite score.")
     if device == 'cuda':
         torch.cuda.synchronize()
-    elapsed_loop = time.monotonic() - started
+    elapsed_loop = max(time.monotonic() - started, 1e-9)
     report['performance'] = {
         'training_loop_seconds': elapsed_loop,
         'tokens_per_second': (consumed - saved.get('tokens_seen', 0) if resume else consumed) / elapsed_loop,

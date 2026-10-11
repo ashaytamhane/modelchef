@@ -116,6 +116,6 @@ def setup_plan(backend="auto", index_url=None, torch_version=None):
     if index_url:
         command += ["--index", index_url, "--index-strategy", "first-index"]
     return {"backend": backend, "driver": driver, "command": command,
-            "python_supported": (3, 11) <= sys.version_info[:2] < (3, 13),
+            "python_supported": (3, 11) <= sys.version_info[:2] < (3, 14),
             "note": "Installs packages only; drivers and OS prerequisites must already exist. "
                     "Verify the resulting backend with doctor and smoke."}

@@ -129,6 +129,7 @@ def test_nvfp4_integration_simulation_and_actual_prerequisite(tmp_path, monkeypa
     assert model.blocks[0].attention.q.weight.grad is not None
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='Windows CPU PyTorch wheel lacks torchrun libuv support')
 @pytest.mark.parametrize('model_type', ['decoder_rope', 'decoder_moe'])
 def test_two_cpu_rank_ddp_and_resume(tmp_path, model_type):
     import yaml

@@ -1448,7 +1448,7 @@ The runner performs this sequence automatically:
 7. Power off on success or failure; EC2 shutdown behavior is `terminate`. The controller monitors termination and its cleanup can escalate to force termination after a stalled shutdown.
 8. Save the report and remove the temporary schedule/security group after confirmed termination. The reusable scheduler role/group remain.
 
-The guest timeout starts during bootstrap; the cloud deadline is computed before launch. The controller's elapsed timeout includes provisioning setup. These safeguards reduce runaway costs but cannot guarantee instantaneous shutdown during AWS/API failures. No datasets are downloaded. The readiness test intentionally sends a minimal bundle: `guest_cli.py` provides the readiness commands while `diagnostics.py`, `progress.py` and smoke components share production checks. This fits EC2's user-data size limit; it is not a full training installation. Managed training (`pipeline`/`cook --target aws` or `aws-train`) and `aws-serve` package the full project. The current cloud recipe runs source via PYTHONPATH in the DLAMI's preinstalled Python; it does not validate editable package installation there. DLAMI Python may differ from the project's local Python 3.11/3.12 target.
+The guest timeout starts during bootstrap; the cloud deadline is computed before launch. The controller's elapsed timeout includes provisioning setup. These safeguards reduce runaway costs but cannot guarantee instantaneous shutdown during AWS/API failures. No datasets are downloaded. The readiness test intentionally sends a minimal bundle: `guest_cli.py` provides the readiness commands while `diagnostics.py`, `progress.py` and smoke components share production checks. This fits EC2's user-data size limit; it is not a full training installation. Managed training (`pipeline`/`cook --target aws` or `aws-train`) and `aws-serve` package the full project. The current cloud recipe runs source via PYTHONPATH in the DLAMI's preinstalled Python; it does not validate editable package installation there. DLAMI Python may differ from the project's local Python 3.11–3.13 target.
 
 #### Recover cloud results and cleanup
 
@@ -1472,6 +1472,96 @@ aws ec2 describe-instances --profile modelchef --region us-east-1 --instance-ids
 A successful termination request can still report `shutting-down`. Confirm `terminated` and root-volume removal in EC2. The ledger is local and run-ID recovery after an early crash is limited; it is not a distributed job service.
 
 #### Run a managed training stage
+
+For a **small scratch-to-serving integration test**, use
+[`workflow-assistant-aws-smoke.yaml`](configs/workflow-assistant-aws-smoke.yaml).
+Its first stage trains a new tokenizer and decoder from random weights; its second
+stage trains that checkpoint on the repository's 12 authored question/answer examples.
+These fixtures test stage linking, evaluation, export and serving. They are **not**
+FineWeb-Edu or SmolTalk samples, and the resulting tiny model will not give useful answers.
+The purpose is to prove the complete machinery before downloading large public corpora
+or committing a serious training budget.
+
+```bash
+# Local validation first; the plan does not launch AWS.
+python -m pytest -q
+python -m modelchef.cli cook configs/workflow-assistant-aws-smoke.yaml
+
+# Copy the bounded $5 training settings into an ignored local file, then fill in
+# your AWS profile, private S3 artifact bucket and training instance profile.
+cp configs/aws-assistant-smoke.yaml configs/aws-assistant-smoke.local.yaml
+python -m modelchef.cli cook configs/workflow-assistant-aws-smoke.yaml \
+  --target aws --aws-config configs/aws-assistant-smoke.local.yaml
+python -m modelchef.cli cook configs/workflow-assistant-aws-smoke.yaml \
+  --target aws --aws-config configs/aws-assistant-smoke.local.yaml --run
+```
+
+The last command requires interactive `yes` after showing the current Spot quote and
+budget reservation. It performs another bounded CPU preflight, runs both stages on
+one Spot GPU, uploads the results and terminates the training instance. If the AWS
+run reports both `test_passed: true` and `terminated: true`, recover its export:
+
+```bash
+python -m modelchef.cli aws-export MODELCHEF_RUN_ID
+```
+
+`aws-export` verifies the downloaded archive hash and extracts only the model export
+to `artifacts/exports/MODELCHEF_RUN_ID/`. It also writes an ignored inference recipe
+under `artifacts/aws-serving/`.
+
+The stage templates select CUDA BF16 for modern GPUs. On a Tesla T4 (`g4dn`), copy
+both stage recipes to ignored `*.local.yaml` files, set `training.precision: fp16`,
+and point a copied workflow at those files. Changing the AWS instance type alone
+does not change a stage's explicitly selected precision.
+
+Spot is the default purchase option. If AWS reports insufficient capacity, select a
+different subnet/availability zone or instance type. A confirmed capacity or vCPU-quota
+rejection that creates no instance releases its reservation while retaining the audit record.
+Ambiguous launch failures retain their reservation until investigated.
+
+For a temporary On-Demand training run, set `market_type: on_demand` and add
+`on_demand_hourly_usd` to the AWS settings. This configured rate drives the runtime
+budget calculation; verify it against current AWS pricing for your instance and region.
+The same completion/deadline termination applies. This does not purchase a Reserved
+Instance. On-Demand G-series launches require a sufficient regional GPU vCPU quota;
+a quota of zero prevents launch. Keep the artifact bucket until results have been
+downloaded and verified. If result retrieval fails after termination, recover the
+existing run with `aws-reconcile` rather than repeating training.
+
+Put the generated inference recipe's path into a copy of
+[`aws-serving.yaml`](configs/aws-serving.yaml), then fill in its existing AMI,
+network, instance profile, S3 bucket and Secrets Manager fields as described in
+[persistent API hosting](#persistent-api-hosting-on-ec2). Serving is a separate
+**on-demand, persistent** EC2 instance; it does not inherit the training run's $5
+Spot cap. Preview and deploy with `aws-serve`, verify readiness over HTTPS, and
+chat from your local machine:
+
+```bash
+python -m modelchef.cli aws-serve configs/aws-serving.local.yaml
+python -m modelchef.cli aws-serve configs/aws-serving.local.yaml --run
+python -m modelchef.cli chat-api --endpoint https://YOUR_HOSTNAME:8443/v1 \
+  --prompt "Hello" --max-tokens 16
+python -m modelchef.cli chat-api --endpoint https://YOUR_HOSTNAME:8443/v1 \
+  --max-tokens 16
+```
+
+Set `MODELCHEF_API_KEY` in the local terminal from your secret store before using
+`chat-api`; do not put the key on the command line or in Git. Use `--ca-cert PATH`
+when your HTTPS certificate chains to a private CA. The CLI verifies TLS and sends
+the bearer key only over HTTPS. It chooses the sole served model automatically; use
+`--model ID` if the endpoint lists several. It uses the completions endpoint because this tiny
+fixture has no chat template. Stop or delete the host explicitly with `aws-serve`
+when finished; training shutdown does not stop a serving instance.
+
+The two-stage CUDA training, checkpoint reload, result upload/download, export
+recovery and EC2 termination have been exercised on a T4 with FP16. Live vLLM
+hosting and remote chat remain separate validation steps; a recovered export does
+not prove that the API is ready. Before deploying, check the regional On-Demand
+GPU vCPU quota and permissions to provision/read the serving secret.
+
+The next experiment replaces the authored fixtures with a versioned FineWeb-Edu
+snapshot and public conversation data, and increases model size and steps only after
+the small AWS run proves data, checkpoint, export, vLLM startup and local chat.
 
 AWS training execution shows the current Spot price, maximum runtime, conservative reservation and overall budget, then requires you to type `yes` before launch. To automate a reviewed plan, explicitly add `--yes`; configured limits still apply. A non-interactive run without that flag fails instead of launching. The budget review stays visible with `--quiet`. The same confirmation applies to `aws-test` and the lower-level `aws-train` command.
 
@@ -1634,7 +1724,7 @@ python scripts/check_docs.py
 python -m pytest -q
 ```
 
-GitHub CI checks CPU workflows on Python 3.11/3.12 and the Windows controller. The documentation check verifies local links, CLI examples, example recipes, complete annotated fields and generated schemas. Hardware-specific tests skip when their prerequisites are unavailable; a skipped test does not establish support on a real device. See [contributing](CONTRIBUTING.md) and [security boundaries](SECURITY.md).
+GitHub CI checks CPU workflows on Python 3.11, 3.12 and 3.13 and the Windows controller. The documentation check verifies local links, CLI examples, example recipes, complete annotated fields and generated schemas. Hardware-specific tests skip when their prerequisites are unavailable; a skipped test does not establish support on a real device. See [contributing](CONTRIBUTING.md) and [security boundaries](SECURITY.md).
 
 Runs record package versions, the source-code fingerprint and available Git revision/dirty state in `environment.json`. Resume preserves that original evidence and appends current runtime provenance to `resume-environments.jsonl`. Comparison reports identify checkpoint/model and tokenizer bytes. Resume requires saved snapshots and matching identities; missing or changed inputs stop the run instead of silently downloading replacements. A timeout is an incomplete run, produces a nonzero CLI exit, and prevents `cook` from starting later stages.
 
@@ -1692,6 +1782,8 @@ AWS launch journals are saved before provisioning steps so interrupted/lost laun
 | `serve-vllm CONFIG [--run]` | Validate/plan or start local serving |
 | `aws-test [CONFIG] [--instance-type TYPE] [--run]` | Preview or execute a budget-reserved Spot test |
 | `aws-reconcile RUN_ID [--path CONFIG]` | Recover cloud results and finish cleanup after termination |
+| `aws-export RUN_ID` | Verify downloaded AWS results and recover the exported model and inference recipe |
+| `chat-api --endpoint HTTPS_URL [--prompt TEXT]` | Send authenticated completions to a remote model; interactive mode omits `--prompt` |
 
 Use `python -m modelchef.cli COMMAND --help` for flags.
 

@@ -1,4 +1,4 @@
-"""Budget-reserved, one-shot Spot tests. No embedded AWS credentials."""
+"""Budget-reserved, one-shot EC2 tests. No embedded AWS credentials."""
 
 import base64
 import hashlib
@@ -45,7 +45,10 @@ def budget_reservation(settings):
     total = amount("total_budget_usd")
     per_run = amount("per_run_budget_usd")
     minutes = amount("max_runtime_minutes")
-    hourly = amount("max_spot_hourly_usd")
+    market = settings.get('market_type', 'spot')
+    if market not in {'spot', 'on_demand'}:
+        raise ValueError('market_type must be spot or on_demand')
+    hourly = amount('max_spot_hourly_usd' if market == 'spot' else 'on_demand_hourly_usd')
     storage = amount("storage_gb")
     reserve = amount("safety_reserve_usd")
     # Include 3 minutes for scheduler granularity and termination, conservatively.
@@ -90,6 +93,19 @@ class Ledger:
         with self.db:
             self.db.execute("UPDATE runs SET state=?,report=? WHERE id=?",
                             (state, json.dumps(report, default=str), run_id))
+
+    def release_unlaunched(self, run_id):
+        """Return budget only after the report proves EC2 never created an instance."""
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            row = self.db.execute(
+                "SELECT state,report FROM runs WHERE id=?", (run_id,)).fetchone()
+            report = json.loads(row[1]) if row else {}
+            rejected = {'InsufficientInstanceCapacity', 'VcpuLimitExceeded'}
+            if (not row or row[0] != 'no-instance' or report.get('instance_id') or
+                    report.get('launch_error_code') not in rejected):
+                raise ValueError('Cannot release a reservation for an unconfirmed launch')
+            self.db.execute("UPDATE runs SET reserved='0' WHERE id=?", (run_id,))
 
 
 def package_source(root):
@@ -185,8 +201,9 @@ class SpotRunner:
         instance = self.ec2.describe_instances(InstanceIds=[instance_id])[
             "Reservations"][0]["Instances"][0]
         report["terminated"] = instance["State"]["Name"] == "terminated"
-        report["console_output"] = self.ec2.get_console_output(
-            InstanceId=instance_id, Latest=True).get("Output", "")
+        report["console_output"] = (self.ec2.get_console_output(
+            InstanceId=instance_id, Latest=True).get("Output")
+            or report.get("console_output", ""))
         report["test_passed"] = "MODELCHEF_RESULT=0" in report["console_output"]
         ledger.record(run_id, "terminated" if report["terminated"] else "cleanup-pending", report)
         out = self.root / "artifacts/aws-runs" / run_id
@@ -207,21 +224,24 @@ class SpotRunner:
 
     def plan(self):
         s = self.settings
+        market = s.get('market_type', 'spot')
         subnet_args = ({"SubnetIds": [s["subnet_id"]]} if s.get("subnet_id") else
                        {"Filters": [{"Name": "default-for-az", "Values": ["true"]}]})
         subnets = self.ec2.describe_subnets(**subnet_args)["Subnets"]
         prices = {}
-        for page in self.ec2.get_paginator("describe_spot_price_history").paginate(
-            InstanceTypes=[s["instance_type"]], ProductDescriptions=["Linux/UNIX"],
-            StartTime=datetime.now(UTC)):
-            for entry in page["SpotPriceHistory"]:
-                prices.setdefault(entry["AvailabilityZone"], Decimal(entry["SpotPrice"]))
+        if market == 'spot':
+            for page in self.ec2.get_paginator("describe_spot_price_history").paginate(
+                InstanceTypes=[s["instance_type"]], ProductDescriptions=["Linux/UNIX"],
+                StartTime=datetime.now(UTC)):
+                for entry in page["SpotPriceHistory"]:
+                    prices.setdefault(entry["AvailabilityZone"], Decimal(entry["SpotPrice"]))
         choices = [subnet for subnet in subnets if subnet["State"] == "available" and
-                   subnet["AvailabilityZone"] in prices and
-                   prices[subnet["AvailabilityZone"]] <= Decimal(str(s["max_spot_hourly_usd"]))]
+                   (market == 'on_demand' or (subnet["AvailabilityZone"] in prices and
+                    prices[subnet["AvailabilityZone"]] <= Decimal(str(s["max_spot_hourly_usd"]))))]
         if not choices:
-            raise ValueError("No default subnet/Spot offering fits the configured hourly ceiling")
-        subnet = min(choices, key=lambda sub: prices[sub["AvailabilityZone"]])
+            raise ValueError('No available subnet fits the configured market and hourly ceiling')
+        subnet = min(choices, key=(lambda sub: prices[sub['AvailabilityZone']])
+                     if market == 'spot' else (lambda sub: sub['AvailabilityZone']))
         ami = s.get("ami_id")
         if not ami:
             try:
@@ -246,7 +266,11 @@ class SpotRunner:
                 "ami_name": image["Name"], "instance_type": s["instance_type"],
                 "subnet_id": subnet["SubnetId"], "vpc_id": subnet["VpcId"],
                 "availability_zone": subnet["AvailabilityZone"],
-                "spot_price_usd_hour": str(prices[subnet["AvailabilityZone"]]),
+                "market_type": market,
+                "hourly_budget_rate_usd": str(s['max_spot_hourly_usd'] if market == 'spot'
+                                             else s['on_demand_hourly_usd']),
+                "spot_price_usd_hour": (str(prices[subnet["AvailabilityZone"]])
+                                         if market == 'spot' else None),
                 "root_device": image["RootDeviceName"],
                 "reserved_usd": str(budget_reservation(s)),
                 "source_sha256": hashlib.sha256(script.encode()).hexdigest(),
@@ -285,6 +309,7 @@ class SpotRunner:
         from modelchef.progress import report as progress
 
         s = self.settings
+        market = s.get('market_type', 'spot')
         progress('Running local tests and lint before requesting any cloud compute.')
         preflight = local_preflight(self.root)
         bundle = None
@@ -293,7 +318,7 @@ class SpotRunner:
             bundle = build_bundle(self.root, s)
             progress('Running the bounded local CPU training preflight before cloud launch.')
             preflight['training'] = training_preflight(self.root, s)
-        progress('Resolving the AWS image, subnet, Spot price and budget reservation.')
+        progress('Resolving the AWS image, subnet, market rate and budget reservation.')
         plan = self.plan()
         run_id = "modelchef-" + uuid.uuid4().hex
         ledger = Ledger(self.root / s["ledger_path"])
@@ -338,24 +363,32 @@ class SpotRunner:
             deadline = datetime.now(UTC) + timedelta(minutes=s["max_runtime_minutes"])
             profile = ({'IamInstanceProfile': {'Name': s['instance_profile_name']}}
                        if bundle is not None else {})
-            progress('Requesting the configured one-time Spot instance.')
-            launch = self.ec2.run_instances(
-                **profile,
-                ClientToken=run_id, MinCount=1, MaxCount=1,
-                ImageId=plan["ami_id"], InstanceType=s["instance_type"],
-                UserData=plan["user_data"], InstanceInitiatedShutdownBehavior="terminate",
-                InstanceMarketOptions={"MarketType": "spot", "SpotOptions": {
-                    "SpotInstanceType": "one-time", "InstanceInterruptionBehavior": "terminate",
-                    "MaxPrice": str(s["max_spot_hourly_usd"])}},
-                MetadataOptions={"HttpTokens": "required", "HttpEndpoint": "enabled"},
-                NetworkInterfaces=[{"DeviceIndex": 0, "SubnetId": plan["subnet_id"],
-                    "Groups": [security_group], "AssociatePublicIpAddress": True}],
-                BlockDeviceMappings=[{"DeviceName": plan["root_device"], "Ebs": {
-                    "VolumeSize": s["storage_gb"], "VolumeType": "gp3", "Encrypted": True,
-                    "DeleteOnTermination": True}}],
-                TagSpecifications=[{"ResourceType": kind, "Tags": [
-                    {"Key": "Project", "Value": "ModelChef"},
-                    {"Key": "RunId", "Value": run_id}]} for kind in ["instance", "volume"]])
+            progress(f'Requesting the configured {market} instance.')
+            from botocore.exceptions import ClientError
+
+            try:
+                launch = self.ec2.run_instances(
+                    **profile,
+                    ClientToken=run_id, MinCount=1, MaxCount=1,
+                    ImageId=plan["ami_id"], InstanceType=s["instance_type"],
+                    UserData=plan["user_data"], InstanceInitiatedShutdownBehavior="terminate",
+                    **({'InstanceMarketOptions': {"MarketType": "spot", "SpotOptions": {
+                        "SpotInstanceType": "one-time", "InstanceInterruptionBehavior": "terminate",
+                        "MaxPrice": str(s["max_spot_hourly_usd"])}}}
+                       if market == 'spot' else {}),
+                    MetadataOptions={"HttpTokens": "required", "HttpEndpoint": "enabled"},
+                    NetworkInterfaces=[{"DeviceIndex": 0, "SubnetId": plan["subnet_id"],
+                        "Groups": [security_group], "AssociatePublicIpAddress": True}],
+                    BlockDeviceMappings=[{"DeviceName": plan["root_device"], "Ebs": {
+                        "VolumeSize": s["storage_gb"], "VolumeType": "gp3", "Encrypted": True,
+                        "DeleteOnTermination": True}}],
+                    TagSpecifications=[{"ResourceType": kind, "Tags": [
+                        {"Key": "Project", "Value": "ModelChef"},
+                        {"Key": "RunId", "Value": run_id}]} for kind in ["instance", "volume"]])
+            except ClientError as error:
+                report['launch_error_code'] = error.response['Error']['Code']
+                persist('launch-rejected')
+                raise
             instance_id = launch["Instances"][0]["InstanceId"]
             report["instance_id"] = instance_id
             persist('launched')
@@ -380,6 +413,18 @@ class SpotRunner:
                     terminated = True
                     break
                 if instance["State"]["Name"] == "shutting-down":
+                    # EC2 may discard the serial console after termination.
+                    # Keep the last available guest result before the waiter runs.
+                    from botocore.exceptions import BotoCoreError, ClientError
+
+                    try:
+                        output = self.ec2.get_console_output(
+                            InstanceId=instance_id, Latest=True).get("Output")
+                        if output:
+                            report["console_output"] = output
+                            persist('guest-shutting-down')
+                    except (BotoCoreError, ClientError) as error:
+                        report['early_console_error'] = str(error)
                     break  # Confirm completion through the termination waiter below.
                 time.sleep(15)
         finally:
@@ -420,7 +465,8 @@ class SpotRunner:
 
                     try:
                         console = self.ec2.get_console_output(InstanceId=instance_id, Latest=True)
-                        report["console_output"] = console.get("Output", "")
+                        report["console_output"] = console.get("Output") or report.get(
+                            "console_output", "")
                         report["test_passed"] = "MODELCHEF_RESULT=0" in report["console_output"]
                     except (BotoCoreError, ClientError) as error:
                         # Console collection must never strand otherwise disposable resources.
@@ -434,6 +480,9 @@ class SpotRunner:
                 if security_group and (terminated or not instance_id):
                     self.ec2.delete_security_group(GroupId=security_group)
                 persist('terminated' if terminated else 'no-instance')
+                if (not instance_id and report.get('launch_error_code') in
+                        {'InsufficientInstanceCapacity', 'VcpuLimitExceeded'}):
+                    ledger.release_unlaunched(run_id)
             except BaseException as error:
                 report.update(terminated=terminated, elapsed_seconds=time.monotonic() - started,
                               cleanup_error=str(error))
@@ -445,6 +494,8 @@ class SpotRunner:
         return report
 
     def fetch_training_results(self, report, out):
+        from botocore.exceptions import BotoCoreError, ClientError
+
         try:
             response = self.s3.get_object(Bucket=report['artifact_bucket'],
                                          Key=report['artifact_prefix'] + '/results.tar.gz')
@@ -452,6 +503,12 @@ class SpotRunner:
             report['results_missing'] = True
             (out / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
             return
+        except (BotoCoreError, ClientError) as error:
+            report['results_error'] = str(error)
+            (out / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+            raise RuntimeError('Training instance is terminated, but result retrieval failed. '
+                               f'Inspect {out / "report.json"} and the S3 artifact bucket; '
+                               'do not rerun training solely to retry the download.') from error
         cap = int(self.settings.get('max_result_bytes', 512_000_000))
         body = response['Body']
         try:

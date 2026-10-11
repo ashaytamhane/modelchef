@@ -18,9 +18,12 @@ a hardware simulation, a measured speedup and a capable trained model are differ
 The [execution tutorial](EXECUTION.md) describes `pipeline`/`cook` target selection.
 AWS workflow tests run relocated bundles through real local training and export, and
 simulate cloud dispatch/guest launch. This verifies recipe links and packaging; it
-does not establish live Spot availability, cloud bootstrap or termination reliability.
+does not establish live Spot availability or general cloud reliability. A bounded
+two-stage scratch/SFT workflow has also passed on EC2 T4 with FP16, including
+checkpoint reload, result upload/download, export recovery and confirmed termination.
+Live vLLM hosting, interruption drills and sustained cloud workloads still need validation.
 
-Use a Python 3.11 or 3.12 environment with the documented platform dependencies:
+Use a Python 3.11, 3.12 or 3.13 environment with the documented platform dependencies:
 
 ```bash
 python -m ruff check src tests scripts/check_docs.py

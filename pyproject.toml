@@ -7,7 +7,7 @@ name = "modelchef"
 version = "0.1.0"
 description = "Recipe-driven language-model workbench for training, evaluation and serving"
 readme = "README.md"
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.14"
 dependencies = ["pyyaml>=6,<7"]
 
 [project.optional-dependencies]

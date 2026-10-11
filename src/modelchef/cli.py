@@ -23,8 +23,11 @@ def _settings(path, section):
 
 def confirm_cloud(plan, settings, yes=False):
     """Show bounded spending assumptions before any billable training launch."""
-    print(f"AWS launch review: {plan['instance_type']}; current Spot price "
-          f"${plan['spot_price_usd_hour']}/hour; deadline {settings['max_runtime_minutes']} minutes; "
+    market = settings.get('market_type', 'spot')
+    rate = (f"current Spot price ${plan['spot_price_usd_hour']}/hour" if market == 'spot'
+            else f"configured On-Demand budget rate ${settings['on_demand_hourly_usd']}/hour")
+    print(f"AWS launch review: {plan['instance_type']} ({market}); {rate}; "
+          f"deadline {settings['max_runtime_minutes']} minutes; "
           f"budget reservation ${plan['reserved_usd']}; overall configured limit "
           f"${settings['total_budget_usd']}. Reservation is a conservative allowance, "
           "not an exact bill. Retained storage can incur additional charges.", file=sys.stderr, flush=True)
@@ -40,7 +43,7 @@ def confirm_cloud(plan, settings, yes=False):
 
 
 def cloud_job(path, aws_config, execute=False, command='pipeline', yes=False):
-    """Use the same recipe with the established budgeted Spot lifecycle."""
+    """Use the same recipe with a budgeted, temporary EC2 lifecycle."""
     from modelchef.aws_runner import SpotRunner
     from modelchef.aws_training import build_bundle
 
@@ -62,10 +65,16 @@ def cloud_job(path, aws_config, execute=False, command='pipeline', yes=False):
     result = runner.run() if execute else plan
     result.pop('user_data', None)
     return {**result, 'target': 'aws', 'command': command, 'recipe': str(path),
-            'lifecycle': 'One temporary Spot instance; termination after completion or deadline.'}
+            'lifecycle': 'One temporary EC2 instance; termination after completion or deadline.'}
 
 
 def _main() -> None:
+    # Randomly initialized models can generate Unicode characters unsupported by
+    # the active Windows console code page. Preserve the run instead of crashing
+    # while printing an informational sample.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(errors='backslashreplace')
     parser = argparse.ArgumentParser(prog="modelchef")
     command = parser.add_subparsers(dest="command", required=True)
     workflow_parser = command.add_parser('cook', help='Plan/run ordered stage recipes locally or on AWS')
@@ -143,6 +152,16 @@ def _main() -> None:
     chat_parser.add_argument("--max-tokens", type=int, default=32)
     chat_parser.add_argument("--temperature", type=float, default=0.8)
     chat_parser.add_argument("--top-k", type=int, default=30)
+    remote_chat = command.add_parser('chat-api', help='Chat with an authenticated HTTPS vLLM deployment')
+    remote_chat.add_argument('--endpoint', required=True, help='HTTPS API base ending in /v1')
+    remote_chat.add_argument('--model', default='auto', help='Model ID; auto selects a sole served model')
+    remote_chat.add_argument('--api-key-env', default='MODELCHEF_API_KEY')
+    remote_chat.add_argument('--ca-cert', type=Path, help='Trusted CA for a private certificate')
+    remote_chat.add_argument('--prompt')
+    remote_chat.add_argument('--max-tokens', type=int, default=64)
+    remote_chat.add_argument('--temperature', type=float, default=0.7)
+    aws_export = command.add_parser('aws-export', help='Recover a serving export from a completed AWS run')
+    aws_export.add_argument('run_id')
     export_parser = command.add_parser("export", help="Export a trained run for HF/vLLM")
     export_parser.add_argument("run_dir", type=Path)
     download = command.add_parser('download-model', help='Preview/download capped safetensors model')
@@ -278,6 +297,14 @@ def _main() -> None:
         elif args.command == "chat":
             from modelchef.chat import chat
             chat(args.run_dir, args.backend, args.prompt, args.max_tokens, args.temperature, args.top_k)
+        elif args.command == 'chat-api':
+            from modelchef.remote_chat import chat
+            chat(args.endpoint, args.model, api_key_env=args.api_key_env,
+                 prompt=args.prompt, max_tokens=args.max_tokens,
+                 temperature=args.temperature, ca_cert=args.ca_cert)
+        elif args.command == 'aws-export':
+            from modelchef.aws_export import recover_export
+            print(json.dumps(recover_export(Path.cwd(), args.run_id), indent=2))
         elif args.command == "export":
             from modelchef.chat import export_model
             print(export_model(args.run_dir))
@@ -313,7 +340,7 @@ def _main() -> None:
                 result.pop("user_data")
             print(json.dumps(result, indent=2, default=str))
             if getattr(args, "run", False) and not result.get("test_passed"):
-                parser.exit(1, "Spot instance terminated; test success not confirmed in console output\n")
+                parser.exit(1, "EC2 instance terminated; test success not confirmed in console output\n")
         elif args.command in {"setup-vllm", "serve-vllm"}:
             from modelchef.inference import launch_server, serve_plan, vllm_setup_plan
             if args.command == "setup-vllm":
@@ -342,7 +369,7 @@ def _main() -> None:
             print(json.dumps(plan, indent=2))
             if args.apply:
                 if not plan["python_supported"]:
-                    parser.error("Create a Python 3.11/3.12 environment first")
+                    parser.error("Create a Python 3.11, 3.12, or 3.13 environment first")
                 if sys.prefix == sys.base_prefix:
                     parser.error("Activate a project virtual environment before --apply")
                 if not shutil.which("uv"):

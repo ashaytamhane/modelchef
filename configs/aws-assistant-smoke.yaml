@@ -1,0 +1,29 @@
+# Fill the three account-specific values before the first managed AWS run.
+# The controller checks all declared input files and runs a bounded CPU preflight.
+aws_test:
+  profile: modelchef
+  region: us-east-1
+  instance_type: g6.xlarge
+  market_type: spot  # on_demand is an explicit alternative when Spot has no capacity.
+  # on_demand_hourly_usd: '1.25'  # Conservative rate; verify for your instance/region.
+  total_budget_usd: '5.00'
+  per_run_budget_usd: '5.00'
+  max_runtime_minutes: 90
+  max_spot_hourly_usd: '1.00'
+  safety_reserve_usd: '0.50'
+  storage_gb: 100
+  ebs_gb_month_usd: '0.10'
+  ipv4_hourly_usd: '0.005'
+  ledger_path: .aws-runs/assistant-smoke-ledger.sqlite
+  subnet_id: null
+  ami_id: null
+  ami_parameter: /aws/service/deeplearning/ami/x86_64/oss-nvidia-driver-gpu-pytorch-2.13-amazon-linux-2023/latest/ami-id
+  ami_name: Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.13 (Amazon Linux 2023) *
+  install_vllm: false
+  pipeline_config: configs/workflow-assistant-aws-smoke.yaml
+  artifact_bucket: YOUR_PRIVATE_ARTIFACT_BUCKET
+  instance_profile_name: YOUR_TRAINING_INSTANCE_PROFILE
+  artifact_prefix: modelchef-assistant-smoke
+  max_bundle_bytes: 512000000
+  max_result_bytes: 2000000000
+  artifact_cost_reserve_usd: '0.25'

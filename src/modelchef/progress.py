@@ -21,6 +21,8 @@ _activities = {
     'import-model': 'Checking local model/tokenizer files and recording an imported parent run.',
     'export': 'Loading the checkpoint and writing an inference-compatible model export.',
     'chat': 'Loading the model and tokenizer for text generation.',
+    'chat-api': 'Connecting to the configured HTTPS model endpoint.',
+    'aws-export': 'Verifying the completed cloud archive and preparing its serving export.',
     'compare': 'Loading checkpoints and scoring models on the saved evaluation examples.',
     'teacher-data': 'Loading the teacher and generating responses from the supplied prompts.',
     'evaluate-standard': 'Preparing the benchmark command; execution runs the evaluation harness.',
