@@ -139,6 +139,50 @@ python -m modelchef.cli export "$RUN_DIR"
 
 Interactive mode supports `/reset` and `/exit`. Export creates `RUN_DIR/export/` for compatible inference tools. Expect poor text quality from this short training test. To serve the export to clients, continue with [vLLM API serving](#serve-your-model-inference-and-api); remote access requires TLS and authentication.
 
+#### Try a checkpoint while training continues
+
+You do not have to wait for the final report to inspect a saved native model. From
+the repository root, in a second terminal using the same Python environment:
+
+```bash
+RUN_DIR="artifacts/training/YOUR_RUNNING_STAGE"
+python scripts/chat_checkpoint.py "$RUN_DIR" --max-tokens 150
+# Or generate one continuation and exit:
+python scripts/chat_checkpoint.py "$RUN_DIR" --prompt "Once upon a time, a little rabbit" --max-tokens 100
+```
+
+Replace `YOUR_RUNNING_STAGE` with the stage directory containing `config.json` and
+`checkpoints/`, not the parent workflow directory. In PowerShell, assign the variable
+with `$RUN_DIR = "artifacts/training/YOUR_RUNNING_STAGE"`. For a WSL installation,
+run these commands inside Ubuntu using its virtual environment.
+
+The script loads the newest saved checkpoint on **CPU**, leaving GPU memory available
+for training. It supports CPU-compatible native models, not Hugging Face, multimodal
+or GPU-only custom-kernel checkpoints. Use `--checkpoint PATH` to select a particular
+checkpoint. Type `/exit` to quit; restart to load newer weights. Prompts are independent
+continuations: a TinyStories base model completes stories rather than following chat
+instructions. The normal `modelchef.cli chat` command above requires a completed run.
+
+To collect comparable samples automatically, use a separate terminal:
+
+```bash
+python scripts/sample_checkpoints.py "$RUN_DIR" --watch --every 1000
+```
+
+This generates two fixed-prompt continuations from each available checkpoint whose
+optimizer step is a multiple of 1,000, including existing checkpoints, and watches
+for new ones. It uses CPU, fixed seed, temperature 0.8, top-k 40 and up to 80 generated
+tokens per prompt. Samples are appended to `RUN_DIR/checkpoint-samples.jsonl` and
+printed on screen. Sampling adds CPU and disk work but does not update model weights
+or the training random state. Stop the watcher with Ctrl+C; it also exits when it sees
+a final report. This is an optional script, not an automatic training-loop feature.
+
+Compare samples alongside validation loss in `metrics.jsonl`. Better grammar is useful
+evidence, but repetition, inconsistent characters and memorization can persist even
+as loss falls. This recipe learns its tokenizer and model weights from scratch;
+TinyStories supplies synthetic training text, not pretrained model weights. Repeating
+a recipe does not guarantee identical outputs when deterministic training is disabled.
+
 ### 3. Refine an existing model: fine-tune on your data
 
 Use an existing compatible local Hugging Face model directory and a UTF-8 JSONL file containing `prompt` and `response` strings. Supply at least three distinct accepted examples (prefer more for useful split coverage), with answers short enough for the configured context. [Data preparation](#prepare-your-own-ingredients-data) covers text/CSV conversion; [pretrained acquisition](#start-from-a-pretrained-model) covers an explicit capped download if you do not already have a model.

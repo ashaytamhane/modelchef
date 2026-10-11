@@ -146,6 +146,8 @@ Large local inputs can exceed the default bundle limit or the controller's RAM; 
 bounded shards and an appropriate limit rather than assuming disk-mode preprocessing
 also streams the upload. Corpus-scale S3 ingestion is not implemented by this launcher.
 
+See [checkpoint interaction and fixed-prompt monitoring](../README.md#try-a-checkpoint-while-training-continues) to inspect saved native checkpoints before the run finishes. These CPU scripts do not replace final evaluation.
+
 ### Evaluate the completed run
 
 Confirm `status: completed`, loss history, checkpoint recovery and final export in the
