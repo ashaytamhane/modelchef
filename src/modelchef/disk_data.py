@@ -189,10 +189,11 @@ def process_disk(records, config, root):
 
 class TokenBlocks:
     """Map tokens on disk; allocate only the requested batch as int64 tensors."""
-    def __init__(self, path, tokens, context, shift):
+    def __init__(self, path, tokens, context, shift, pad_token_id=None):
         import numpy as np
         self.tokens = np.memmap(path, dtype='<u4', mode='r', shape=(tokens,))
         self.context, self.shift = context, shift
+        self.pad_token_id = pad_token_id
 
     def __len__(self):
         return (len(self.tokens) - 1) // self.context
@@ -206,7 +207,11 @@ class TokenBlocks:
         positions = indices[..., None] * self.context + np.arange(self.context) + self.shift
         if np.any(indices < 0) or np.any(indices >= len(self)):
             raise IndexError('Token block index is out of range')
-        return torch.from_numpy(np.asarray(self.tokens[positions], dtype=np.int64))
+        values = np.asarray(self.tokens[positions], dtype=np.int64)
+        if self.shift and self.pad_token_id is not None:
+            values[values == self.pad_token_id] = -100
+            values[..., -1] = -100  # Never predict the following document.
+        return torch.from_numpy(values)
 
 
 def pack_disk(rows, tokenizer, tokenization, context, limit, folder, split):
@@ -214,6 +219,9 @@ def pack_disk(rows, tokenizer, tokenization, context, limit, folder, split):
     path = folder / ('tokens-' + split + '.bin')
     temporary = path.with_suffix('.tmp')
     count = 0
+    document = tokenization.packing == 'document'
+    pad = tokenizer.token_to_id('<pad>') if document else None
+    real_tokens, skipped = 0, 0
     with temporary.open('wb') as target:
         for row in rows:
             ids = tokenizer.encode(row['text'], add_special_tokens=False).ids
@@ -221,17 +229,31 @@ def pack_disk(rows, tokenizer, tokenization, context, limit, folder, split):
                 ids.insert(0, tokenizer.token_to_id('<bos>'))
             if tokenization.append_eos:
                 ids.append(tokenizer.token_to_id('<eos>'))
+            if document:
+                if len(ids) > context:
+                    skipped += 1
+                    continue
+                if count + context + 1 > limit:
+                    break
+                real_tokens += len(ids)
+                ids += [pad] * (context - len(ids))
             ids = ids[:max(0, limit - count)]
             target.write(np.asarray(ids, dtype='<u4').tobytes())
             count += len(ids)
             if count >= limit:
                 break
+        if document and count:
+            target.write(np.asarray([pad], dtype='<u4').tobytes())
+            count += 1
     if (count - 1) // context < 1:
         temporary.unlink(missing_ok=True)
         raise ValueError('Split has too few tokens for a context block; increase corpus/token budget')
     temporary.replace(path)
     metadata = {'file': path.name, 'tokens': count, 'context': context, 'sha256': file_digest(path)}
-    return (TokenBlocks(path, count, context, 0), TokenBlocks(path, count, context, 1)), metadata
+    if document:
+        metadata.update(packing='document', pad_token_id=pad,
+                        nonpadding_tokens=real_tokens, skipped_oversized_documents=skipped)
+    return (TokenBlocks(path, count, context, 0, pad), TokenBlocks(path, count, context, 1, pad)), metadata
 
 
 def load_blocks(folder):
@@ -246,6 +268,7 @@ def load_blocks(folder):
             raise ValueError('Mapped token file is missing or outside the run directory')
         if path.stat().st_size != metadata['tokens'] * 4 or file_digest(path) != metadata['sha256']:
             raise ValueError('Mapped token file checksum/size changed')
-        blocks[name] = tuple(TokenBlocks(path, metadata['tokens'], metadata['context'], shift)
+        blocks[name] = tuple(TokenBlocks(path, metadata['tokens'], metadata['context'], shift,
+                                        metadata.get('pad_token_id'))
                              for shift in (0, 1))
     return blocks

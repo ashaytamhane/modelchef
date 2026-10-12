@@ -19,6 +19,8 @@ def guest_plan(config, related_models=()):
                                      'training': config.training.model_dump(mode='json')}}
     config.validate_execution()
     extras = ['train', 'pipeline', 'aws']
+    if config.training.optimizer.startswith('adamw8bit'):
+        extras.append('optimizer-8bit')
     models = [config.model, *related_models]
     if any(model.backend == 'huggingface' for model in models):
         extras.append('pretrained')

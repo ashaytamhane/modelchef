@@ -1,0 +1,68 @@
+name: reasoning-social-breadth
+output_dir: data/raw/reasoning-social
+seed: 42
+max_download_bytes: 512000000
+timeout_seconds: 120
+sources:
+- name: everyday-thoughts
+  dataset: HuggingFaceTB/smoltalk2
+  provider: hf_parquet
+  subset: SFT
+  split: smoltalk_everyday_convs_reasoning_Qwen3_32B_think
+  max_rows: 2057
+  collection: reasoning-pairs
+  pretraining_collection: reasoning-text
+  adapter: messages
+  max_example_bytes: 3800
+  reasoning: require
+  min_user_words: 3
+  license: apache-2.0
+  license_url: https://huggingface.co/datasets/HuggingFaceTB/smoltalk2#license
+  attribution: Hugging Face SmolLM3 team; reasoning responses generated with Qwen3-32B.
+    Original system/persona instructions and constituent-source provenance are preserved.
+    Synthetic traces are not verification of correct reasoning.
+  citations: &id001
+  - title: SmolTalk2 dataset and SmolLM3 (2025)
+    authors:
+    - HuggingFaceTB / SmolLM3 team
+    url: https://huggingface.co/datasets/HuggingFaceTB/smoltalk2
+  - title: SmolLM3 release and data recipe
+    authors:
+    - Hugging Face SmolLM3 team
+    url: https://huggingface.co/blog/smollm3
+- name: system-persona-thoughts
+  dataset: HuggingFaceTB/smoltalk2
+  provider: hf_parquet
+  subset: SFT
+  split: smoltalk_systemchats_Qwen3_32B_think
+  max_rows: 10000
+  collection: reasoning-pairs
+  pretraining_collection: reasoning-text
+  adapter: messages
+  max_example_bytes: 3800
+  reasoning: require
+  min_user_words: 3
+  license: apache-2.0
+  license_url: https://huggingface.co/datasets/HuggingFaceTB/smoltalk2#license
+  attribution: Hugging Face SmolLM3 team; reasoning responses generated with Qwen3-32B.
+    Original system/persona instructions and constituent-source provenance are preserved.
+    Synthetic traces are not verification of correct reasoning.
+  citations: *id001
+- name: multi-turn-persona-thoughts
+  dataset: HuggingFaceTB/smoltalk2
+  provider: hf_parquet
+  subset: SFT
+  split: multi_turn_reasoning_if_think
+  max_rows: 5000
+  collection: reasoning-pairs
+  pretraining_collection: reasoning-text
+  adapter: messages
+  max_example_bytes: 3800
+  reasoning: require
+  min_user_words: 3
+  license: apache-2.0
+  license_url: https://huggingface.co/datasets/HuggingFaceTB/smoltalk2#license
+  attribution: SmolLM3 team; prompts sourced from Tulu 3 Personas instruction following,
+    generated using Qwen3-235B-A22B and Qwen3-32B. Preserve original persona instructions
+    and source terms; traces are synthetic.
+  citations: *id001

@@ -106,12 +106,15 @@ def curate_bulk(config, root, progress):
                 with raw_path.open('w', encoding='utf-8') as raw:
                     for rows, used, parquet_manifest in parquet_rows(source, cache,
                             config.max_download_bytes - downloaded, config.timeout_seconds, progress):
+                        bounded_rows = []
                         for row in rows:
                             payload = json.dumps(row, ensure_ascii=False)
                             if len(payload.encode()) > 2_000_000:
-                                raise ValueError('Bulk source row exceeds 2 MB')
+                                skipped['oversized_source_record'] += 1
+                                continue
                             raw.write(payload + '\n')
-                        converted, rejected = adapt_rows(rows, source)
+                            bounded_rows.append(row)
+                        converted, rejected = adapt_rows(bounded_rows, source)
                         count += len(rows)
                         skipped.update(rejected)
                         accepted += len(converted)

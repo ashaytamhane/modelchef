@@ -8,6 +8,7 @@ data:  # OPTIONAL: defaults are supplied when omitted.
   subset: sample-10BT  # OPTIONAL: Dataset configuration name, not a random sampling strategy.
   split: train  # OPTIONAL: defaults are supplied when omitted.
   text_field: text  # OPTIONAL: defaults are supplied when omitted.
+  prepared_run: null  # OPTIONAL: Reuse matching disk-pretraining snapshots for fresh weights; same filesystem.
   local_path: null  # CONDITIONAL: One JSONL path, or use local_paths below.
   local_paths: []  # OPTIONAL: Ordered JSONL shards; mutually exclusive with local_path.
   storage: memory  # OPTIONAL: memory | disk; disk supports local pretrain/midtrain.
@@ -37,6 +38,7 @@ processing:  # OPTIONAL: defaults are supplied when omitted.
   validation_fraction: 0.1  # OPTIONAL: Document fraction; validation + test must be below 1.
   test_fraction: 0.1  # OPTIONAL: defaults are supplied when omitted.
 tokenizer:  # OPTIONAL: defaults are supplied when omitted.
+  packing: concatenate  # OPTIONAL: concatenate | document; document requires disk pretrain/midtrain and skips oversized examples.
   algorithm: byte_bpe  # OPTIONAL: byte_bpe | pretrained; pretrained is reused from an imported/parent run.
   vocab_size: 4096  # OPTIONAL: Requested BPE size (260..262144); a small corpus can learn fewer tokens.
   training_max_documents: null # Optional BPE fitting sample; null uses every training document.
@@ -100,7 +102,7 @@ training:  # OPTIONAL: defaults are supplied when omitted.
   steps: 40  # OPTIONAL: Optimizer updates, with training blocks sampled with replacement.
   micro_batch_size: 2  # OPTIONAL: defaults are supplied when omitted.
   gradient_accumulation: 2  # OPTIONAL: Effective single-device batch = micro_batch_size * gradient_accumulation.
-  optimizer: adamw  # OPTIONAL: adamw only; optimizes trainable full weights or LoRA adapters.
+  optimizer: adamw  # OPTIONAL: adamw | adamw8bit | adamw_in_backward | adamw8bit_in_backward; optional policies require optimizer_kernel: default; see README restrictions.
   learning_rate: 0.0005  # OPTIONAL: defaults are supplied when omitted.
   min_learning_rate_ratio: 0.1  # OPTIONAL: Final cosine learning-rate floor relative to learning_rate.
   betas:  # OPTIONAL: defaults are supplied when omitted.
@@ -110,7 +112,8 @@ training:  # OPTIONAL: defaults are supplied when omitted.
   optimizer_eps: 1.0e-08  # OPTIONAL: defaults are supplied when omitted.
   schedule: cosine  # OPTIONAL: cosine | constant; warmup still applies.
   warmup_steps: 4  # OPTIONAL: Must be less than steps.
-  gradient_clip_norm: 1.0  # OPTIONAL: defaults are supplied when omitted.
+  gradient_clip_norm: 1.0  # OPTIONAL: 0 disables clipping; required for in-backward optimizers.
+  checkpoint_at_start: false  # OPTIONAL: Save initial weights, optimizer and RNG before training.
   checkpoint_every: 20  # OPTIONAL: Optimizer-step interval; final checkpoint is also saved.
   evaluate_every: 10  # OPTIONAL: defaults are supplied when omitted.
   log_every: 5  # OPTIONAL: defaults are supplied when omitted.

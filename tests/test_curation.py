@@ -16,6 +16,29 @@ def ingredient(**kwargs):
         'authors': ['Original Author'], 'url': 'https://example.org/paper'}], **kwargs)
 
 
+def test_reasoning_column_adapter_preserves_order_and_problem_groups():
+    source = Ingredient(name='reasoning', dataset='author/data', adapter='reasoning_fields',
+        reasoning_fields={'prompt': 'question', 'reasoning': 'trace', 'answer': 'final'},
+        collection='pairs', license='apache-2.0', license_url='https://example.org/license',
+        attribution='Authors', citations=[{'title': 'Paper', 'authors': ['Author'],
+        'url': 'https://example.org/paper'}])
+    rows = [{'row_idx': 0, 'row': {'question': 'Add 2 and 3.', 'trace': 'Combine the quantities.',
+                                  'final': '5', 'source': 'original', 'domain': 'math'}}]
+    records, skipped = adapt_rows(rows, source)
+    assert not skipped
+    assert records[0]['response'] == '<think>\nCombine the quantities.\n</think>\n5'
+    assert records[0]['upstream_source'] == 'original'
+    boxed = source.model_copy(update={'reasoning_fields': {'prompt': 'question',
+        'reasoning': 'solution', 'answer': 'solution'}, 'answer_extraction': 'last_boxed'})
+    rows[0]['row']['solution'] = r'Compute the ratio. Therefore \boxed{\frac{2}{3}}.'
+    extracted, _ = adapt_rows(rows, boxed)
+    assert extracted[0]['response'].endswith(r'\frac{2}{3}')
+    assert r'\boxed' not in extracted[0]['response']
+    assert extracted[0]['split_group'] == records[0]['split_group']
+    rows[0]['row']['final'] = ''
+    assert adapt_rows(rows, source)[0] == []
+
+
 def test_reasoning_preserves_complete_trace_and_system_instructions():
     source = ingredient(reasoning='require', min_user_words=3, system_prefix='Reasoning enabled')
     rows = [{'row_idx': 1, 'row': {'chat_template_kwargs': {'custom_instructions': 'Be reserved'},

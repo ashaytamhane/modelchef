@@ -11,6 +11,34 @@ With ModelChef, **pick your ingredients, choose a recipe, cook your model and se
 
 Think of the workflow as **ingredients → recipe → training → evaluation → serving**. Start with one small experiment, then compose stages with `cook`: domain midtraining, instruction tuning, preference learning or distillation. ModelChef records manifests, checkpoints and lineage and explains progress as it runs. You decide what to build and how much to spend; the platform executes the declared steps.
 
+For large experiments on limited NVIDIA GPU memory, the optional `optimizer-8bit`
+extra provides `training.optimizer: adamw8bit`. The experimental
+`adamw8bit_in_backward` also frees each gradient after its update. It requires
+`gradient_accumulation: 1`, `gradient_clip_norm: 0`, `optimizer_kernel: default`,
+BF16/FP32, a single process, no compilation and a supervised training stage.
+`adamw_in_backward` uses the same restrictions with ordinary FP32 AdamW state;
+8-bit variants require an NVIDIA CUDA GPU and the optional extra.
+All optional optimizer policies require `optimizer_kernel: default`.
+These choices change optimizer behavior; fitting a larger model does not establish
+its quality. Ordinary `adamw` remains the default.
+
+For an experimental from-scratch model that learns explicit thought traces before
+answers, see the [reasoning-first pretraining tutorial](docs/REASONING_PRETRAINING.md).
+It includes a public-data curation recipe, document-preserving packing, and a
+1B local training configuration with recovery checkpoints.
+
+To start fresh weights using an existing disk-pretraining corpus, set the optional
+`data.prepared_run` to its run directory. Data, processing, tokenizer, evaluation
+and context settings must match. Both runs must use disk-based pretraining. ModelChef links the immutable snapshots on the
+same filesystem and verifies corpus/token checksums; it does not import model
+weights. This local reuse avoids another preprocessing pass and duplicate large
+files. Use the original acquisition settings for a separate AWS run.
+
+`training.checkpoint_every: 1000` saves every 1,000 optimizer steps. By default,
+local checkpoints are retained; set `MODELCHEF_LOCAL_CHECKPOINT_KEEP=2` in the
+training environment to keep the newest two after each successful save. Retention
+removes older checkpoints, so copy a checkpoint first if you want to preserve it.
+
 ![ModelChef kitchen: datasets and a recipe become a trained model ready for serving.](docs/assets/modelchef-kitchen.png)
 
 ## Quick Start
@@ -1176,6 +1204,7 @@ data:  # OPTIONAL: defaults are supplied when omitted.
   subset: sample-10BT  # OPTIONAL: Dataset configuration name, not a random sampling strategy.
   split: train  # OPTIONAL: defaults are supplied when omitted.
   text_field: text  # OPTIONAL: defaults are supplied when omitted.
+  prepared_run: null  # OPTIONAL: Reuse matching disk-pretraining snapshots for fresh weights; same filesystem.
   local_path: null  # CONDITIONAL: One JSONL path, or use local_paths below.
   local_paths: []  # OPTIONAL: Ordered JSONL shards; mutually exclusive with local_path.
   storage: memory  # OPTIONAL: memory | disk; disk supports local pretrain/midtrain.
@@ -1205,6 +1234,7 @@ processing:  # OPTIONAL: defaults are supplied when omitted.
   validation_fraction: 0.1  # OPTIONAL: Document fraction; validation + test must be below 1.
   test_fraction: 0.1  # OPTIONAL: defaults are supplied when omitted.
 tokenizer:  # OPTIONAL: defaults are supplied when omitted.
+  packing: concatenate  # OPTIONAL: concatenate | document; document requires disk pretrain/midtrain and skips oversized examples.
   algorithm: byte_bpe  # OPTIONAL: byte_bpe | pretrained; pretrained is reused from an imported/parent run.
   vocab_size: 4096  # OPTIONAL: Requested BPE size (260..262144); a small corpus can learn fewer tokens.
   training_max_documents: null # Optional BPE fitting sample; null uses every training document.
@@ -1268,7 +1298,7 @@ training:  # OPTIONAL: defaults are supplied when omitted.
   steps: 40  # OPTIONAL: Optimizer updates, with training blocks sampled with replacement.
   micro_batch_size: 2  # OPTIONAL: defaults are supplied when omitted.
   gradient_accumulation: 2  # OPTIONAL: Effective single-device batch = micro_batch_size * gradient_accumulation.
-  optimizer: adamw  # OPTIONAL: adamw only; optimizes trainable full weights or LoRA adapters.
+  optimizer: adamw  # OPTIONAL: adamw | adamw8bit | adamw_in_backward | adamw8bit_in_backward; optional policies require optimizer_kernel: default; see README restrictions.
   learning_rate: 0.0005  # OPTIONAL: defaults are supplied when omitted.
   min_learning_rate_ratio: 0.1  # OPTIONAL: Final cosine learning-rate floor relative to learning_rate.
   betas:  # OPTIONAL: defaults are supplied when omitted.
@@ -1278,7 +1308,8 @@ training:  # OPTIONAL: defaults are supplied when omitted.
   optimizer_eps: 1.0e-08  # OPTIONAL: defaults are supplied when omitted.
   schedule: cosine  # OPTIONAL: cosine | constant; warmup still applies.
   warmup_steps: 4  # OPTIONAL: Must be less than steps.
-  gradient_clip_norm: 1.0  # OPTIONAL: defaults are supplied when omitted.
+  gradient_clip_norm: 1.0  # OPTIONAL: 0 disables clipping; required for in-backward optimizers.
+  checkpoint_at_start: false  # OPTIONAL: Save initial weights, optimizer and RNG before training.
   checkpoint_every: 20  # OPTIONAL: Optimizer-step interval; final checkpoint is also saved.
   evaluate_every: 10  # OPTIONAL: defaults are supplied when omitted.
   log_every: 5  # OPTIONAL: defaults are supplied when omitted.
@@ -1935,6 +1966,8 @@ AWS launch journals are saved before provisioning steps so interrupted/lost laun
 | `evaluate-standard LOCAL_EXPORT [--run]` | Plan or invoke the optional standard harness |
 | `aws-train CONFIG [--run]` | Plan or execute an S3-backed text or multimodal Spot training stage |
 | `aws-serve CONFIG [--action ACTION] [--deployment ID] [--run]` | Plan/deploy persistent hosting or inspect/manage its lifecycle |
+| `curate CONFIG [--run]` | Preview or acquire bounded, attributed ingredient collections |
+| `dashboard RUN_DIR [--port PORT]` | Serve a local training dashboard; install the dashboard extra |
 | `doctor` | Inspect current hardware and PyTorch/CUDA |
 | `check-cuda-kernel PATH` | Validate local custom SwiGLU outputs and backward gradients on CUDA |
 | `setup [--apply]` | Plan/install hardware-aware PyTorch packages |
@@ -1951,9 +1984,12 @@ AWS launch journals are saved before provisioning steps so interrupted/lost laun
 To try a saved checkpoint from an interrupted or ongoing native training run,
 use `python -m modelchef.cli chat YOUR_RUN_DIRECTORY --checkpoint step-002000.pt`.
 Replace the filename with an actual saved checkpoint in that run's `checkpoints`
-directory. This requires the torch backend and does not mark training complete.
+directory. This supports the torch and optional vLLM backends and does not mark training complete.
+The vLLM path exports the selected checkpoint and reserves 70% of GPU memory;
+use it when sufficient GPU memory is available, especially during ongoing training.
 For pretraining/midtraining checkpoints, interactive inputs are plain text
-continuations; assistant role labels are not automatically inserted.
+continuations unless `stage.prompt_format: chat_transcript` is declared; that
+format inserts user/assistant roles and preserves conversation history.
 
 Use `python -m modelchef.cli COMMAND --help` for flags.
 

@@ -8,6 +8,29 @@ import pytest
 from modelchef.bulk_data import DownloadRedirect, download_file
 
 
+def test_bulk_download_retries_timeout_without_retrying_bad_credentials(tmp_path, monkeypatch):
+    from urllib.error import HTTPError
+    attempts = []
+
+    def transfer(*args):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise TimeoutError('temporary')
+        return {'size': 3}
+
+    monkeypatch.setattr('modelchef.bulk_data._download_file', transfer)
+    monkeypatch.setattr('time.sleep', lambda seconds: None)
+    assert download_file('https://example.org/file', tmp_path/'data', 3, 30, {}, print)['size'] == 3
+    assert len(attempts) == 2
+
+    def denied(*args):
+        raise HTTPError('https://example.org/file', 403, 'denied', {}, None)
+
+    monkeypatch.setattr('modelchef.bulk_data._download_file', denied)
+    with pytest.raises(HTTPError):
+        download_file('https://example.org/file', tmp_path/'data', 3, 30, {}, print)
+
+
 def test_bulk_transfer_is_bounded_and_cache_is_verified(tmp_path, monkeypatch):
     calls = []
 
@@ -24,6 +47,43 @@ def test_bulk_transfer_is_bounded_and_cache_is_verified(tmp_path, monkeypatch):
     path.write_bytes(b'xyz')
     with pytest.raises(ValueError, match='checksum'):
         download_file('https://huggingface.co/file', path, 3, 30, {}, lambda msg: None)
+
+
+def test_range_transfer_resumes_verified_prefix_and_rejects_ignored_ranges(tmp_path, monkeypatch):
+    payload = b'abcdefghijkl'
+    calls = []
+    interrupted = False
+
+    def transfer(request, timeout):
+        nonlocal interrupted
+        interval = request.get_header('Range')
+        calls.append(interval)
+        start, end = map(int, interval.removeprefix('bytes=').split('-'))
+        if start == 4 and not interrupted:
+            interrupted = True
+            raise TimeoutError('temporary')
+        response = io.BytesIO(payload[start:end+1])
+        response.status = 206
+        response.headers = {'Content-Range': f'bytes {start}-{end}/12', 'ETag': 'fixed-version'}
+        return response
+
+    monkeypatch.setattr('modelchef.bulk_data.RANGE_THRESHOLD_BYTES', 1)
+    monkeypatch.setattr('modelchef.bulk_data.RANGE_CHUNK_BYTES', 4)
+    monkeypatch.setattr('time.sleep', lambda seconds: None)
+    monkeypatch.setattr('modelchef.bulk_data.build_opener', lambda *args: SimpleNamespace(open=transfer))
+    path = tmp_path/'ranges.parquet'
+    download_file('https://huggingface.co/file', path, 12, 30, {}, lambda message: None)
+    assert path.read_bytes() == payload
+    assert calls == ['bytes=0-3', 'bytes=4-7', 'bytes=4-7', 'bytes=8-11']
+
+    def ignored(request, timeout):
+        response = io.BytesIO(payload)
+        response.status, response.headers = 200, {}
+        return response
+
+    monkeypatch.setattr('modelchef.bulk_data.build_opener', lambda *args: SimpleNamespace(open=ignored))
+    with pytest.raises(ValueError, match='honor'):
+        download_file('https://huggingface.co/file', tmp_path/'other', 12, 30, {}, print)
 
 
 def test_bulk_transfer_oversize_removes_partial_file(tmp_path, monkeypatch):

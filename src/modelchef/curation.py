@@ -33,7 +33,10 @@ class Ingredient(Section):
     max_rows: int = Field(default=64, ge=3, le=10000000)
     collection: str = Field(pattern=r'^[a-zA-Z0-9_-]+$')
     pretraining_collection: str | None = Field(default=None, pattern=r'^[a-zA-Z0-9_-]+$')
-    adapter: Literal['text', 'messages', 'persona_turn', 'empathy_turn', 'measurements']
+    adapter: Literal['text', 'messages', 'persona_turn', 'empathy_turn', 'measurements', 'reasoning_fields']
+    reasoning_fields: dict[str, str] = Field(default_factory=dict)
+    answer_extraction: Literal['none', 'last_boxed'] = 'none'
+    exclude_sources: list[str] = Field(default_factory=list)
     measurement_fields: dict[str, str] = Field(default_factory=dict)
     measurement_description: str = ''
     measurement_min: float = 0
@@ -51,6 +54,10 @@ class Ingredient(Section):
 
     @model_validator(mode='after')
     def valid_source(self):
+        if self.answer_extraction != 'none' and self.adapter != 'reasoning_fields':
+            raise ValueError('Answer extraction requires a reasoning-fields adapter')
+        if self.adapter == 'reasoning_fields' and set(self.reasoning_fields) != {'prompt', 'reasoning', 'answer'}:
+            raise ValueError('Reasoning fields require prompt, reasoning and answer column mappings')
         if self.provider == 'hf_rows' and self.max_rows > 10000:
             raise ValueError('Large ingredients require hf_parquet bulk acquisition')
         if self.provider == 'https_csv' and not self.source_url:
@@ -114,7 +121,46 @@ def adapt_rows(rows, source):
             group = str(row['conv_id'])
         else:
             row, index = entry['row'], entry['row_idx']
+            if row.get('source') in source.exclude_sources:
+                skipped['excluded_source'] += 1
+                continue
             group = str(row.get('conv_id', index))
+            if source.adapter == 'reasoning_fields':
+                fields = {key: row.get(column) for key, column in source.reasoning_fields.items()}
+                if any(not isinstance(value, str) or not value.strip() for value in fields.values()):
+                    skipped['incomplete_reasoning'] += 1
+                    continue
+                thought = fields['reasoning'].strip()
+                answer = fields['answer'].strip()
+                if source.answer_extraction == 'last_boxed':
+                    marker = answer.rfind('\\boxed{')
+                    depth, end = 1, marker + len('\\boxed{')
+                    start = end
+                    while marker >= 0 and end < len(answer) and depth:
+                        depth += (answer[end] == '{') - (answer[end] == '}')
+                        end += 1
+                    if marker < 0 or depth or not answer[start:end-1].strip():
+                        skipped['missing_boxed_answer'] += 1
+                        continue
+                    thought = (answer[:marker] + answer[end:]).strip()
+                    answer = answer[start:end-1].strip()
+                    if not thought:
+                        skipped['empty_reasoning'] += 1
+                        continue
+                if any(tag in thought + answer for tag in ['<think>', '</think>']):
+                    skipped['nested_reasoning_markers'] += 1
+                    continue
+                prompt = transcript([{'role': 'user', 'content': fields['prompt']}],
+                                    source.system_prompt, source.system_prefix)
+                response = '<think>\n' + thought + '\n</think>\n' + answer
+                group = digest(' '.join(fields['prompt'].casefold().split()).encode())
+                if len((prompt + response).encode()) > source.max_example_bytes:
+                    skipped['oversized'] += 1
+                    continue
+                result.append({'prompt': prompt, 'response': response, 'source': source.name,
+                               'source_row': index, 'split_group': 'reasoning-problem:' + group,
+                               'upstream_source': row.get('source'), 'domain': row.get('domain')})
+                continue
             if source.adapter in {'text', 'measurements'}:
                 text = row[source.text_field]
                 if not isinstance(text, str):

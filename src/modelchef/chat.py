@@ -27,7 +27,7 @@ def checkpoint_for(folder, selected=None):
     return folder / "checkpoints" / f"step-{report['optimizer_steps']:06d}.pt"
 
 
-def export_model(folder):
+def export_model(folder, checkpoint=None):
     folder = require_run_folder(folder)
     progress('Loading the completed checkpoint for inference-compatible export.')
     import torch
@@ -38,7 +38,7 @@ def export_model(folder):
     folder = Path(folder).resolve()
     config = RunConfig.model_validate_json((folder / "config.json").read_text())
     c = config.model
-    state = torch.load(checkpoint_for(folder), map_location="cpu", weights_only=True)["model"]
+    state = torch.load(checkpoint_for(folder, checkpoint), map_location="cpu", weights_only=True, mmap=True)["model"]
     if c.backend == 'native' and c.peft.method == 'lora':
         from modelchef.adapters import merged_state
         adapter_dir = folder / 'adapter'
@@ -151,8 +151,6 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
 
     if max_tokens < 1 or temperature <= 0 or top_k < 0:
         raise ValueError("max_tokens/temperature must be positive; top_k must be nonnegative")
-    if checkpoint is not None and backend != 'torch':
-        raise ValueError('--checkpoint currently requires --backend torch')
     folder = Path(folder).resolve()
     config = RunConfig.model_validate_json((folder / "config.json").read_text())
     if system_prompt and config.stage.prompt_format != 'chat_transcript':
@@ -163,10 +161,10 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
         progress('Preparing the local export and loading vLLM model weights.')
         os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", VLLM_NO_USAGE_STATS="1")
         from vllm import LLM, SamplingParams
-        export = export_model(folder)
+        export = export_model(folder, checkpoint)
         engine = LLM(model=str(export), tokenizer=str(export), dtype="float16",
                      max_model_len=config.model.context_length, max_num_seqs=1,
-                     gpu_memory_utilization=0.3, enforce_eager=True)
+                     gpu_memory_utilization=0.7, enforce_eager=True)
         def generate(text):
             # Bound tokenized prompts ourselves; avoid version-specific sampling truncation flags.
             output_tokens = min(max_tokens, config.model.context_length - 1)
@@ -174,6 +172,9 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
                 raise ValueError('Prompt/history plus output exceeds context; shorten it or /reset to retain the persona')
             ids = tokenizer.encode(text).ids[-(config.model.context_length - output_tokens):]
             ids = ids or [tokenizer.token_to_id("<bos>")]
+            if config.tokenizer.add_bos and ids[0] != tokenizer.token_to_id('<bos>'):
+                remaining = config.model.context_length - output_tokens - 1
+                ids = [tokenizer.token_to_id('<bos>')] + (ids[-remaining:] if remaining else [])
             params = SamplingParams(temperature=temperature, top_k=top_k if top_k else -1,
                                     max_tokens=output_tokens,
                                     seed=config.training.seed)
@@ -189,6 +190,8 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
         model.eval()
         def generate(text):
             ids = tokenizer.encode(text).ids or [tokenizer.token_to_id("<bos>")]
+            if config.tokenizer.add_bos and ids[0] != tokenizer.token_to_id('<bos>'):
+                ids.insert(0, tokenizer.token_to_id('<bos>'))
             if system_prompt and len(ids) + max_tokens > config.model.context_length:
                 raise ValueError('Prompt/history plus output exceeds context; shorten it or /reset to retain the persona')
             sequence = torch.tensor([ids], device=device)
@@ -210,7 +213,7 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
           "Short validation runs do not produce a useful assistant.", flush=True)
     if prompt is not None:
         progress(f'Generating a response with an output limit of {max_tokens} tokens.')
-        if config.stage.kind in {'sft', 'dpo', 'rlvr', 'distill'}:
+        if config.stage.prompt_format == 'chat_transcript' or config.stage.kind in {'sft', 'dpo', 'rlvr', 'distill'}:
             from modelchef.objectives import format_prompt
             if config.stage.prompt_format == 'chat_transcript':
                 prompt = (('System: ' + system_prompt + '\n') if system_prompt else '') + 'User: ' + prompt
@@ -234,7 +237,7 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
             continue
         text = ((('System: ' + system_prompt + '\n') if system_prompt else '') +
                 history + "User: " + message + "\nAssistant:")
-        if config.stage.kind in {'pretrain', 'midtrain'}:
+        if config.stage.kind in {'pretrain', 'midtrain'} and config.stage.prompt_format != 'chat_transcript':
             text = message  # Base models continue text; do not inject untrained chat roles.
         response = generate(text)
         print("Model: " + response, flush=True)

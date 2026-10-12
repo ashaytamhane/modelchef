@@ -233,6 +233,18 @@
           "title": "Text Field",
           "type": "string"
         },
+        "prepared_run": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prepared Run"
+        },
         "local_path": {
           "anyOf": [
             {
@@ -770,6 +782,15 @@
     "Tokenization": {
       "additionalProperties": false,
       "properties": {
+        "packing": {
+          "default": "concatenate",
+          "enum": [
+            "concatenate",
+            "document"
+          ],
+          "title": "Packing",
+          "type": "string"
+        },
         "algorithm": {
           "default": "byte_bpe",
           "enum": [
@@ -954,8 +975,13 @@
           "type": "integer"
         },
         "optimizer": {
-          "const": "adamw",
           "default": "adamw",
+          "enum": [
+            "adamw",
+            "adamw8bit",
+            "adamw_in_backward",
+            "adamw8bit_in_backward"
+          ],
           "title": "Optimizer",
           "type": "string"
         },
@@ -1019,7 +1045,7 @@
         },
         "gradient_clip_norm": {
           "default": 1,
-          "exclusiveMinimum": 0,
+          "minimum": 0,
           "title": "Gradient Clip Norm",
           "type": "number"
         },
@@ -1028,6 +1054,11 @@
           "exclusiveMinimum": 0,
           "title": "Checkpoint Every",
           "type": "integer"
+        },
+        "checkpoint_at_start": {
+          "default": false,
+          "title": "Checkpoint At Start",
+          "type": "boolean"
         },
         "evaluate_every": {
           "default": 10,

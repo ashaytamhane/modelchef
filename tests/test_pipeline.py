@@ -208,6 +208,13 @@ def test_complete_cpu_pipeline_and_exact_resume(tmp_path):
     from modelchef.chat import export_model
     from modelchef.model import Decoder
     exported = export_model(Path(result["run_dir"]))
+    report_path = Path(result['run_dir']) / 'report.json'
+    report = json.loads(report_path.read_text())
+    report['status'] = 'failed'
+    report_path.write_text(json.dumps(report))
+    with pytest.raises(ValueError, match='incomplete'):
+        export_model(Path(result['run_dir']))
+    assert export_model(Path(result['run_dir']), Path(result['checkpoint'])) == exported
     hf_model = transformers.LlamaForCausalLM.from_pretrained(exported).eval()
     native = Decoder(config.model, hf_model.config.vocab_size).eval()
     native.load_state_dict(final)

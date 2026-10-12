@@ -5,6 +5,9 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from modelchef.corpus import digest, file_digest, viewer_headers, viewer_page
 
+RANGE_THRESHOLD_BYTES = 256 * 1024 * 1024
+RANGE_CHUNK_BYTES = 32 * 1024 * 1024
+
 
 class DownloadRedirect(HTTPRedirectHandler):
     def redirect_request(self, request, response, code, message, headers, newurl):
@@ -17,6 +20,23 @@ class DownloadRedirect(HTTPRedirectHandler):
 
 
 def download_file(url, path, size, timeout, headers, explain):
+    import time
+    from urllib.error import HTTPError, URLError
+    for attempt in range(4):
+        try:
+            return _download_file(url, path, size, timeout, headers, explain)
+        except (TimeoutError, ConnectionError, URLError) as error:
+            if isinstance(error, HTTPError) and error.code not in {429, 500, 502, 503, 504}:
+                raise
+            if attempt == 3:
+                raise
+            delay = min(5 * 2 ** attempt, 20)
+            explain(f'Bulk transfer interrupted ({type(error).__name__}); retrying the same '
+                    f'file in {delay}s, attempt {attempt + 2}/4. Verified files are retained.')
+            time.sleep(delay)
+
+
+def _download_file(url, path, size, timeout, headers, explain):
     stamp = path.with_suffix('.json')
     if path.exists() and stamp.exists():
         saved = json.loads(stamp.read_text())
@@ -25,6 +45,8 @@ def download_file(url, path, size, timeout, headers, explain):
                 raise ValueError('Cached Parquet file checksum changed; refuse silent reuse')
             explain(f'Reusing verified Parquet file ({size:,} bytes).')
             return saved
+    if size >= RANGE_THRESHOLD_BYTES:
+        return _download_ranges(url, path, size, timeout, headers, explain)
     explain(f'Downloading one Parquet file ({size:,} bytes), rather than 100-row pages.')
     temporary = path.with_suffix('.part')
     try:
@@ -48,6 +70,57 @@ def download_file(url, path, size, timeout, headers, explain):
         return saved
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _download_ranges(url, path, size, timeout, headers, explain):
+    """Commit verified prefixes; never append an ignored or mismatched HTTP range."""
+    import hashlib
+    temporary = path.with_suffix('.range-part')
+    state_path = path.with_suffix('.range-state.json')
+    state = {'url': url, 'size': size, 'received': 0, 'etag': None, 'sha256': digest(b'')}
+    if state_path.exists():
+        state = json.loads(state_path.read_text())
+        if state['url'] != url or state['size'] != size or not 0 <= state['received'] <= size:
+            raise ValueError('Partial download identity changed')
+        if not temporary.exists() or temporary.stat().st_size != state['received'] or file_digest(temporary) != state['sha256']:
+            raise ValueError('Partial download checksum/size changed')
+    elif temporary.exists():
+        raise ValueError('Partial download has no verified state')
+    hasher = hashlib.sha256()
+    if temporary.exists():
+        with temporary.open('rb') as previous:
+            while chunk := previous.read(1024 * 1024):
+                hasher.update(chunk)
+    explain(f'Range transfer: resume at {state["received"]:,} / {size:,} bytes.')
+    while state['received'] < size:
+        start = state['received']
+        end = min(size, start + RANGE_CHUNK_BYTES) - 1
+        request_headers = {**headers, 'Range': f'bytes={start}-{end}'}
+        if state['etag']:
+            request_headers['If-Range'] = state['etag']
+        with build_opener(DownloadRedirect()).open(Request(url, headers=request_headers), timeout=timeout) as response:
+            expected = f'bytes {start}-{end}/{size}'
+            if response.status != 206 or response.headers.get('Content-Range') != expected:
+                raise ValueError('Server did not honor the exact requested byte range')
+            etag = response.headers.get('ETag')
+            if state['etag'] and etag != state['etag']:
+                raise ValueError('Source version changed during range transfer')
+            payload = response.read(end - start + 2)
+            if len(payload) != end - start + 1:
+                raise ConnectionError('Incomplete range response; retry the same range')
+        with temporary.open('ab') as target:
+            target.write(payload)
+        hasher.update(payload)
+        state.update(received=end + 1, etag=etag, sha256=hasher.hexdigest())
+        pending = state_path.with_suffix('.tmp')
+        pending.write_text(json.dumps(state), encoding='utf-8')
+        pending.replace(state_path)
+        explain(f'Range transfer: verified {state["received"]:,} / {size:,} bytes.')
+    temporary.replace(path)
+    saved = {'url': url, 'size': size, 'sha256': state['sha256']}
+    path.with_suffix('.json').write_text(json.dumps(saved), encoding='utf-8')
+    state_path.unlink()
+    return saved
 
 
 def acquire_parquet(config, cache, explain):

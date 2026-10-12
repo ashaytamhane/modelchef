@@ -161,7 +161,7 @@ def _main() -> None:
     chat_parser.add_argument("--backend", choices=["torch", "vllm"], default="torch")
     chat_parser.add_argument("--prompt")
     chat_parser.add_argument('--checkpoint', type=Path,
-                             help='Saved checkpoint filename for torch inference, including unfinished runs')
+                             help='Saved checkpoint filename for torch or vLLM inference, including unfinished runs')
     chat_parser.add_argument("--max-tokens", type=int, default=32)
     chat_parser.add_argument("--temperature", type=float, default=0.8)
     chat_parser.add_argument("--top-k", type=int, default=30)

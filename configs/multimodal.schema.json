@@ -330,8 +330,13 @@
           "type": "integer"
         },
         "optimizer": {
-          "const": "adamw",
           "default": "adamw",
+          "enum": [
+            "adamw",
+            "adamw8bit",
+            "adamw_in_backward",
+            "adamw8bit_in_backward"
+          ],
           "title": "Optimizer",
           "type": "string"
         },
@@ -395,7 +400,7 @@
         },
         "gradient_clip_norm": {
           "default": 1,
-          "exclusiveMinimum": 0,
+          "minimum": 0,
           "title": "Gradient Clip Norm",
           "type": "number"
         },
@@ -404,6 +409,11 @@
           "exclusiveMinimum": 0,
           "title": "Checkpoint Every",
           "type": "integer"
+        },
+        "checkpoint_at_start": {
+          "default": false,
+          "title": "Checkpoint At Start",
+          "type": "boolean"
         },
         "evaluate_every": {
           "default": 10,

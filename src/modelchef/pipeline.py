@@ -75,6 +75,15 @@ def pack(documents, tokenizer, c, context, token_limit):
             stream[1:blocks * context + 1].view(blocks, context)), len(tokens)
 
 
+def trim_padded_pair(x, y):
+    """Skip trailing masked positions while preserving every supervised target."""
+    valid_columns = (y != -100).any(dim=0).nonzero()
+    if not len(valid_columns):
+        raise ValueError('Batch has no supervised tokens')
+    end = valid_columns[-1].item() + 1
+    return x[:, :end], y[:, :end]
+
+
 def evaluate(model, blocks, batches, batch_size, device, amp):
     model.eval()
     loss_sum, tokens = 0.0, 0
@@ -82,6 +91,8 @@ def evaluate(model, blocks, batches, batch_size, device, amp):
     with torch.no_grad():
         for start in range(0, limit, batch_size):
             x, y = (part[start:start + batch_size].to(device) for part in blocks)
+            if (y[:, -1] == -100).all():
+                x, y = trim_padded_pair(x, y)
             with amp():
                 logits = model(x)
                 loss = F.cross_entropy(logits.float().flatten(0, 1), y.flatten(), reduction="sum")
@@ -124,6 +135,12 @@ def run_pipeline(config, root, resume=None, prepare_only=False):
     if resume and RunConfig.model_validate_json((folder / "config.json").read_text()).model_dump(
             mode="json") != recipe:
         raise ValueError("Resume configuration differs; refusing to modify the saved run")
+    if resume:
+        recipe = json.loads((folder / "config.json").read_text())
+        fingerprint = digest(json.dumps(recipe, sort_keys=True).encode())
+    elif config.data.prepared_run:
+        from modelchef.prepared_data import reuse_prepared_data
+        reuse_prepared_data(config, root, folder)
     narrate = Narrator(folder, config.explain == "detailed")
     report = {"status": "running", "run_dir": str(folder), "config_sha256": fingerprint}
     (folder / "config.json").write_text(json.dumps(recipe, indent=2), encoding="utf-8")
@@ -142,9 +159,10 @@ def run_pipeline(config, root, resume=None, prepare_only=False):
 def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False):
     if c.model.backend == 'huggingface' and c.stage.kind == 'pretrain':
         raise ValueError('Import the pretrained model, then choose a continuation/post-training stage')
+    prepared = bool(c.data.prepared_run)
     saved = None
     if resume:
-        saved = torch.load(resume, map_location='cpu', weights_only=True)
+        saved = torch.load(resume, map_location='cpu', weights_only=True, mmap=True)
         required = ['raw.jsonl', 'source-manifest.json', 'benchmark-examples.json',
                     'benchmark-manifest.json', 'tokenizer.json', 'tokens.pt']
         missing = [name for name in required if not (folder / name).is_file()]
@@ -195,7 +213,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         runtime["precision"]]
     def amp():
         return (nullcontext() if dtype == torch.float32 else
-                torch.autocast(device_type=device, dtype=dtype))
+                torch.autocast(device_type=device, dtype=dtype,
+                               cache_enabled=not c.training.optimizer.endswith('_in_backward')))
     from modelchef.provenance import environment_provenance
     environment = {**runtime, **environment_provenance(root)}
     report['environment'] = environment
@@ -210,7 +229,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             f"Limits: {c.data.max_documents} documents and {c.data.max_download_bytes:,} bytes. "
             "The saved SHA256 identifies the exact sample; raw text is never committed to Git.")
     snapshot = folder / 'raw.jsonl'
-    if resume:
+    if resume or prepared:
         source = json.loads((folder / 'source-manifest.json').read_text())
         records = (JsonlRows(snapshot, source['documents']) if c.data.storage == 'disk' else
                    [json.loads(line) for line in snapshot.read_text(encoding='utf-8').splitlines()])
@@ -221,14 +240,14 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         with snapshot.open('w', encoding='utf-8', newline='\n') as output:
             for row in records:
                 output.write(json.dumps(row, ensure_ascii=False) + '\n')
-    if not resume:
+    if not (resume or prepared):
         (folder / "source-manifest.json").write_text(json.dumps(source, indent=2), encoding="utf-8")
 
     n.stage("2b. Select domain benchmarks", f"Domain '{c.data.domain}' selects "
             f"'{select_benchmark(c)}'. Download only the configured small evaluation sample. "
             "These examples are excluded from tokenizer/training inputs and used only for evaluation.")
     benchmark_snapshot = folder / 'benchmark-examples.json'
-    if resume:
+    if resume or prepared:
         benchmark_source = json.loads((folder / 'benchmark-manifest.json').read_text())
         if benchmark_source.get('sha256') and digest(benchmark_snapshot.read_bytes()) != benchmark_source['sha256']:
             raise ValueError('Saved benchmark sample checksum changed')
@@ -244,7 +263,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     processing_config = c.model_copy(deep=True)
     if examples:
         benchmark_path = folder / "benchmark-text.txt"
-        if not resume:
+        if not (resume or prepared):
             benchmark_path.write_text("\n".join(e["decontamination_text"] for e in examples),
                                       encoding="utf-8")
         elif not benchmark_path.is_file() or benchmark_path.read_text(encoding='utf-8') != '\n'.join(
@@ -257,9 +276,17 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             "lexical deduplication before document-level seeded train/validation/test splitting. "
             "Configured benchmark files enable exact n-gram decontamination; otherwise it is unconfigured.")
     structured = c.stage.kind in {'sft', 'dpo', 'rlvr', 'distill'}
-    splits, processing = (prepare_structured(records, processing_config, root) if structured else
-                          process(records, processing_config, root))
-    if not resume:
+    if (resume or prepared) and c.data.storage == 'disk':
+        processing = json.loads((folder / 'processing.json').read_text(encoding='utf-8'))
+        splits = {name: JsonlRows(folder / f'{name}.jsonl', processing['split_documents'][name])
+                  for name in ['train', 'validation', 'test']}
+        if any(not rows.path.is_file() for rows in splits.values()):
+            raise ValueError('Saved processed split is missing; cannot resume this run')
+        n.say('Reuse saved processed splits; mapped token checksums are verified before training.')
+    else:
+        splits, processing = (prepare_structured(records, processing_config, root) if structured else
+                              process(records, processing_config, root))
+    if not (resume or prepared):
         for name, rows in splits.items():
             with (folder / f"{name}.jsonl").open("w", encoding="utf-8") as output:
                 for row in rows:
@@ -294,30 +321,33 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             raise ValueError('Parent checkpoint/tokenizer changed since this stage started')
         parent_manifest.write_text(json.dumps(report['parent']), encoding='utf-8')
         n.say(f'Reuse parent vocabulary and weights for {c.stage.kind}; no vocabulary retraining.')
-    elif resume:
+    elif resume or prepared:
         tokenizer = load_tokenizer(folder)
     elif c.stage.uses_distillation:
         tokenizer = load_tokenizer((root / c.stage.teacher_run).resolve())
         n.say('Reuse the teacher tokenizer for aligned token distributions; student weights start randomly.')
     else:
         tokenizer = train_tokenizer(splits["train"], c.tokenizer)
-    if not resume:
+    if not (resume or prepared):
         tokenizer.save(str(folder / "tokenizer.json"))
-    if not resume and hasattr(tokenizer, 'roles'):
+    if not (resume or prepared) and hasattr(tokenizer, 'roles'):
         (folder / 'tokenizer-roles.json').write_text(json.dumps(tokenizer.roles), encoding='utf-8')
     tokenizer_hash = digest((folder / "tokenizer.json").read_bytes())
     roles_path = folder / 'tokenizer-roles.json'
     roles_hash = digest(roles_path.read_bytes()) if roles_path.exists() else None
     n.say(f"BPE vocabulary={tokenizer.get_vocab_size()} (requested {c.tokenizer.vocab_size}).")
 
+    packing_explanation = ('Keep each complete document in one padded context window; skip oversized '
+                           'documents and mask padding/cross-document targets.'
+                           if c.tokenizer.packing == 'document' else
+                           'Concatenate within splits; tail tokens are dropped and cross-document attention is allowed.')
     n.stage("5. Tokenize and pack next-token examples", "Encode each split separately, insert configured "
-            "BOS/EOS tokens, concatenate within splits, then form fixed-length input/shifted-target pairs. "
-            "Tail tokens are dropped; cross-document attention is allowed. Enforce a total token cap.")
+            "BOS/EOS tokens, then form fixed-length input/shifted-target pairs. " + packing_explanation)
     blocks, token_counts = {}, {}
     fractions = {"validation": c.processing.validation_fraction, "test": c.processing.test_fraction,
                  "train": 1 - c.processing.validation_fraction - c.processing.test_fraction}
     descriptors = {}
-    if c.data.storage == 'disk' and resume:
+    if c.data.storage == 'disk' and (resume or prepared):
         blocks = load_blocks(folder)
         descriptors = torch.load(folder / 'tokens.pt', weights_only=True)['splits']
         token_counts = {name: item['tokens'] for name, item in descriptors.items()}
@@ -341,12 +371,15 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         if (saved['config_sha256'], saved['data_sha256'], saved['tokenizer_sha256']) != (
                 fingerprint, data_hash, tokenizer_hash):
             raise ValueError('Resume recipe/data/tokenizer differs from checkpoint')
-    else:
+    elif not prepared:
         torch.save({'format': 'memmap-v1', 'splits': descriptors} if descriptors else blocks,
                    folder / 'tokens.pt')
     token_hash = file_digest(folder / 'tokens.pt')
     n.say(f"Token counts: {token_counts}; context={c.model.context_length}. "
           "This is bounded pretraining data, not a full corpus download.")
+    if c.tokenizer.packing == 'document':
+        n.say('Document packing: ' + json.dumps({name: {key: item[key] for key in
+              ['nonpadding_tokens', 'skipped_oversized_documents']} for name, item in descriptors.items()}))
 
     n.stage("6. Construct the training model", "The native decoder uses causal attention, RoPE, GQA, "
             "RMSNorm and SwiGLU. Pretraining starts from random weights; later stages restore a parent. "
@@ -406,10 +439,10 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     groups = [{"params": [p for p in model.parameters() if p.requires_grad and p.ndim >= 2],
                "weight_decay": t.weight_decay},
               {"params": [p for p in model.parameters() if p.requires_grad and p.ndim < 2], "weight_decay": 0}]
-    optimizer_options = ({'fused': True} if t.optimizer_kernel == 'fused' else
-                         {'foreach': True} if t.optimizer_kernel == 'foreach' else {})
-    optimizer = torch.optim.AdamW(groups, lr=t.learning_rate, betas=t.betas,
-                                  eps=t.optimizer_eps, **optimizer_options)
+    from modelchef.optimizers import InBackwardAdamW, create_optimizer
+    optimizer = create_optimizer(groups, t, device)
+    if isinstance(optimizer, InBackwardAdamW) and runtime['requires_grad_scaler']:
+        raise ValueError('In-backward AdamW does not support FP16 gradient scaling')
     scaler = torch.amp.GradScaler("cuda", enabled=runtime["requires_grad_scaler"])
     generator = torch.Generator().manual_seed(t.seed)
     step, consumed, skipped_updates = 0, 0, 0
@@ -444,8 +477,10 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         report['checkpoint'] = str(path)
         n.say(f"Checkpoint saved at step {index}: {path.name}", detail=True)
         from modelchef.recovery import checkpoint_to_s3
-        if checkpoint_to_s3(root, folder, path) is not None:
+        uploaded = checkpoint_to_s3(root, folder, path)
+        if uploaded is not None:
             n.say(f'S3 recovery committed at step {index}: weights, optimizer, RNG, tokenizer and data snapshots.')
+        if uploaded is not None or 'MODELCHEF_LOCAL_CHECKPOINT_KEEP' in os.environ:
             keep = int(os.environ.get('MODELCHEF_LOCAL_CHECKPOINT_KEEP', '2'))
             if keep < 1:
                 raise ValueError('MODELCHEF_LOCAL_CHECKPOINT_KEEP must be positive')
@@ -460,7 +495,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         (folder / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         return report
 
-    if os.environ.get('MODELCHEF_RECOVERY_S3_URI') and not resume:
+    if (os.environ.get('MODELCHEF_RECOVERY_S3_URI') or t.checkpoint_at_start) and not resume:
         save_checkpoint(step)
 
     explanations = {
@@ -509,6 +544,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         for _ in range(t.gradient_accumulation):
             indices = torch.randint(len(blocks["train"][0]), (t.micro_batch_size,), generator=generator)
             parts = tuple(part[indices].to(device) for part in blocks["train"])
+            if c.tokenizer.packing == 'document':
+                parts = trim_padded_pair(*parts)
             with amp():
                 loss, objective_metrics = objective(model, parts, c, reference, tokenizer)
                 if getattr(model, 'auxiliary_loss', None) is not None:
@@ -522,8 +559,9 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             train_loss += loss.item() / t.gradient_accumulation
             step_tokens += sum((part != -100).sum().item() for part in parts[1::2])
         scaler.unscale_(optimizer)
-        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), t.gradient_clip_norm,
-                                              error_if_nonfinite=False)
+        norm = (optimizer.gradient_norm() if isinstance(optimizer, InBackwardAdamW) else
+                torch.nn.utils.clip_grad_norm_(model.parameters(), t.gradient_clip_norm or float('inf'),
+                                               error_if_nonfinite=False))
         if not torch.isfinite(norm):
             if not scaler.is_enabled():
                 raise FloatingPointError('Non-finite training gradient norm')
@@ -544,6 +582,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                    "tokens_per_second": (step - initial_step) * t.micro_batch_size *
                    t.gradient_accumulation * c.model.context_length /
                    max(time.monotonic() - started, 1e-9)}
+        metrics['target_tokens_per_second'] = (consumed - (saved['tokens_seen'] if resume else 0)) / max(
+            time.monotonic() - started, 1e-9)
         metrics.update(auxiliary)
         if step % t.evaluate_every == 0 or step == t.steps:
             metrics["validation"] = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
@@ -604,15 +644,33 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         'validation': evaluate_stage(model, reference, blocks['validation'], tokenizer, c, device, amp),
         'test': evaluate_stage(model, reference, blocks['test'], tokenizer, c, device, amp)}
     model.eval()
-    restored = create_model(c.model, tokenizer.get_vocab_size()).to(device)
-    restored.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True)["model"])
-    restored.eval()
     probe = blocks["test"][0][:1].to(device)
     tolerance = 0.03 if dtype == torch.bfloat16 else 0.003 if dtype == torch.float16 else 1e-5
     with torch.no_grad(), amp():
-        if not torch.allclose(model(probe), restored(probe), rtol=tolerance, atol=tolerance):
+        expected = model(probe).detach()
+    # Release training state before constructing the fresh decoder: large models
+    # must not require room for two models plus optimizer state to verify reload.
+    for handle in getattr(optimizer, 'handles', []):
+        handle.remove()
+    optimizer = None
+    groups.clear()
+    reference = None
+    if 'loss' in locals():
+        del loss
+    del model
+    import gc
+    gc.collect()
+    if device == 'cuda':
+        torch.cuda.empty_cache()
+    model = create_model(c.model, tokenizer.get_vocab_size()).to(device)
+    restored_state = torch.load(checkpoint_path, map_location='cpu', weights_only=True, mmap=True)
+    model.load_state_dict(restored_state["model"])
+    del restored_state
+    model.eval()
+    with torch.no_grad(), amp():
+        if not torch.allclose(expected, model(probe), rtol=tolerance, atol=tolerance):
             raise RuntimeError("Reloaded checkpoint logits differ")
-    del restored
+    del expected
     n.say(f"Validation loss={validation['loss']:.4f}, test loss={test['loss']:.4f}; "
           "checkpoint reload verified.")
     benchmark_scores = (evaluate_choices(model, tokenizer, examples, device,
@@ -634,6 +692,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     ids = tokenizer.encode(prompt).ids
     if not ids:
         ids = [tokenizer.token_to_id("<bos>")]
+    if c.tokenizer.add_bos and ids[0] != tokenizer.token_to_id('<bos>'):
+        ids.insert(0, tokenizer.token_to_id('<bos>'))
     generated = torch.tensor([ids], device=device)
     with torch.no_grad():
         for _ in range(c.evaluation.generate_tokens):

@@ -10,7 +10,7 @@ import unicodedata
 from collections import Counter
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -79,6 +79,13 @@ def viewer_page(request, timeout, limit, explain):
                 pause = min(remaining, 60)
                 time.sleep(pause)
                 remaining -= pause
+        except (TimeoutError, ConnectionError, URLError) as error:
+            if attempt == 6:
+                raise
+            delay = min(5 * 2 ** attempt, 60)
+            explain(f'Dataset request interrupted ({type(error).__name__}); retrying the same '
+                    f'request in {delay}s (retry {attempt + 1}/6).')
+            time.sleep(delay)
 
 
 def acquire(config, root, explain):

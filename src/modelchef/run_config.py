@@ -14,6 +14,7 @@ class Data(Section):
     subset: str = "sample-10BT"
     split: str = "train"
     text_field: str = "text"
+    prepared_run: str | None = None
     local_path: str | None = None
     local_paths: list[str] = Field(default_factory=list)
     storage: Literal["memory", "disk"] = "memory"
@@ -47,6 +48,7 @@ class Processing(Section):
 
 
 class Tokenization(Section):
+    packing: Literal['concatenate', 'document'] = 'concatenate'
     algorithm: Literal["byte_bpe", "pretrained"] = "byte_bpe"
     vocab_size: int = Field(default=4096, ge=260, le=262144)
     min_frequency: int = Field(default=2, gt=0)
@@ -127,7 +129,7 @@ class Training(Section):
     steps: int = Field(default=40, gt=0)
     micro_batch_size: int = Field(default=2, gt=0)
     gradient_accumulation: int = Field(default=2, gt=0)
-    optimizer: Literal["adamw"] = "adamw"
+    optimizer: Literal['adamw', 'adamw8bit', 'adamw_in_backward', 'adamw8bit_in_backward'] = 'adamw'
     learning_rate: float = Field(default=0.0005, gt=0)
     min_learning_rate_ratio: float = Field(default=0.1, ge=0, le=1)
     betas: tuple[float, float] = (0.9, 0.95)
@@ -135,8 +137,9 @@ class Training(Section):
     optimizer_eps: float = Field(default=1e-8, gt=0)
     schedule: Literal["cosine", "constant"] = "cosine"
     warmup_steps: int = Field(default=4, ge=0)
-    gradient_clip_norm: float = Field(default=1, gt=0)
+    gradient_clip_norm: float = Field(default=1, ge=0)
     checkpoint_every: int = Field(default=20, gt=0)
+    checkpoint_at_start: bool = False
     evaluate_every: int = Field(default=10, gt=0)
     log_every: int = Field(default=5, gt=0)
     max_runtime_seconds: int = Field(default=600, gt=0)
@@ -218,12 +221,23 @@ class RunConfig(Section):
             raise ValueError('Performance probe must be shorter than training')
         if t.performance_gate and t.distributed != 'none':
             raise ValueError('Performance gates currently require single-process training')
+        if t.optimizer != 'adamw' and t.optimizer_kernel != 'default':
+            raise ValueError('Optional optimizer backends require optimizer_kernel: default')
+        if t.optimizer.endswith('_in_backward') and (
+                t.gradient_accumulation != 1 or t.gradient_clip_norm != 0 or
+                t.distributed != 'none' or t.compile or t.precision == 'fp16' or
+                self.stage.kind in {'dpo', 'rlvr'}):
+            raise ValueError('In-backward AdamW requires accumulation=1, gradient_clip_norm=0, '
+                                 'single process, no compile/FP16, and a supervised objective')
         if len(set(self.tokenizer.special_tokens)) != len(self.tokenizer.special_tokens):
             raise ValueError("Special tokens must be unique")
         if not {"<pad>", "<unk>", "<bos>", "<eos>"} <= set(self.tokenizer.special_tokens):
             raise ValueError("Required pad/unk/bos/eos tokens missing")
         if self.data.provider == "local_jsonl" and not (self.data.local_path or self.data.local_paths):
             raise ValueError("local_jsonl requires local_path or local_paths")
+        if self.tokenizer.packing == 'document' and (self.data.storage != 'disk' or
+                self.stage.kind not in {'pretrain', 'midtrain'}):
+            raise ValueError('Document packing requires disk-based next-token training')
         if self.data.storage == 'disk' and self.stage.kind not in {'pretrain', 'midtrain'}:
             raise ValueError('Disk-backed storage currently supports pretrain and midtrain')
         if self.data.storage == 'disk' and self.data.provider != 'local_jsonl':

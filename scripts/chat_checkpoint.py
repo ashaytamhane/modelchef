@@ -28,8 +28,8 @@ def main():
     torch.set_num_threads(2)
     tokenizer = load_tokenizer(folder)
     model = create_model(config.model, tokenizer.get_vocab_size()).cpu().eval()
-    model.load_state_dict(torch.load(checkpoint, map_location='cpu', weights_only=True)['model'])
-    print(f'Loaded {checkpoint.name} on CPU. This model completes stories; /exit quits.', flush=True)
+    model.load_state_dict(torch.load(checkpoint, map_location='cpu', weights_only=True, mmap=True)['model'])
+    print(f'Loaded {checkpoint.name} on CPU. This model completes text; /exit quits.', flush=True)
     while True:
         try:
             prompt = args.prompt if args.prompt is not None else input('Story beginning: ')
@@ -39,6 +39,8 @@ def main():
             break
         torch.manual_seed(config.training.seed)
         ids = tokenizer.encode(prompt).ids or [tokenizer.token_to_id('<bos>')]
+        if config.tokenizer.add_bos and ids[0] != tokenizer.token_to_id('<bos>'):
+            ids.insert(0, tokenizer.token_to_id('<bos>'))
         sequence = torch.tensor([ids])
         reply = []
         with torch.inference_mode():

@@ -1,0 +1,63 @@
+name: reasoning-first-1b
+explain: detailed
+data:
+  provider: local_jsonl
+  dataset: reasoning-first-balanced-v1
+  storage: disk
+  local_path: data/raw/reasoning-first-balanced/corpus.jsonl
+  max_documents: 200000
+  max_download_bytes: 2000000000
+  max_tokens: 2000000000
+  domain: general
+processing:
+  min_chars: 80
+  max_chars: 8000
+  near_dedup: false
+  validation_fraction: 0.05
+  test_fraction: 0.05
+  strip_html: false
+  pii: 'off'
+tokenizer:
+  vocab_size: 8192
+  training_max_documents: null
+  packing: document
+  add_bos: true
+model:
+  layers: 40
+  hidden_size: 1536
+  attention_heads: 24
+  kv_heads: 6
+  intermediate_size: 4096
+  context_length: 2048
+  gradient_checkpointing: true
+  attention_kernel: auto
+training:
+  accelerator: cuda
+  precision: bf16
+  micro_batch_size: 1
+  gradient_accumulation: 1
+  learning_rate: 0.0002
+  steps: 50000
+  warmup_steps: 500
+  log_every: 100
+  checkpoint_every: 1000
+  evaluate_every: 1000
+  max_runtime_seconds: 36000
+  deterministic: false
+  optimizer_kernel: default
+  compile: false
+  allow_tf32: true
+  optimizer: adamw8bit_in_backward
+  gradient_clip_norm: 0
+  checkpoint_at_start: true
+evaluation:
+  benchmark: none
+  batches: 16
+  generate_tokens: 512
+  prompt: 'User: What is 12 plus 7?'
+  temperature: 0.7
+stage:
+  kind: pretrain
+  prompt_format: chat_transcript
+  oversized_policy: skip
+  parent_run: null

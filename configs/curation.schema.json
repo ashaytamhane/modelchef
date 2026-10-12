@@ -113,10 +113,34 @@
             "messages",
             "persona_turn",
             "empathy_turn",
-            "measurements"
+            "measurements",
+            "reasoning_fields"
           ],
           "title": "Adapter",
           "type": "string"
+        },
+        "reasoning_fields": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Reasoning Fields",
+          "type": "object"
+        },
+        "answer_extraction": {
+          "default": "none",
+          "enum": [
+            "none",
+            "last_boxed"
+          ],
+          "title": "Answer Extraction",
+          "type": "string"
+        },
+        "exclude_sources": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude Sources",
+          "type": "array"
         },
         "measurement_fields": {
           "additionalProperties": {
