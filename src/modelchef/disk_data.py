@@ -6,7 +6,7 @@ import uuid
 from collections import Counter
 from pathlib import Path
 
-from modelchef.corpus import clean_record, digest, file_digest, ngrams
+from modelchef.corpus import clean_record, digest, file_digest, group_split, ngrams
 
 
 class JsonlRows:
@@ -49,6 +49,10 @@ def acquire_disk(config, root, explain):
                         if current < c.offset:
                             continue
                         record = {'text': row[c.text_field], 'source_index': current}
+                        if 'split_group' in row:
+                            if not isinstance(row['split_group'], str) or not row['split_group']:
+                                raise ValueError('split_group must be a nonempty string')
+                            record['split_group'] = row['split_group']
                         payload = (json.dumps(record, ensure_ascii=False) + '\n').encode()
                         target.write(payload)
                         checksum.update(payload)
@@ -94,11 +98,12 @@ def process_disk(records, config, root):
     folder = root / 'data/cache/processed' / uuid.uuid4().hex
     folder.mkdir(parents=True)
     counts = Counter()
+    grouped = False
     connection = sqlite3.connect(folder / 'dedup.sqlite')
     try:
         connection.executescript('''
             CREATE TABLE documents (id INTEGER PRIMARY KEY, fingerprint TEXT, text TEXT,
-                                    source_index INTEGER, split TEXT, ordering TEXT);
+                                    source_index INTEGER, split TEXT, ordering TEXT, split_group TEXT);
             CREATE INDEX fingerprints ON documents(fingerprint);
             CREATE TABLE bands (band INTEGER, signature BLOB, document INTEGER);
             CREATE INDEX bucket ON bands(band, signature);
@@ -134,9 +139,13 @@ def process_disk(records, config, root):
             fraction = int(ordering[:16], 16) / 2**64
             split = ('validation' if fraction < c.validation_fraction else
                      'test' if fraction < c.validation_fraction + c.test_fraction else 'train')
+            grouping = cleaned.get('split_group')
+            if grouping is not None:
+                grouped = True
+                split = group_split(grouping, config)
             identifier = connection.execute(
-                'INSERT INTO documents(fingerprint,text,source_index,split,ordering) VALUES(?,?,?,?,?)',
-                (fingerprint, text, cleaned['source_index'], split, ordering)).lastrowid
+                'INSERT INTO documents(fingerprint,text,source_index,split,ordering,split_group) VALUES(?,?,?,?,?,?)',
+                (fingerprint, text, cleaned['source_index'], split, ordering, grouping)).lastrowid
             connection.executemany('INSERT INTO bands VALUES(?,?,?)',
                                    [(i, signature, identifier) for i, signature in enumerate(bands)])
             counts['accepted'] += 1
@@ -145,6 +154,8 @@ def process_disk(records, config, root):
         if counts['accepted'] < 3:
             raise ValueError(f'Too few documents after processing: {dict(counts)}')
         sizes = dict(connection.execute('SELECT split,COUNT(*) FROM documents GROUP BY split'))
+        if grouped and any(not sizes.get(split) for split in ['train', 'validation', 'test']):
+            raise ValueError('Grouped data has an empty split; acquire more independent groups')
         # Keep even tiny inputs usable while preserving deterministic, document-level splits.
         for split in ['train', 'validation', 'test']:
             if not sizes.get(split):
@@ -159,15 +170,17 @@ def process_disk(records, config, root):
         for split in ['train', 'validation', 'test']:
             path = folder / (split + '.jsonl')
             with path.open('w', encoding='utf-8') as target:
-                for text, index in connection.execute(
-                        'SELECT text,source_index FROM documents WHERE split=? ORDER BY ordering', (split,)):
+                for text, index, grouping in connection.execute(
+                        'SELECT text,source_index,split_group FROM documents WHERE split=? ORDER BY ordering', (split,)):
                     target.write(json.dumps({'text': text, 'sha256': digest(text.encode()),
-                                             'source_index': index}) + '\n')
+                                             'source_index': index,
+                                             **({'split_group': grouping} if grouping else {})}) + '\n')
             splits[split] = JsonlRows(path, sizes[split])
         connection.commit()
     finally:
         connection.close()
     return splits, {'counts': dict(counts), 'split_documents': sizes,
+                    'split_policy': 'split_group-disjoint' if grouped else 'document-hash',
                     'decontamination': 'configured' if benchmark else 'not_configured',
                     'storage': 'sqlite/jsonl',
                     'limitations': 'Regex PII is heuristic. LSH near-dedup is approximate and may '

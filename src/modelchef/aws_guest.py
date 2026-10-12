@@ -18,7 +18,7 @@ def guest_plan(config, related_models=()):
                 'execution_policy': {'model': config.model.model_dump(mode='json'),
                                      'training': config.training.model_dump(mode='json')}}
     config.validate_execution()
-    extras = ['train', 'pipeline']
+    extras = ['train', 'pipeline', 'aws']
     models = [config.model, *related_models]
     if any(model.backend == 'huggingface' for model in models):
         extras.append('pretrained')

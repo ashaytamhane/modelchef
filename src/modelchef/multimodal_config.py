@@ -50,6 +50,8 @@ class MultimodalConfig(Section):
 
     @model_validator(mode='after')
     def supported(self):
+        if self.training.performance_gate:
+            raise ValueError('Performance gates currently apply to text training stages')
         if self.training.distributed != 'none':
             raise ValueError('Multimodal training currently uses a single process')
         if self.training.micro_batch_size != 1:

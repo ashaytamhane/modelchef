@@ -9,7 +9,9 @@ import torch.nn.functional as F
 from modelchef.corpus import PII, process
 
 
-def format_prompt(text):
+def format_prompt(text, prompt_format='user_assistant'):
+    if prompt_format == 'chat_transcript':
+        return text.rstrip() + '\nAssistant:'
     return f"User: {text}\nAssistant:"
 
 
@@ -42,7 +44,9 @@ def prepare_structured(records, c, root):
         inputs.append(row)
     splits, info = process(inputs, c, root)
     for name, rows in splits.items():
-        splits[name] = [{**row, **{field: by_index[row['source_index']][field] for field in fields}}
+        splits[name] = [{**row, **{field: by_index[row['source_index']][field] for field in fields},
+                         **({'split_group': by_index[row['source_index']]['split_group']}
+                            if 'split_group' in by_index[row['source_index']] else {})}
                         for row in rows]
         if c.stage.reasoning_format == 'think_answer' and c.stage.kind in {'sft', 'distill'}:
             for row in splits[name]:
@@ -52,8 +56,8 @@ def prepare_structured(records, c, root):
     return splits, info
 
 
-def response_pair(prompt, response, tokenizer, context):
-    prefix = tokenizer.encode(format_prompt(prompt), add_special_tokens=False).ids
+def response_pair(prompt, response, tokenizer, context, prompt_format='user_assistant'):
+    prefix = tokenizer.encode(format_prompt(prompt, prompt_format), add_special_tokens=False).ids
     answer = tokenizer.encode(' ' + response, add_special_tokens=False).ids + [tokenizer.token_to_id('<eos>')]
     # Do not silently turn a partial response into a complete supervised example.
     if len(prefix) + len(answer) > context + 1:
@@ -65,14 +69,20 @@ def response_pair(prompt, response, tokenizer, context):
     return (x + [tokenizer.token_to_id('<pad>')] * padding, y + [-100] * padding)
 
 
-def pack_structured(rows, tokenizer, c, token_limit):
+def pack_structured(rows, tokenizer, c, token_limit, progress=None):
     parts = [[], [], [], []] if c.stage.kind == 'dpo' else [[], []]
-    used = 0
+    used, skipped = 0, 0
     for row in rows:
         fields = ['chosen', 'rejected'] if c.stage.kind == 'dpo' else [
             'answer' if c.stage.kind == 'rlvr' else 'response']
-        pairs = [response_pair(row['prompt'], row[field], tokenizer, c.model.context_length)
-                 for field in fields]
+        try:
+            pairs = [response_pair(row['prompt'], row[field], tokenizer, c.model.context_length,
+                                   c.stage.prompt_format) for field in fields]
+        except ValueError as error:
+            if c.stage.oversized_policy != 'skip' or not str(error).startswith('Structured example exceeds context'):
+                raise
+            skipped += 1
+            continue
         # Count each token in the prompt/response sequence once, including EOS.
         # The final supervised target marks the real sequence boundary even when
         # an imported tokenizer uses the same token for padding and EOS.
@@ -86,6 +96,8 @@ def pack_structured(rows, tokenizer, c, token_limit):
                 parts[index * 2 + offset].append(values)
     if not parts[0]:
         raise ValueError('No structured examples fit the split token budget')
+    if progress:
+        progress(f'Structured packing: retained {len(parts[0])} complete examples; skipped {skipped} oversized examples.')
     return tuple(torch.tensor(part, dtype=torch.long) for part in parts), used
 
 
@@ -182,7 +194,8 @@ def evaluate_stage(model, reference, blocks, tokenizer, c, device, amp):
     if c.stage.kind not in {'dpo', 'rlvr'}:
         return None
     model.eval()
-    count = min(len(blocks[0]), c.evaluation.batches * c.training.micro_batch_size)
+    count = (len(blocks[0]) if c.evaluation.batches == 'all' else
+             min(len(blocks[0]), c.evaluation.batches * c.training.micro_batch_size))
     parts = [part[:count].to(device) for part in blocks]
     with torch.no_grad(), amp():
         if c.stage.kind == 'dpo':
@@ -213,7 +226,7 @@ def evaluate_stage(model, reference, blocks, tokenizer, c, device, amp):
 
 
 def objective(model, parts, c, reference=None, tokenizer=None):
-    if c.stage.kind == 'distill':
+    if c.stage.uses_distillation:
         x, y = parts
         logits = model(x).float()
         with torch.no_grad():

@@ -1,0 +1,33 @@
+# Connectivity/integration test, not an assistant-quality recipe.
+name: huggingface-tiny-sft
+data:
+  provider: local_jsonl
+  local_path: examples/starter/sft.jsonl
+  max_documents: 64
+  max_download_bytes: 1000000
+  max_tokens: 10000
+processing:
+  min_chars: 1
+  near_dedup: false
+training:
+  accelerator: cpu
+  precision: fp32
+  steps: 2
+  warmup_steps: 0
+  micro_batch_size: 1
+  gradient_accumulation: 1
+  checkpoint_every: 1
+  evaluate_every: 1
+  log_every: 1
+  max_runtime_seconds: 120
+evaluation:
+  benchmark: none
+  batches: 1
+  generate_tokens: 8
+stage:
+  kind: sft
+  parent_run:
+    repo_id: hf-internal-testing/tiny-random-gpt2
+    revision: main
+    max_download_bytes: 10000000
+    context_length: 64

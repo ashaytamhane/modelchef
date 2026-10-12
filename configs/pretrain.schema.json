@@ -349,10 +349,18 @@
           "type": "integer"
         },
         "batches": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "const": "all",
+              "type": "string"
+            }
+          ],
           "default": 4,
-          "exclusiveMinimum": 0,
-          "title": "Batches",
-          "type": "integer"
+          "title": "Batches"
         },
         "prompt": {
           "default": "Education helps people",
@@ -379,6 +387,46 @@
         }
       },
       "title": "Evaluation",
+      "type": "object"
+    },
+    "HuggingFaceModel": {
+      "additionalProperties": false,
+      "properties": {
+        "repo_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*(/[A-Za-z0-9][A-Za-z0-9_.-]*)?$",
+          "title": "Repo Id",
+          "type": "string"
+        },
+        "revision": {
+          "default": "main",
+          "minLength": 1,
+          "title": "Revision",
+          "type": "string"
+        },
+        "max_download_bytes": {
+          "default": 500000000,
+          "exclusiveMinimum": 0,
+          "title": "Max Download Bytes",
+          "type": "integer"
+        },
+        "context_length": {
+          "anyOf": [
+            {
+              "minimum": 8,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Context Length"
+        }
+      },
+      "required": [
+        "repo_id"
+      ],
+      "title": "HuggingFaceModel",
       "type": "object"
     },
     "PEFT": {
@@ -441,6 +489,44 @@
         }
       },
       "title": "PEFT",
+      "type": "object"
+    },
+    "PerformanceGate": {
+      "additionalProperties": false,
+      "properties": {
+        "probe_steps": {
+          "default": 50,
+          "exclusiveMinimum": 1,
+          "title": "Probe Steps",
+          "type": "integer"
+        },
+        "warmup_steps": {
+          "default": 10,
+          "minimum": 0,
+          "title": "Warmup Steps",
+          "type": "integer"
+        },
+        "safety_multiplier": {
+          "default": 2.0,
+          "minimum": 1,
+          "title": "Safety Multiplier",
+          "type": "number"
+        },
+        "overhead_seconds": {
+          "default": 600,
+          "minimum": 0,
+          "title": "Overhead Seconds",
+          "type": "integer"
+        },
+        "max_allocated_memory_fraction": {
+          "default": 0.9,
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Max Allocated Memory Fraction",
+          "type": "number"
+        }
+      },
+      "title": "PerformanceGate",
       "type": "object"
     },
     "Processing": {
@@ -553,6 +639,15 @@
     "Stage": {
       "additionalProperties": false,
       "properties": {
+        "oversized_policy": {
+          "default": "error",
+          "enum": [
+            "error",
+            "skip"
+          ],
+          "title": "Oversized Policy",
+          "type": "string"
+        },
         "kind": {
           "default": "pretrain",
           "enum": [
@@ -572,6 +667,9 @@
               "type": "string"
             },
             {
+              "$ref": "#/$defs/HuggingFaceModel"
+            },
+            {
               "type": "null"
             }
           ],
@@ -582,6 +680,9 @@
           "anyOf": [
             {
               "type": "string"
+            },
+            {
+              "$ref": "#/$defs/HuggingFaceModel"
             },
             {
               "type": "null"
@@ -652,6 +753,15 @@
           ],
           "title": "Reasoning Format",
           "type": "string"
+        },
+        "prompt_format": {
+          "default": "user_assistant",
+          "enum": [
+            "user_assistant",
+            "chat_transcript"
+          ],
+          "title": "Prompt Format",
+          "type": "string"
         }
       },
       "title": "Stage",
@@ -681,6 +791,19 @@
           "exclusiveMinimum": 0,
           "title": "Min Frequency",
           "type": "integer"
+        },
+        "training_max_documents": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Training Max Documents"
         },
         "special_tokens": {
           "default": [
@@ -712,6 +835,17 @@
     "Training": {
       "additionalProperties": false,
       "properties": {
+        "performance_gate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PerformanceGate"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "distributed": {
           "default": "none",
           "enum": [

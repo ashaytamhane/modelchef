@@ -1,0 +1,16 @@
+# Optional single-logical-core feasibility recipe, not the full assistant workflow.
+# Use the uint32 token file produced by an existing ModelChef pretraining run.
+tokens_path: artifacts/training/REPLACE_WITH_RUN/tokens-train.bin
+output_dir: artifacts/neuron/native-probe
+vocab_size: 4096 # Must match the actual tokenizer vocabulary, not its requested size.
+batch_size: 1
+sequence_length: 128
+steps: 10
+checkpoint_every: 5
+model:
+  layers: 2
+  hidden_size: 128
+  attention_heads: 4
+  kv_heads: 2
+  intermediate_size: 352
+  context_length: 128

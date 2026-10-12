@@ -1,0 +1,17 @@
+# Fixed qualitative probes; keep identical across checkpoints and do not train on them.
+prompts:
+- name: anger-and-uncertainty
+  system: 'Reasoning mode: disabled. Be warm and thoughtful; avoid assuming motives.'
+  prompt: My friend cancelled our plans and I feel angry. What should I consider?
+- name: pain-and-perspective
+  system: 'Reasoning mode: disabled. Be attentive and honest about uncertainty.'
+  prompt: Someone in pain sounds impatient with me. What might explain that?
+- name: reasoning-mode
+  system: 'Reasoning mode: enabled. Think briefly before answering.'
+  prompt: A friend seems quiet after my success. How can I avoid jumping to conclusions?
+- name: reserved-personality
+  system: 'Reasoning mode: disabled. Be concise and reserved; avoid assuming motives.'
+  prompt: My friend cancelled our plans and I feel angry. What should I consider?
+- name: arithmetic-control
+  system: 'Reasoning mode: disabled. Answer with the number only.'
+  prompt: What is seven plus five?

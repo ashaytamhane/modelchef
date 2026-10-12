@@ -37,6 +37,18 @@
       "title": "Training Data",
       "type": "string"
     },
+    "data_attribution_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Data Attribution Path"
+    },
     "evaluation": {
       "minLength": 1,
       "title": "Evaluation",

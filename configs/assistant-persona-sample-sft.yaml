@@ -1,0 +1,55 @@
+name: assistant-persona-sample-sft
+explain: detailed
+data:
+  provider: local_jsonl
+  dataset: curated-persona-research-instruction-persona
+  max_documents: 10000
+  max_download_bytes: 16000000
+  max_tokens: 500000
+  storage: memory
+  local_paths:
+  - data/raw/assistant-persona-sample/instruction-persona.jsonl
+  - data/raw/assistant-persona-sample/reasoning.jsonl
+processing:
+  min_chars: 40
+  max_chars: 30000
+  near_dedup: false
+  validation_fraction: 0.1
+  test_fraction: 0.1
+  strip_html: false
+tokenizer:
+  vocab_size: 2048
+model:
+  layers: 2
+  hidden_size: 128
+  attention_heads: 2
+  kv_heads: 1
+  intermediate_size: 352
+  context_length: 4096
+  gradient_checkpointing: false
+  attention_kernel: auto
+training:
+  accelerator: cpu
+  precision: fp32
+  micro_batch_size: 1
+  gradient_accumulation: 1
+  learning_rate: 0.0001
+  steps: 4
+  warmup_steps: 0
+  log_every: 1
+  checkpoint_every: 2
+  evaluate_every: 2
+  max_runtime_seconds: 600
+  deterministic: true
+  optimizer_kernel: default
+  compile: false
+  weight_decay: 0.01
+evaluation:
+  benchmark: none
+  batches: 1
+  generate_tokens: 8
+  prompt: How can I help a friend who is disappointed?
+stage:
+  kind: sft
+  prompt_format: chat_transcript
+  parent_run: artifacts/training/PARENT_RUN

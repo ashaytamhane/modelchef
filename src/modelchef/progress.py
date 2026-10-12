@@ -7,6 +7,8 @@ from contextlib import contextmanager
 _state = threading.local()
 
 _activities = {
+    'dashboard': 'Reading saved run metrics and stage events for the local TensorBoard dashboard.',
+    'curate': 'Checking dataset ingredients, adapters, attribution and bounded acquisition settings.',
     'cook': 'Reading the ordered training-stage recipes and selected execution target.',
     'doctor': 'Checking Python, PyTorch, hardware availability and GPU arithmetic.',
     'setup': 'Inspecting hardware and preparing the requested PyTorch installation.',

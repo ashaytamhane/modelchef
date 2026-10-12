@@ -1,5 +1,10 @@
 # ModelChef
 
+Optional AWS accelerator integration: [Trainium training and Inferentia2 compilation](docs/NEURON.md)
+use a separate Neuron environment. Start with the small feasibility recipe; the
+existing CUDA workflows remain unchanged. Neuron hardware validation and full
+AWS lifecycle integration are still pending.
+
 **Your ingredients. Your recipe. Your model.**
 
 With ModelChef, **pick your ingredients, choose a recipe, cook your model and serve it**. Your ingredients are text, image or speech datasets and optional pretrained weights; your recipe defines processing, architecture and training. Cook a text model from scratch or refine an existing text, vision-language or Whisper model, taste-test it with evaluation, then use CLI inference, publish to Hugging Face, or serve supported text models through a secured vLLM API. The same Python/PyTorch codebase runs locally and on AWS, with precision, kernels and execution settings exposed in versioned configuration.
@@ -9,6 +14,11 @@ Think of the workflow as **ingredients → recipe → training → evaluation �
 ![ModelChef kitchen: datasets and a recipe become a trained model ready for serving.](docs/assets/modelchef-kitchen.png)
 
 ## Quick Start
+
+For scarce GPU Spot capacity, the AWS runner can optionally use an **instant EC2
+Fleet** with `price-capacity-optimized` selection across explicit G5/G6/G6e
+instance types and subnets. It requests one four-vCPU instance and keeps the
+existing budget, checkpoint and shutdown lifecycle. See [Fleet setup](docs/AWS_FLEET.md).
 
 The Quick Start examples below run on your current machine. ModelChef can also launch AWS instances: see [the Spot training example](#run-a-managed-training-stage) for a temporary training job that terminates when finished, or [the API hosting example](#persistent-api-hosting-on-ec2) for persistent on-demand serving. AWS launches require configured credentials and explicit execution with `--run`, and incur charges. Start with a small local experiment; the default training run tests the pipeline rather than producing a useful assistant.
 
@@ -37,6 +47,16 @@ Routine input and dependency errors give concise messages; add `--debug` to show
 `smoke` performs one training update on a tiny synthetic model, saves a temporary checkpoint, and verifies that model weights and optimizer state reload correctly. Look for `training_step: passed` and `checkpoint_recovery: passed`. Run it after `doctor` to verify that training and checkpointing work before starting a language-model experiment. Neither command downloads datasets or launches AWS resources.
 
 ### Choose your recipe
+
+For a research example that combines **reasoning, emotional context, prompt-controlled
+personality and sensory concepts from scratch**, see the [assistant recipe tutorial](docs/ASSISTANT_RESEARCH.md).
+It starts with bounded ingredient curation, runs integrated pretraining and midtraining,
+then teaches assistant behavior with SFT. A small executable local test and a separate
+350M-class scale blueprint are provided; the latter requires prepared data and a budget pilot.
+
+The tutorial also includes a [longer learning pilot and overfit diagnostic](docs/ASSISTANT_RESEARCH.md#move-beyond-the-four-update-test)
+to distinguish functioning training from useful learning. Set `evaluation.batches: all`
+to evaluate every packed example in a split; saved loss reports show evaluation coverage.
 
 ModelChef uses **two levels of training recipe**:
 
@@ -197,7 +217,56 @@ python -m modelchef.cli pipeline configs/sft.local.yaml --run
 python -m modelchef.cli chat NEW_RUN_DIR
 ```
 
-This keeps the pretrained tokenizer and weights and learns from your supplied responses. Import and training use local model files; they do not fetch weights implicitly. Choose a model that fits available memory; this workflow defaults to full-parameter fine-tuning; see [optional LoRA](#parameter-efficient-fine-tuning-with-lora) to train adapters instead. Later sections cover domain midtraining, preferences, verifiable rewards, distillation and AWS execution.
+This keeps the pretrained tokenizer and weights and learns from your supplied responses. The explicit download/import workflow uses local model files during training. Alternatively, put a Hugging Face reference directly in a stage recipe, as shown below. Choose a model that fits available memory; this workflow defaults to full-parameter fine-tuning; see [optional LoRA](#parameter-efficient-fine-tuning-with-lora) to train adapters instead. Later sections cover domain midtraining, preferences, verifiable rewards, distillation and AWS execution.
+
+#### Download a parent directly from a recipe
+
+`stage.parent_run` accepts either an existing local run path or a bounded Hugging
+Face reference. This works for midtraining, SFT, DPO, RLVR and the dedicated
+distillation stage. `stage.teacher_run` accepts the same reference format for
+optional token distillation. For example:
+
+```yaml
+stage:
+  kind: sft
+  parent_run:
+    repo_id: hf-internal-testing/tiny-random-gpt2  # Required model ID.
+    revision: main                             # Optional; a commit SHA is better for replay.
+    max_download_bytes: 10000000                # Optional; default 500 MB.
+    context_length: 64                         # Optional; defaults to recipe context.
+```
+
+Run the included tiny integration recipe:
+
+```bash
+uv pip install -e '.[train,pipeline,pretrained]'
+python -m modelchef.cli pipeline configs/sft-huggingface-tiny.yaml
+python -m modelchef.cli pipeline configs/sft-huggingface-tiny.yaml --run
+python -m modelchef.cli cook configs/workflow-huggingface-tiny.yaml --run
+```
+
+Planning validates the reference without downloading weights. Execution checks
+remote file sizes, enforces the download cap, pins the resolved commit, downloads
+safetensors assets and imports the parent. Its architecture and tokenizer are
+inherited automatically; the recipe still controls data, training and supported
+adapter/runtime settings. Context must fit the parent model. Remote model code
+is disabled. Gated/private models use your existing Hugging Face login; never
+put a token in YAML. `model-references.json` records the requested reference,
+resolved commit and checksums; resume uses the original import and rejects changed
+references. Ordinary local run-path recipes remain supported.
+
+The tiny model above is randomly initialized test material, not a useful pretrained
+assistant. The test proves acquisition, import and training integration. For useful
+behavior, choose a suitable trained model and supply representative stage data.
+
+From-scratch `pretrain` does **not** accept parent weights: use `midtrain` for
+continued pretraining of a downloaded model. A pretraining recipe may instead
+specify a Hugging Face **teacher** with `tokenizer.algorithm: pretrained`; student
+weights still start randomly. Workflow stage recipes can choose an explicit remote
+parent, or link to an earlier stage with `parent_stage`, but cannot do both.
+On AWS, model references are resolved on the controller and the pinned assets are
+included in the training bundle; increase `max_bundle_bytes` for larger models.
+This does not launch AWS without the normal explicit AWS execution command.
 
 For images and speech, continue with the [multimodal tutorial](docs/MULTIMODAL.md). To share a completed export, follow the [Hugging Face publishing tutorial](docs/PUBLISHING.md). Both workflows use explicit recipes; publishing previews are offline and uploads require `--run`.
 
@@ -545,6 +614,34 @@ The pipeline explains each stage on screen: configuration/hardware, acquisition,
 
 Each invocation creates its own directory under `artifacts/training/`. Inspect `report.json`, `processing.json`, source/benchmark manifests, `metrics.jsonl`, `environment.json`, tokenizer and checkpoints there. Data snapshots are cached under `data/cache/`. All run outputs and data caches stay excluded from Git.
 
+For a live browser dashboard, install the optional monitoring extra and point it at
+the actual run directory printed by training:
+
+```bash
+uv pip install -e '.[dashboard]'
+python -m modelchef.cli dashboard artifacts/training/YOUR_RUN_DIRECTORY
+```
+
+TensorBoard opens at `http://127.0.0.1:6006`. Its Scalars view shows training loss,
+validation metrics when evaluated, learning rate, gradient norm and throughput.
+The Text view shows the full saved recipe, pipeline sequence, current reported
+stage/activity and the generated sample after completion. `activity/current_status`
+separates the pipeline stage from the optimizer step; preparation has step zero.
+TensorBoard step numbers count optimizer updates, not stage numbers or log messages.
+It follows existing
+`metrics.jsonl` and `events.jsonl` files, so starting or stopping the dashboard
+does not restart or stop training. It updates every five seconds as new records
+arrive; it cannot show operations the run has not reported. GPU memory appears
+only if recorded in the run metrics or final performance report. This is a text
+pipeline overview, not an interactive architecture diagram.
+
+Use `--port 6007` for another port, `--no-browser` on a remote machine, or `--once`
+to export existing metrics without starting a server. The server binds to
+localhost; access a remote dashboard through an SSH tunnel rather than exposing
+the unauthenticated TensorBoard server publicly. This command monitors one stage
+run directory at a time; point it at the next stage directory for a multi-stage
+workflow.
+
 #### What this run is doing
 
 Byte-level **BPE** learns frequently occurring byte sequences as tokens, so the vocabulary can represent arbitrary text while compressing common patterns. It is fitted only on training documents. **Packing** joins tokenized documents into fixed-length sequences separated by EOS; this implementation allows attention across document boundaries within a packed sequence.
@@ -795,6 +892,38 @@ For example, an SFT record can be `{"prompt":"What is 2 plus 3?","reasoning":"Ad
 
 
 #### Distillation
+
+Distillation is optional during **pretraining, midtraining and SFT**, in addition
+to the dedicated `distill` stage. Set `stage.teacher_run` to a completed local
+teacher run to enable online token distillation; omit it for normal training.
+Existing `stage.distillation_temperature` and `stage.distillation_alpha` control
+the temperature and teacher-loss weight: total loss is `alpha * T² * KL +
+(1 - alpha) * cross_entropy`. Both losses use all target tokens during
+pretraining/midtraining and only response targets during SFT.
+
+For example, add this to a from-scratch native pretraining recipe:
+
+```yaml
+tokenizer:
+  algorithm: pretrained  # Reuse teacher vocabulary; student weights remain random.
+stage:
+  kind: pretrain
+  teacher_run: artifacts/training/TEACHER_RUN
+  distillation_temperature: 2.0
+  distillation_alpha: 0.5
+```
+
+For midtraining or SFT, retain the parent recipe's tokenizer settings and
+`stage.parent_run`, then add `stage.teacher_run`. Teacher and student tokenizers
+and special-token identities must match exactly, and teacher context must cover
+student context. The teacher stays frozen. Checkpoints record its checksum and
+resume rejects a changed teacher. AWS bundles include the teacher's assets, so
+the same recipes work through the AWS runner; choose enough GPU memory for both
+models. `teacher_kl` appears in saved metrics and the dashboard.
+
+Online teacher loss is rejected for DPO/RLVR. Teacher-generated examples can
+still supply supervised data or initialize a policy, but those techniques are
+not the same as adding KL distillation to the preference/reward objective.
 
 Two methods are available:
 
@@ -1078,6 +1207,7 @@ processing:  # OPTIONAL: defaults are supplied when omitted.
 tokenizer:  # OPTIONAL: defaults are supplied when omitted.
   algorithm: byte_bpe  # OPTIONAL: byte_bpe | pretrained; pretrained is reused from an imported/parent run.
   vocab_size: 4096  # OPTIONAL: Requested BPE size (260..262144); a small corpus can learn fewer tokens.
+  training_max_documents: null # Optional BPE fitting sample; null uses every training document.
   min_frequency: 2  # OPTIONAL: defaults are supplied when omitted.
   special_tokens:  # OPTIONAL: Required identities: pad, unk, bos, eos; all entries must be unique.
   - <pad>
@@ -1123,6 +1253,7 @@ model:  # OPTIONAL: defaults are supplied when omitted.
   init_std: 0.02  # OPTIONAL: defaults are supplied when omitted.
   gradient_checkpointing: false  # OPTIONAL: Recompute activations during backward to trade compute for memory.
 training:  # OPTIONAL: defaults are supplied when omitted.
+  performance_gate: null  # OPTIONAL: measured throughput/memory gate; see the research tutorial.
   distributed: none  # OPTIONAL: none | ddp; DDP launches with torchrun.
   distributed_timeout_seconds: 300  # OPTIONAL: process-group timeout.
   compile: false  # OPTIONAL: Opt in to torch.compile; default leaves execution eager.
@@ -1156,12 +1287,13 @@ evaluation:  # OPTIONAL: defaults are supplied when omitted.
   benchmark: auto  # CONDITIONAL: auto | none | hellaswag | financial_phrasebank.
   benchmark_examples: 8  # OPTIONAL: 1..100; bounded custom protocol, not a full standard suite.
   benchmark_max_download_bytes: 2000000  # OPTIONAL: Separate benchmark payload-byte cap.
-  batches: 4  # OPTIONAL: Maximum loss-evaluation batches per split.
+  batches: 4  # OPTIONAL: Positive batch limit, or all for every packed example in each split.
   prompt: Education helps people  # OPTIONAL: defaults are supplied when omitted.
   generate_tokens: 24  # OPTIONAL: defaults are supplied when omitted.
   temperature: 0.8  # OPTIONAL: defaults are supplied when omitted.
   top_k: 30  # OPTIONAL: 0 disables top-k filtering.
 stage:  # OPTIONAL: defaults are supplied when omitted.
+  oversized_policy: error # OPTIONAL: error | skip; skip counts complete examples that cannot fit context.
   kind: pretrain  # OPTIONAL: pretrain | midtrain | sft | dpo | rlvr | distill; one objective per run.
   parent_run: null  # CONDITIONAL: Required completed/imported/initialized parent directory for later stages.
   teacher_run: null  # CONDITIONAL: Required for token distillation; retain teacher artifacts for resume.
@@ -1174,6 +1306,7 @@ stage:  # OPTIONAL: defaults are supplied when omitted.
   kl_coefficient: 0.02  # OPTIONAL: RLVR only: frozen-reference regularization weight.
   clip_ratio: 0.2  # OPTIONAL: RLVR only: policy-ratio clipping range.
   reasoning_format: plain  # OPTIONAL: plain | think_answer; optional SFT/distill fields, or RLVR final-answer extraction.
+  prompt_format: user_assistant  # OPTIONAL: user_assistant | chat_transcript; transcripts preserve system/persona roles.
 ```
 
 #### Choose a compatible combination
@@ -1597,7 +1730,37 @@ python -m modelchef.cli aws-train configs/aws-training.local.yaml --run
 
 Before provisioning, the runner performs local tests/lint and an actual bounded two-step CPU data/training preflight. The controller therefore needs PyTorch and pipeline dependencies for managed training, unlike the lightweight `aws-test` controller. It allowlists source/configuration and declared inputs, checks bundle size, reserves budget, uploads encrypted source, launches one Spot instance and attaches the supplied profile. It packages text stages, local Hugging Face parent/teacher models, and multimodal recipes with bounded media/processor inputs using capped safetensors bundles. Pretrained config, tokenizer files and special-token roles are relocated together; remote code, environment files and arbitrary pickle weight downloads are excluded. Bundle limits must accommodate weights and checkpoints, and local preflight still requires enough memory for its CPU probe.
 
-The guest arms a shutdown timer before package/data work, verifies the source checksum, installs pinned CUDA 13 PyTorch and recipe-selected extras, runs the stage or entire cook workflow and attempts a bounded result upload on exit. Compilation, TF32, optimized attention, fused/foreach optimizers, checkpointing and fake FP4 use the same execution code as local training. Custom CUDA sources are allowlisted into the bundle, and matching compiler packages are installed. Native NVFP4 selects Transformer Engine; DDP selects `torchrun --nproc-per-node=gpu`. Choose an AMI with a CUDA 13-compatible NVIDIA driver and an instance whose GPU supports the requested policy. The local CPU preflight validates data/objective/recovery; the guest validates the actual GPU optimizations. DDP plus compile/NVFP4/RLVR/QLoRA remains unsupported by the training engine, as enforced by recipe validation. The existing AWS deadline and controller termination safeguards remain active. Confirm `terminated` and inspect the saved cloud report; a lost/interrupted result upload can leave `results_missing` even after cleanup. Results are downloaded as an ignored `results.tar.gz`, without automatically extracting an external archive. S3 objects persist until your lifecycle rules remove them; the ledger is a conservative estimate, not a hard cap on every AWS charge. Live cloud training has not been validated during this local-only development pass.
+The guest arms a shutdown timer before package/data work, verifies the source checksum, installs pinned CUDA 13 PyTorch and recipe-selected extras, runs the stage or entire cook workflow and attempts a bounded result upload on exit. Compilation, TF32, optimized attention, fused/foreach optimizers, checkpointing and fake FP4 use the same execution code as local training. Custom CUDA sources are allowlisted into the bundle, and matching compiler packages are installed. Native NVFP4 selects Transformer Engine; DDP selects `torchrun --nproc-per-node=gpu`. Choose an AMI with a CUDA 13-compatible NVIDIA driver and an instance whose GPU supports the requested policy. The local CPU preflight validates data/objective/recovery; the guest validates the actual GPU optimizations. DDP plus compile/NVFP4/RLVR/QLoRA remains unsupported by the training engine, as enforced by recipe validation. The existing AWS deadline and controller termination safeguards remain active. Confirm `terminated` and inspect the saved cloud report; a lost/interrupted result upload can leave `results_missing` even after cleanup. Results are downloaded as an ignored `results.tar.gz`, without automatically extracting an external archive. S3 objects persist until your lifecycle rules remove them; the ledger is a conservative estimate, not a hard cap on every AWS charge. A small live Spot workflow has exercised pretraining, midtraining, SFT, export and automatic termination. This verifies execution and recovery, not the quality or cost of a full training run.
+
+#### Remote data preparation and resumable checkpoints
+
+A cook workflow can set `curation_recipe` to acquire and mix its ingredients on
+the training machine before its stages start. Bulk Parquet acquisition retains
+complete records and records source checksums and attribution. The local AWS
+preflight still uses bounded samples: set `preflight_data_dir` in the AWS resource
+configuration to their directory. Those samples do not replace the cloud corpus.
+See the [assistant research tutorial](docs/ASSISTANT_RESEARCH.md) for a complete
+example spanning data preparation, pretraining, midtraining and SFT.
+
+With an artifact bucket configured, the text training guest writes resumable S3
+snapshots after checkpoints. A snapshot includes weights, optimizer and RNG states,
+tokenizer, configuration, data snapshots and parent-stage lineage. The latest
+snapshot pointer changes only after every object has uploaded successfully, so a
+failed upload preserves the previous recovery point. `result_mode: metadata`
+retrieves small reports while keeping large model snapshots in S3.
+
+Use the `recovery_uri` from the cloud report to download and verify a snapshot:
+
+```bash
+python -m modelchef.recovery RECOVERY_URI artifacts/recovered --profile modelchef --region us-east-1 --max-bytes 20000000000
+```
+
+Replace `RECOVERY_URI` with the report value and choose a download cap that fits
+the saved snapshot. Exact training resume requires the original source bundle,
+configuration and workspace paths; restoring files into a different directory is
+useful for inspection or inference but does not bypass resume identity checks.
+Spot replacement and training restart are not automatic. S3 storage remains
+billable after the instance terminates.
 
 #### Persistent API hosting on EC2
 
@@ -1784,6 +1947,13 @@ AWS launch journals are saved before provisioning steps so interrupted/lost laun
 | `aws-reconcile RUN_ID [--path CONFIG]` | Recover cloud results and finish cleanup after termination |
 | `aws-export RUN_ID` | Verify downloaded AWS results and recover the exported model and inference recipe |
 | `chat-api --endpoint HTTPS_URL [--prompt TEXT]` | Send authenticated completions to a remote model; interactive mode omits `--prompt` |
+
+To try a saved checkpoint from an interrupted or ongoing native training run,
+use `python -m modelchef.cli chat YOUR_RUN_DIRECTORY --checkpoint step-002000.pt`.
+Replace the filename with an actual saved checkpoint in that run's `checkpoints`
+directory. This requires the torch backend and does not mark training complete.
+For pretraining/midtraining checkpoints, interactive inputs are plain text
+continuations; assistant role labels are not automatically inserted.
 
 Use `python -m modelchef.cli COMMAND --help` for flags.
 

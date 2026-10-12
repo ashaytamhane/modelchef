@@ -1,0 +1,269 @@
+{
+  "$defs": {
+    "Citation": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "authors": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Authors",
+          "type": "array"
+        },
+        "url": {
+          "pattern": "^https://",
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "authors",
+        "url"
+      ],
+      "title": "Citation",
+      "type": "object"
+    },
+    "Ingredient": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "title": "Name",
+          "type": "string"
+        },
+        "dataset": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "title": "Dataset",
+          "type": "string"
+        },
+        "provider": {
+          "default": "hf_rows",
+          "enum": [
+            "hf_rows",
+            "hf_parquet",
+            "https_csv"
+          ],
+          "title": "Provider",
+          "type": "string"
+        },
+        "source_url": {
+          "anyOf": [
+            {
+              "pattern": "^https://",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Url"
+        },
+        "subset": {
+          "default": "default",
+          "title": "Subset",
+          "type": "string"
+        },
+        "split": {
+          "default": "train",
+          "title": "Split",
+          "type": "string"
+        },
+        "offset": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "max_rows": {
+          "default": 64,
+          "maximum": 10000000,
+          "minimum": 3,
+          "title": "Max Rows",
+          "type": "integer"
+        },
+        "collection": {
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "title": "Collection",
+          "type": "string"
+        },
+        "pretraining_collection": {
+          "anyOf": [
+            {
+              "pattern": "^[a-zA-Z0-9_-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pretraining Collection"
+        },
+        "adapter": {
+          "enum": [
+            "text",
+            "messages",
+            "persona_turn",
+            "empathy_turn",
+            "measurements"
+          ],
+          "title": "Adapter",
+          "type": "string"
+        },
+        "measurement_fields": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Measurement Fields",
+          "type": "object"
+        },
+        "measurement_description": {
+          "default": "",
+          "title": "Measurement Description",
+          "type": "string"
+        },
+        "measurement_min": {
+          "default": 0,
+          "title": "Measurement Min",
+          "type": "number"
+        },
+        "measurement_max": {
+          "default": 5,
+          "title": "Measurement Max",
+          "type": "number"
+        },
+        "text_field": {
+          "default": "text",
+          "title": "Text Field",
+          "type": "string"
+        },
+        "max_example_bytes": {
+          "default": 1600,
+          "minimum": 64,
+          "title": "Max Example Bytes",
+          "type": "integer"
+        },
+        "system_prompt": {
+          "default": "",
+          "title": "System Prompt",
+          "type": "string"
+        },
+        "system_prefix": {
+          "default": "",
+          "title": "System Prefix",
+          "type": "string"
+        },
+        "reasoning": {
+          "default": "keep",
+          "enum": [
+            "keep",
+            "require",
+            "exclude"
+          ],
+          "title": "Reasoning",
+          "type": "string"
+        },
+        "min_user_words": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Min User Words",
+          "type": "integer"
+        },
+        "license": {
+          "minLength": 1,
+          "title": "License",
+          "type": "string"
+        },
+        "license_url": {
+          "pattern": "^https://",
+          "title": "License Url",
+          "type": "string"
+        },
+        "attribution": {
+          "minLength": 1,
+          "title": "Attribution",
+          "type": "string"
+        },
+        "citations": {
+          "items": {
+            "$ref": "#/$defs/Citation"
+          },
+          "minItems": 1,
+          "title": "Citations",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "dataset",
+        "collection",
+        "adapter",
+        "license",
+        "license_url",
+        "attribution",
+        "citations"
+      ],
+      "title": "Ingredient",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "name": {
+      "pattern": "^[a-zA-Z0-9_-]+$",
+      "title": "Name",
+      "type": "string"
+    },
+    "output_dir": {
+      "title": "Output Dir",
+      "type": "string"
+    },
+    "seed": {
+      "default": 42,
+      "title": "Seed",
+      "type": "integer"
+    },
+    "max_download_bytes": {
+      "default": 16000000,
+      "exclusiveMinimum": 0,
+      "title": "Max Download Bytes",
+      "type": "integer"
+    },
+    "timeout_seconds": {
+      "default": 30,
+      "exclusiveMinimum": 0,
+      "maximum": 120,
+      "title": "Timeout Seconds",
+      "type": "integer"
+    },
+    "sources": {
+      "items": {
+        "$ref": "#/$defs/Ingredient"
+      },
+      "minItems": 1,
+      "title": "Sources",
+      "type": "array"
+    }
+  },
+  "required": [
+    "name",
+    "output_dir",
+    "sources"
+  ],
+  "title": "CurationConfig",
+  "type": "object"
+}

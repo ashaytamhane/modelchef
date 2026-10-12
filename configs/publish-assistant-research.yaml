@@ -1,0 +1,16 @@
+schema_version: 1
+export_dir: artifacts/training/YOUR_FINAL_RUN/export
+repo_id: YOUR_USERNAME/YOUR_RESEARCH_MODEL
+private: true
+license: cc-by-nc-4.0
+summary: Research checkpoint trained from random initialization with prompt-conditioned
+  personas and optional reasoning; replace with actual model size and token count.
+training_data: Prepared public-data mixtures. Review actual split/token counts; original
+  licenses and source attributions follow.
+data_attribution_path: data/raw/assistant-persona-sample/attribution.json
+evaluation: Replace with measured held-out loss, persona-control tests and standard-suite
+  results. Sample training establishes pipeline execution only.
+limitations: Noncommercial research. No claim of human emotions, deep psychological
+  understanding, reliable reasoning or frontier-level capability. Teacher traces are
+  synthetic and not independently verified.
+base_model: null

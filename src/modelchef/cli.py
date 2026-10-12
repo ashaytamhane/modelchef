@@ -77,6 +77,12 @@ def _main() -> None:
             stream.reconfigure(errors='backslashreplace')
     parser = argparse.ArgumentParser(prog="modelchef")
     command = parser.add_subparsers(dest="command", required=True)
+    neuron_parser = command.add_parser('neuron', help='Plan/run isolated NeuronX training or compilation')
+    neuron_parser.add_argument('path', type=Path)
+    neuron_parser.add_argument('--action', choices=['train', 'compile'], default='train')
+    neuron_parser.add_argument('--run', action='store_true')
+    neuron_parser.add_argument('--checkpoint', type=Path)
+    neuron_parser.add_argument('--resume', type=Path)
     workflow_parser = command.add_parser('cook', help='Plan/run ordered stage recipes locally or on AWS')
     workflow_parser.add_argument('path', type=Path)
     workflow_parser.add_argument('--run', action='store_true')
@@ -145,13 +151,21 @@ def _main() -> None:
     for cloud_parser in [aws_test, aws_train]:
         cloud_parser.add_argument('--yes', action='store_true',
                                   help='Approve the reviewed AWS launch without an interactive prompt')
+    dashboard_parser = command.add_parser('dashboard', help='View live saved run metrics in TensorBoard')
+    dashboard_parser.add_argument('run_dir', type=Path)
+    dashboard_parser.add_argument('--port', type=int, default=6006)
+    dashboard_parser.add_argument('--once', action='store_true', help='Export current metrics without starting a server')
+    dashboard_parser.add_argument('--no-browser', action='store_true')
     chat_parser = command.add_parser("chat", help="Interact with a trained run locally")
     chat_parser.add_argument("run_dir", type=Path)
     chat_parser.add_argument("--backend", choices=["torch", "vllm"], default="torch")
     chat_parser.add_argument("--prompt")
+    chat_parser.add_argument('--checkpoint', type=Path,
+                             help='Saved checkpoint filename for torch inference, including unfinished runs')
     chat_parser.add_argument("--max-tokens", type=int, default=32)
     chat_parser.add_argument("--temperature", type=float, default=0.8)
     chat_parser.add_argument("--top-k", type=int, default=30)
+    chat_parser.add_argument('--system-prompt', help='System instructions/persona for chat_transcript checkpoints')
     remote_chat = command.add_parser('chat-api', help='Chat with an authenticated HTTPS vLLM deployment')
     remote_chat.add_argument('--endpoint', required=True, help='HTTPS API base ending in /v1')
     remote_chat.add_argument('--model', default='auto', help='Model ID; auto selects a sole served model')
@@ -162,6 +176,9 @@ def _main() -> None:
     remote_chat.add_argument('--temperature', type=float, default=0.7)
     aws_export = command.add_parser('aws-export', help='Recover a serving export from a completed AWS run')
     aws_export.add_argument('run_id')
+    curation = command.add_parser('curate', help='Plan/acquire bounded dataset mixtures with attribution')
+    curation.add_argument('path', type=Path)
+    curation.add_argument('--run', action='store_true')
     export_parser = command.add_parser("export", help="Export a trained run for HF/vLLM")
     export_parser.add_argument("run_dir", type=Path)
     download = command.add_parser('download-model', help='Preview/download capped safetensors model')
@@ -217,7 +234,19 @@ def _main() -> None:
                                help="Hide CLI progress on stderr")
     args = parser.parse_args()
     with operation(args.command, args.quiet):
-        if args.command in {'pipeline', 'cook'} and args.target == 'aws':
+        if args.command == 'neuron':
+            from modelchef.neuron import NeuronRecipe, compile_model, plan, train
+            config = NeuronRecipe.model_validate(yaml.safe_load(args.path.read_text(encoding='utf-8')))
+            if args.action == 'compile' and args.resume:
+                raise ValueError('--resume applies only to Neuron training')
+            if args.action == 'train' and args.checkpoint:
+                raise ValueError('--checkpoint applies only to Neuron compilation')
+            if args.run and args.action == 'compile' and not args.checkpoint:
+                raise ValueError('Neuron compilation requires --checkpoint')
+            result = (train(config, args.resume) if args.action == 'train' else
+                      compile_model(config, args.checkpoint)) if args.run else plan(config, args.action)
+            print(json.dumps(result, indent=2))
+        elif args.command in {'pipeline', 'cook'} and args.target == 'aws':
             if not args.aws_config:
                 raise ValueError('--target aws requires --aws-config')
             if getattr(args, 'resume', None):
@@ -244,6 +273,9 @@ def _main() -> None:
                 if args.resume:
                     raise ValueError('--resume requires --run')
                 print(json.dumps(plan(config, Path.cwd()), indent=2))
+        elif args.command == 'dashboard':
+            from modelchef.dashboard import dashboard
+            dashboard(args.run_dir, args.port, args.once, not args.no_browser)
         elif args.command == 'cook':
             from modelchef.workflow import cook
             print(json.dumps(cook(args.path, Path.cwd(), args.run), indent=2, default=str))
@@ -296,7 +328,8 @@ def _main() -> None:
             print(json.dumps(check_custom_kernel(args.path), indent=2))
         elif args.command == "chat":
             from modelchef.chat import chat
-            chat(args.run_dir, args.backend, args.prompt, args.max_tokens, args.temperature, args.top_k)
+            chat(args.run_dir, args.backend, args.prompt, args.max_tokens, args.temperature, args.top_k,
+                 system_prompt=args.system_prompt, checkpoint=args.checkpoint)
         elif args.command == 'chat-api':
             from modelchef.remote_chat import chat
             chat(args.endpoint, args.model, api_key_env=args.api_key_env,
@@ -305,6 +338,10 @@ def _main() -> None:
         elif args.command == 'aws-export':
             from modelchef.aws_export import recover_export
             print(json.dumps(recover_export(Path.cwd(), args.run_id), indent=2))
+        elif args.command == 'curate':
+            from modelchef.curation import curate
+            from modelchef.progress import report
+            print(json.dumps(curate(args.path, Path.cwd(), args.run, progress=report), indent=2))
         elif args.command == "export":
             from modelchef.chat import export_model
             print(export_model(args.run_dir))
@@ -392,6 +429,9 @@ def _main() -> None:
             elif args.command == 'check-config' and 'modality' in config:
                 from modelchef.multimodal_config import MultimodalConfig
                 config = MultimodalConfig.model_validate(config).model_dump(mode='json')
+            elif args.command == 'check-config' and 'sources' in config:
+                from modelchef.curation import CurationConfig
+                config = CurationConfig.model_validate(config).model_dump(mode='json')
             elif args.command == "check-config" and "runtime" not in config:
                 from modelchef.run_config import RunConfig
                 config = RunConfig.model_validate(config).validate_execution().model_dump(mode="json")
@@ -422,7 +462,7 @@ def main() -> None:
                       "transformers": "pretrained", "huggingface_hub": "pretrained", "peft": "peft",
                       "bitsandbytes": "qlora", "transformer_engine": "nvfp4", "boto3": "aws",
                       "botocore": "aws", "vllm": "inference", "lm_eval": "evaluation"}
-            extras.update(PIL='multimodal', numpy='train')
+            extras.update(PIL='multimodal', numpy='train', tensorboard='dashboard')
             if package == "torch":
                 message += ". Run modelchef setup, then modelchef setup --apply."
             elif package in extras:

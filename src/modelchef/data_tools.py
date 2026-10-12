@@ -67,7 +67,7 @@ def teacher_responses(teacher, prompts, output, max_documents=32, max_bytes=1_00
             prompt = row['prompt']
             if not isinstance(prompt, str) or not prompt.strip():
                 raise ValueError('Teacher prompts must be nonempty strings')
-            ids = tokenizer.encode(format_prompt(prompt)).ids
+            ids = tokenizer.encode(format_prompt(prompt, config.stage.prompt_format)).ids
             if len(ids) >= config.model.context_length:
                 raise ValueError('Teacher prompt exceeds context; shorten prompts')
             answer = []

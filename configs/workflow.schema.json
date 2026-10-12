@@ -99,6 +99,18 @@
       "default": true,
       "title": "Export",
       "type": "boolean"
+    },
+    "curation_recipe": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Curation Recipe"
     }
   },
   "required": [

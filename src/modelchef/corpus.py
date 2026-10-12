@@ -125,9 +125,17 @@ def acquire(config, root, explain):
                     values = {key: row[key] for key in fields}
                     if any(not isinstance(value, str) or not value.strip() for value in values.values()):
                         raise ValueError("Structured fields must be nonempty strings")
-                    records.append({**values, "text": " ".join(values.values()), "source_index": index})
+                    grouping = row.get('split_group')
+                    if grouping is not None and (not isinstance(grouping, str) or not grouping):
+                        raise ValueError('split_group must be a nonempty string')
+                    records.append({**values, "text": " ".join(values.values()), "source_index": index,
+                                    **({'split_group': grouping} if grouping else {})})
                 else:
-                    records.append({"text": row[c.text_field], "source_index": index})
+                    grouping = row.get('split_group')
+                    if grouping is not None and (not isinstance(grouping, str) or not grouping):
+                        raise ValueError('split_group must be a nonempty string')
+                    records.append({"text": row[c.text_field], "source_index": index,
+                                    **({'split_group': grouping} if grouping else {})})
                 if len(records) >= c.max_documents:
                     break
                 index += 1
@@ -185,7 +193,10 @@ def ngrams(text, size):
 
 
 PII = re.compile(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}|"
-                 r"(?<!\w)(?:\+?\d[\d ().-]{7,}\d)(?!\w)")
+                 # Preserve ordinary decimal measurements. Dot-separated phone numbers
+                 # have multiple separators; a single decimal point is not sufficient.
+                 r"(?<![\w.])(?!(?:\+?\d+\.\d+)(?![\d.]))"
+                 r"(?:\+?\d[\d ().-]{7,}\d)(?![\w.])")
 
 
 def clean_record(row, config, benchmark, counts):
@@ -224,7 +235,15 @@ def clean_record(row, config, benchmark, counts):
     if benchmark and benchmark & ngrams(text, c.decontamination_ngram_words):
         counts["benchmark_overlap"] += 1
         return None
-    return {"text": text, "sha256": digest(text.encode()), "source_index": row["source_index"]}
+    return {"text": text, "sha256": digest(text.encode()), "source_index": row["source_index"],
+            **({'split_group': row['split_group']} if 'split_group' in row else {})}
+
+
+def group_split(key, config):
+    fraction = int(digest(f'{config.training.seed}:{key}'.encode())[:16], 16) / 2**64
+    c = config.processing
+    return ('validation' if fraction < c.validation_fraction else
+            'test' if fraction < c.validation_fraction + c.test_fraction else 'train')
 
 
 def process(records, config, root):
@@ -255,8 +274,7 @@ def process(records, config, root):
         exact.add(fingerprint)
         if c.near_dedup and shingles:
             near.append(shingles)
-        accepted.append({"text": text, "sha256": digest(text.encode()),
-                         "source_index": row["source_index"]})
+        accepted.append(cleaned)
     counts["accepted"] = len(accepted)
     if len(accepted) < 3:
         raise ValueError(f"Too few documents after processing: {dict(counts)}; "
@@ -270,7 +288,16 @@ def process(records, config, root):
     splits = {"validation": accepted[:validation_count],
               "test": accepted[validation_count:validation_count + test_count],
               "train": accepted[validation_count + test_count:]}
+    grouped = any('split_group' in row for row in accepted)
+    if grouped:
+        splits = {name: [] for name in ['train', 'validation', 'test']}
+        for row in accepted:
+            key = row.get('split_group', row['sha256'])
+            splits[group_split(key, config)].append(row)
+        if any(not rows for rows in splits.values()):
+            raise ValueError('Grouped data has an empty split; acquire more independent groups')
     return splits, {"counts": dict(counts),
+                    "split_policy": 'split_group-disjoint' if grouped else 'document-shuffle',
                     "decontamination": "configured" if c.benchmark_files else "not_configured",
                     "limitations": "Regex PII and lexical near-dedup are heuristics; "
                     "no guarantee of complete PII removal or benchmark decontamination.",

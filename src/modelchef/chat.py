@@ -14,7 +14,13 @@ def require_run_folder(folder):
     return folder
 
 
-def checkpoint_for(folder):
+def checkpoint_for(folder, selected=None):
+    if selected is not None:
+        selected = Path(selected)
+        selected = (selected if selected.is_absolute() else folder / 'checkpoints' / selected).resolve()
+        if selected.parent != (folder / 'checkpoints').resolve() or not selected.is_file():
+            raise ValueError('Select an existing checkpoint inside this run\'s checkpoints directory')
+        return selected
     report = json.loads((folder / "report.json").read_text())
     if report["status"] != "completed":
         raise ValueError("Run is incomplete; resume/finish training before chatting")
@@ -125,11 +131,17 @@ def export_model(folder):
                         **{role + '_token': tokenizer.id_to_token(tokenizer.token_to_id('<' + role + '>'))
                            for role in ['bos', 'eos', 'unk', 'pad']},
                         "model_max_length": c.context_length, "clean_up_tokenization_spaces": False}
+    if config.stage.prompt_format == 'chat_transcript':
+        tokenizer_config['chat_template'] = (
+            "{% for message in messages %}{{ message['role']|capitalize + ': ' + "
+            "message['content'] + '\\n' }}{% endfor %}"
+            "{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}")
     (output / "tokenizer_config.json").write_text(json.dumps(tokenizer_config), encoding="utf-8")
     return output
 
 
-def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, top_k=30):
+def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, top_k=30,
+         system_prompt=None, checkpoint=None):
     folder = require_run_folder(folder)
     import torch
 
@@ -139,8 +151,12 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
 
     if max_tokens < 1 or temperature <= 0 or top_k < 0:
         raise ValueError("max_tokens/temperature must be positive; top_k must be nonnegative")
+    if checkpoint is not None and backend != 'torch':
+        raise ValueError('--checkpoint currently requires --backend torch')
     folder = Path(folder).resolve()
     config = RunConfig.model_validate_json((folder / "config.json").read_text())
+    if system_prompt and config.stage.prompt_format != 'chat_transcript':
+        raise ValueError('--system-prompt requires a chat_transcript-trained checkpoint')
     tokenizer = load_tokenizer(folder)
     torch.manual_seed(config.training.seed)
     if backend == "vllm":
@@ -154,6 +170,8 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
         def generate(text):
             # Bound tokenized prompts ourselves; avoid version-specific sampling truncation flags.
             output_tokens = min(max_tokens, config.model.context_length - 1)
+            if system_prompt and len(tokenizer.encode(text).ids) + output_tokens > config.model.context_length:
+                raise ValueError('Prompt/history plus output exceeds context; shorten it or /reset to retain the persona')
             ids = tokenizer.encode(text).ids[-(config.model.context_length - output_tokens):]
             ids = ids or [tokenizer.token_to_id("<bos>")]
             params = SamplingParams(temperature=temperature, top_k=top_k if top_k else -1,
@@ -166,11 +184,13 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
         device = runtime["device"]
         progress('Constructing the model and loading checkpoint weights on the selected device.')
         model = create_model(config.model, tokenizer.get_vocab_size()).to(device)
-        model.load_state_dict(torch.load(checkpoint_for(folder), map_location=device,
+        model.load_state_dict(torch.load(checkpoint_for(folder, checkpoint), map_location=device,
                                         weights_only=True)["model"])
         model.eval()
         def generate(text):
             ids = tokenizer.encode(text).ids or [tokenizer.token_to_id("<bos>")]
+            if system_prompt and len(ids) + max_tokens > config.model.context_length:
+                raise ValueError('Prompt/history plus output exceeds context; shorten it or /reset to retain the persona')
             sequence = torch.tensor([ids], device=device)
             reply = []
             with torch.no_grad():
@@ -192,7 +212,9 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
         progress(f'Generating a response with an output limit of {max_tokens} tokens.')
         if config.stage.kind in {'sft', 'dpo', 'rlvr', 'distill'}:
             from modelchef.objectives import format_prompt
-            prompt = format_prompt(prompt)
+            if config.stage.prompt_format == 'chat_transcript':
+                prompt = (('System: ' + system_prompt + '\n') if system_prompt else '') + 'User: ' + prompt
+            prompt = format_prompt(prompt, config.stage.prompt_format)
         print(generate(prompt), flush=True)
         return
     print("Enter a message; /reset clears history, /exit quits. History is kept only in memory.")
@@ -210,9 +232,13 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
             continue
         if not message:
             continue
-        text = history + "User: " + message + "\nAssistant:"
+        text = ((('System: ' + system_prompt + '\n') if system_prompt else '') +
+                history + "User: " + message + "\nAssistant:")
+        if config.stage.kind in {'pretrain', 'midtrain'}:
+            text = message  # Base models continue text; do not inject untrained chat roles.
         response = generate(text)
         print("Model: " + response, flush=True)
         # Keep at most a context window of tokenized history between turns.
-        history = tokenizer.decode(tokenizer.encode(text + response + "\n").ids[
+        turn = history + 'User: ' + message + '\nAssistant: ' + response + '\n'
+        history = tokenizer.decode(tokenizer.encode(turn).ids[
             -max(1, config.model.context_length // 2):])

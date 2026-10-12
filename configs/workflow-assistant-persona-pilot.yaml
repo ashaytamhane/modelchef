@@ -1,0 +1,12 @@
+schema_version: 1
+name: assistant-persona-pilot
+stages:
+- name: foundation
+  recipe: configs/assistant-persona-pilot-pretrain.yaml
+- name: reasoning-midtrain
+  recipe: configs/assistant-persona-pilot-midtrain.yaml
+  parent_stage: foundation
+- name: instruction-persona
+  recipe: configs/assistant-persona-pilot-sft.yaml
+  parent_stage: reasoning-midtrain
+export: true

@@ -17,6 +17,7 @@ artifacts/*
 data/cache/
 data/raw/
 data/processed/
+data/probes/
 
 *.egg-info/
 SETUP_STATUS.md

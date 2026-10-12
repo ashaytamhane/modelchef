@@ -7,6 +7,7 @@ import random
 import time
 import uuid
 from contextlib import nullcontext
+from itertools import islice
 from pathlib import Path
 
 import torch
@@ -47,7 +48,10 @@ def train_tokenizer(documents, c):
     trainer = trainers.BpeTrainer(vocab_size=c.vocab_size, min_frequency=c.min_frequency,
         special_tokens=c.special_tokens, initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
         show_progress=False)
-    tokenizer.train_from_iterator((row["text"] for row in documents), trainer=trainer)
+    texts = (row['text'] for row in documents)
+    if c.training_max_documents is not None:
+        texts = islice(texts, c.training_max_documents)
+    tokenizer.train_from_iterator(texts, trainer=trainer)
     return tokenizer
 
 
@@ -74,8 +78,9 @@ def pack(documents, tokenizer, c, context, token_limit):
 def evaluate(model, blocks, batches, batch_size, device, amp):
     model.eval()
     loss_sum, tokens = 0.0, 0
+    limit = len(blocks[0]) if batches == 'all' else min(len(blocks[0]), batches * batch_size)
     with torch.no_grad():
-        for start in range(0, min(len(blocks[0]), batches * batch_size), batch_size):
+        for start in range(0, limit, batch_size):
             x, y = (part[start:start + batch_size].to(device) for part in blocks)
             with amp():
                 logits = model(x)
@@ -85,10 +90,14 @@ def evaluate(model, blocks, batches, batch_size, device, amp):
     model.train()
     nll = loss_sum / tokens
     return {"loss": nll, "perplexity": math.exp(min(nll, 80)), "tokens": tokens,
+            "evaluated_examples": limit, "available_examples": len(blocks[0]),
+            "coverage": 'all' if limit == len(blocks[0]) else 'bounded',
             "perplexity_capped": nll > 80}
 
 
 def run_pipeline(config, root, resume=None, prepare_only=False):
+    from modelchef.model_references import resolve_references
+    config, model_references = resolve_references(config, root, resume)
     config.validate_execution()
     root = Path(root).resolve()
     if config.training.distributed == 'ddp' and not prepare_only:
@@ -109,6 +118,8 @@ def run_pipeline(config, root, resume=None, prepare_only=False):
     folder = (Path(resume).resolve().parent.parent if resume else
               root / config.output_dir / (config.name + "-" + uuid.uuid4().hex[:12]))
     folder.mkdir(parents=True, exist_ok=True)
+    if model_references:
+        (folder / 'model-references.json').write_text(json.dumps(model_references, indent=2), encoding='utf-8')
     from modelchef.run_config import RunConfig
     if resume and RunConfig.model_validate_json((folder / "config.json").read_text()).model_dump(
             mode="json") != recipe:
@@ -116,6 +127,9 @@ def run_pipeline(config, root, resume=None, prepare_only=False):
     narrate = Narrator(folder, config.explain == "detailed")
     report = {"status": "running", "run_dir": str(folder), "config_sha256": fingerprint}
     (folder / "config.json").write_text(json.dumps(recipe, indent=2), encoding="utf-8")
+    attribution = os.environ.get('MODELCHEF_DATA_ATTRIBUTION')
+    if attribution and not resume:
+        (folder / 'data-attribution.json').write_bytes(Path(attribution).read_bytes())
     try:
         return _execute(config, root, folder, fingerprint, narrate, report, resume, prepare_only)
     except Exception as error:
@@ -282,11 +296,14 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         n.say(f'Reuse parent vocabulary and weights for {c.stage.kind}; no vocabulary retraining.')
     elif resume:
         tokenizer = load_tokenizer(folder)
+    elif c.stage.uses_distillation:
+        tokenizer = load_tokenizer((root / c.stage.teacher_run).resolve())
+        n.say('Reuse the teacher tokenizer for aligned token distributions; student weights start randomly.')
     else:
         tokenizer = train_tokenizer(splits["train"], c.tokenizer)
     if not resume:
         tokenizer.save(str(folder / "tokenizer.json"))
-    if not resume and parent is not None and hasattr(tokenizer, 'roles'):
+    if not resume and hasattr(tokenizer, 'roles'):
         (folder / 'tokenizer-roles.json').write_text(json.dumps(tokenizer.roles), encoding='utf-8')
     tokenizer_hash = digest((folder / "tokenizer.json").read_bytes())
     roles_path = folder / 'tokenizer-roles.json'
@@ -312,7 +329,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                     c.model.context_length, limit, folder, name)
                 token_counts[name] = descriptors[name]['tokens']
             else:
-                blocks[name], token_counts[name] = (pack_structured(rows, tokenizer, c, limit) if structured
+                blocks[name], token_counts[name] = (pack_structured(rows, tokenizer, c, limit, n.say) if structured
                     else pack(rows, tokenizer, c.tokenizer, c.model.context_length, limit))
     # Logical data identity does not depend on torch ZIP container metadata.
     if descriptors:
@@ -355,7 +372,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             if hasattr(network, 'blocks'):
                 for block in network.blocks:
                     block.attention.c = block.attention.c.model_copy(update={'attention_dropout': 0})
-    if c.stage.kind == 'distill':
+    if c.stage.uses_distillation:
         from modelchef.chat import checkpoint_for
         from modelchef.run_config import RunConfig
         teacher_folder = (root / c.stage.teacher_run).resolve()
@@ -371,6 +388,10 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         reference.load_state_dict(torch.load(teacher_path, map_location='cpu', weights_only=True)['model'])
         reference.requires_grad_(False).eval()
         report['teacher_checkpoint_sha256'] = file_digest(teacher_path)
+        report['distillation'] = {'teacher_run': str(teacher_folder),
+                                 'alpha': c.stage.distillation_alpha,
+                                 'temperature': c.stage.distillation_temperature,
+                                 'mask': 'response-only' if structured else 'all target tokens'}
         teacher_manifest = folder / 'teacher-manifest.json'
         if resume and teacher_manifest.read_text() != report['teacher_checkpoint_sha256']:
             raise ValueError('Teacher checkpoint changed since this stage started')
@@ -422,6 +443,15 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         temp.replace(path)
         report['checkpoint'] = str(path)
         n.say(f"Checkpoint saved at step {index}: {path.name}", detail=True)
+        from modelchef.recovery import checkpoint_to_s3
+        if checkpoint_to_s3(root, folder, path) is not None:
+            n.say(f'S3 recovery committed at step {index}: weights, optimizer, RNG, tokenizer and data snapshots.')
+            keep = int(os.environ.get('MODELCHEF_LOCAL_CHECKPOINT_KEEP', '2'))
+            if keep < 1:
+                raise ValueError('MODELCHEF_LOCAL_CHECKPOINT_KEEP must be positive')
+            for old in sorted(checkpoints.glob('step-*.pt'))[:-keep]:
+                if old != path:
+                    old.unlink()
         return path
 
     if prepare_only:
@@ -429,6 +459,9 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                       parameters=parameters, stage=c.stage.kind, token_counts=token_counts)
         (folder / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         return report
+
+    if os.environ.get('MODELCHEF_RECOVERY_S3_URI') and not resume:
+        save_checkpoint(step)
 
     explanations = {
         'pretrain': 'Next-token cross entropy from random initialization.',
@@ -438,6 +471,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         'rlvr': 'Sample groups of responses, verify answers, normalize rewards and optimize a '
                 'clipped policy objective with reference KL. Equal rewards give zero policy advantage.',
         'distill': 'Mix response cross entropy with temperature-scaled KL from a frozen teacher.'}
+    if c.stage.uses_distillation and c.stage.kind != 'distill':
+        explanations[c.stage.kind] += ' Also match a frozen teacher using temperature-scaled KL; apply the stage target mask.'
     n.stage(f"7. Train stage: {c.stage.kind}", explanations[c.stage.kind] +
             ' Use AdamW, gradient accumulation/clipping and the configured schedule. '
             'A short test validates execution; it does not establish model quality.')
@@ -450,7 +485,14 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         torch.cuda.reset_peak_memory_stats()
     started = time.monotonic()
     initial_step = step
+    checkpoint_path = None
+    gate = t.performance_gate
+    gate_started = None
     while step < t.steps:
+        if gate and step - initial_step == gate.warmup_steps:
+            if device == 'cuda':
+                torch.cuda.synchronize()
+            gate_started = time.monotonic()
         if time.monotonic() - started > t.max_runtime_seconds:
             checkpoint_path = save_checkpoint(step)
             raise TimeoutError(f"Training runtime cap reached; resume from {checkpoint_path}")
@@ -508,13 +550,40 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                                               t.micro_batch_size, device, amp)
         with (folder / "metrics.jsonl").open("a", encoding="utf-8") as output:
             output.write(json.dumps(metrics) + "\n")
+        if gate and step - initial_step == gate.probe_steps:
+            if device == 'cuda':
+                torch.cuda.synchronize()
+            from modelchef.performance_gate import project_run
+            per_step = t.micro_batch_size * t.gradient_accumulation * c.model.context_length
+            gate_result = project_run(
+                measured_tokens=(gate.probe_steps - gate.warmup_steps) * per_step,
+                measured_seconds=time.monotonic() - gate_started,
+                remaining_tokens=(t.steps - step) * per_step +
+                    int(os.environ.get('MODELCHEF_REMAINING_STAGE_TOKENS', '0')),
+                available_seconds=max(0, min(t.max_runtime_seconds - (time.monotonic() - started),
+                    float(os.environ.get('MODELCHEF_DEADLINE_EPOCH',
+                          str(time.time() + t.max_runtime_seconds))) - time.time())),
+                safety_multiplier=gate.safety_multiplier, overhead_seconds=gate.overhead_seconds,
+                peak_allocated_bytes=torch.cuda.max_memory_allocated() if device == 'cuda' else 0,
+                total_memory_bytes=torch.cuda.get_device_properties(0).total_memory if device == 'cuda' else 0,
+                max_allocated_memory_fraction=gate.max_allocated_memory_fraction)
+            (folder / 'performance-gate.json').write_text(json.dumps(gate_result, indent=2))
+            checkpoint_path = save_checkpoint(step)
+            n.say(f"Performance gate: {gate_result['measured_tokens_per_second']:.0f} tokens/s; "
+                  f"projected remaining runtime {gate_result['projected_remaining_seconds'] / 3600:.1f} hours; "
+                  f"available {gate_result['available_seconds'] / 3600:.1f} hours; "
+                  f"passed={gate_result['passed']}. Recovery checkpoint committed.")
+            if not gate_result['passed']:
+                raise RuntimeError('Performance gate rejected projected runtime or memory use; '
+                                   'checkpoint saved; later stages will not start')
         if step % t.log_every == 0 or step == 1 or step == t.steps:
             n.say(f"Step {step}/{t.steps}: loss={train_loss:.4f}, lr={lr:.2g}, "
                   f"tokens/s={metrics['tokens_per_second']:.0f}; "
                   f"validation={metrics.get('validation', 'not scheduled this step')}.")
         if step % t.checkpoint_every == 0 or step == t.steps:
-            save_checkpoint(step)
-    checkpoint_path = save_checkpoint(step)
+            checkpoint_path = save_checkpoint(step)
+    if checkpoint_path is None:
+        checkpoint_path = save_checkpoint(step)
 
     n.stage("8. Final held-out evaluation and checkpoint reload", "Evaluate validation and test splits "
             "without gradient updates. Reload the final weights into a fresh decoder and check matching "
@@ -556,7 +625,13 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     n.stage("9. Generate a sample and save the run report", "Sample from the trained checkpoint using "
             "configured temperature/top-k. Expect mostly incoherent text after a tiny training test. "
             "Save configuration, manifests, tokenizer, metrics, checkpoints and this explanation log.")
-    ids = tokenizer.encode(c.evaluation.prompt).ids
+    prompt = c.evaluation.prompt
+    if structured or c.stage.prompt_format == 'chat_transcript':
+        from modelchef.objectives import format_prompt
+        if c.stage.prompt_format == 'chat_transcript' and not prompt.startswith(('System:', 'User:')):
+            prompt = 'User: ' + prompt
+        prompt = format_prompt(prompt, c.stage.prompt_format)
+    ids = tokenizer.encode(prompt).ids
     if not ids:
         ids = [tokenizer.token_to_id("<bos>")]
     generated = torch.tensor([ids], device=device)
@@ -583,6 +658,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                   data_sha256=data_hash, tokens_file_sha256=token_hash, generation=sample)
     report.update(benchmark_source=benchmark_source, benchmark_scores=benchmark_scores)
     (folder / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    from modelchef.recovery import checkpoint_to_s3
+    checkpoint_to_s3(root, folder, checkpoint_path)
     n.say(f"Generated sample: {sample}")
     n.say(f"Pipeline completed. Report: {folder / 'report.json'}")
     return report

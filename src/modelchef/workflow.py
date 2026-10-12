@@ -1,5 +1,6 @@
 """Compose stage recipes into one explicit local model-development workflow."""
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import Literal
@@ -26,6 +27,7 @@ class Workflow(Section):
     imported_context: int = Field(default=128, ge=8)
     stages: list[WorkflowStage] = Field(min_length=1)
     export: bool = True
+    curation_recipe: str | None = None
 
     @model_validator(mode='after')
     def ordered(self):
@@ -65,18 +67,23 @@ def cook(path, root, execute=False):
         preview['stage'] = dict(preview.get('stage', {}))
         if preview['stage'].get('kind', 'pretrain') != 'pretrain':
             parent = previews[stage.parent_stage] if stage.parent_stage else previous_preview
-            if parent is None:
+            explicit_parent = preview['stage'].get('parent_run')
+            if stage.parent_stage and isinstance(explicit_parent, dict):
+                raise ValueError('Choose parent_stage or a recipe parent_run, not both')
+            if parent is None and not explicit_parent:
                 raise ValueError('A continuation stage requires an earlier run or imported_model')
-            preview['stage']['parent_run'] = 'resolved-at-execution'
-            if stage.inherit_architecture:
+            use_explicit = isinstance(explicit_parent, dict) or (parent is None and bool(explicit_parent))
+            if not use_explicit:
+                preview['stage']['parent_run'] = 'resolved-at-execution'
+            if stage.inherit_architecture and not use_explicit:
                 supplied = preview.get('model', {})
                 preview['model'] = parent.model.model_dump()
                 for key in ['peft', 'quantization', 'attention_kernel', 'custom_swiglu_path', 'gradient_checkpointing']:
                     if key in supplied:
                         preview['model'][key] = supplied[key]
                 preview['tokenizer'] = parent.tokenizer.model_dump()
-        elif stage.parent_stage or stage.teacher_stage:
-            raise ValueError('A pretraining stage cannot reference a parent or teacher stage')
+        elif stage.parent_stage:
+            raise ValueError('A pretraining stage cannot reference parent weights')
         if stage.teacher_stage:
             preview['stage']['teacher_run'] = 'resolved-at-execution'
         previous_preview = RunConfig.model_validate(preview).validate_execution()
@@ -87,6 +94,15 @@ def cook(path, root, execute=False):
             'note': 'Plan only; --run executes stage recipes in order. This does not launch AWS or serve an API.'}
     if not execute:
         return plan
+    previous_attribution = os.environ.get('MODELCHEF_DATA_ATTRIBUTION')
+    previous_remaining = os.environ.get('MODELCHEF_REMAINING_STAGE_TOKENS')
+    if config.curation_recipe:
+        from modelchef.curation import curate
+        curated = curate(root / config.curation_recipe, root, execute=True)
+        from modelchef.curation import CurationConfig
+        data_config = CurationConfig.model_validate(yaml.safe_load((root / config.curation_recipe).read_text()))
+        os.environ['MODELCHEF_DATA_ATTRIBUTION'] = str(root / data_config.output_dir / 'attribution.json')
+        plan['curation'] = curated
     from modelchef.chat import export_model
     from modelchef.pipeline import run_pipeline
     from modelchef.pretrained import register_model
@@ -97,17 +113,21 @@ def cook(path, root, execute=False):
     result = {'status': 'running', 'workflow_dir': str(folder), 'stages': {}}
     try:
         previous = register_model(root / config.imported_model, root, config.imported_context) if config.imported_model else None
-        for stage in config.stages:
+        for stage_index, stage in enumerate(config.stages):
             recipe = recipes[stage.name]
             recipe['stage'] = dict(recipe.get('stage', {}))
             kind = recipe['stage'].get('kind', 'pretrain')
             if kind != 'pretrain':
-                parent = result['stages'][stage.parent_stage]['run_dir'] if stage.parent_stage else previous
+                explicit_parent = recipe['stage'].get('parent_run')
+                parent = (explicit_parent if isinstance(explicit_parent, dict) else
+                          (result['stages'][stage.parent_stage]['run_dir'] if stage.parent_stage else
+                           previous or explicit_parent))
                 if not parent:
                     raise ValueError('A continuation stage requires an earlier run or imported_model')
-                recipe['stage']['parent_run'] = str(parent)
-                parent_config = RunConfig.model_validate_json((Path(parent) / 'config.json').read_text())
-                if stage.inherit_architecture:
+                recipe['stage']['parent_run'] = parent
+                parent_config = (RunConfig.model_validate_json((Path(parent) / 'config.json').read_text())
+                                 if isinstance(parent, str) else None)
+                if stage.inherit_architecture and parent_config is not None:
                     supplied = recipe.get('model', {})
                     recipe['model'] = parent_config.model.model_dump()
                     # Architecture comes from the parent; only runtime/adapter choices override it.
@@ -118,6 +138,10 @@ def cook(path, root, execute=False):
             if stage.teacher_stage:
                 recipe['stage']['teacher_run'] = result['stages'][stage.teacher_stage]['run_dir']
             report(f'Cooking stage {stage.name}: {kind}.')
+            os.environ['MODELCHEF_REMAINING_STAGE_TOKENS'] = str(sum(
+                p.training.steps * p.training.micro_batch_size * p.training.gradient_accumulation *
+                p.model.context_length for p in
+                [previews[s.name] for s in config.stages[stage_index + 1:]]))
             recipe['name'] = config.name + '-' + stage.name
             result['stages'][stage.name] = run_pipeline(RunConfig.model_validate(recipe), root)
             stage_result = result['stages'][stage.name]
@@ -129,9 +153,21 @@ def cook(path, root, execute=False):
         result.update(status='completed', final_run=str(previous))
         if config.export:
             result['export_dir'] = str(export_model(previous))
+        from modelchef.chat import checkpoint_for
+        from modelchef.recovery import checkpoint_to_s3
+        checkpoint_to_s3(root, Path(previous), checkpoint_for(Path(previous)))
     except Exception as error:
         result.update(status='failed', error=f'{type(error).__name__}: {error}')
         raise
     finally:
+        if previous_remaining is None:
+            os.environ.pop('MODELCHEF_REMAINING_STAGE_TOKENS', None)
+        else:
+            os.environ['MODELCHEF_REMAINING_STAGE_TOKENS'] = previous_remaining
         (folder / 'report.json').write_text(json.dumps(result, indent=2))
+        if config.curation_recipe:
+            if previous_attribution is None:
+                os.environ.pop('MODELCHEF_DATA_ATTRIBUTION', None)
+            else:
+                os.environ['MODELCHEF_DATA_ATTRIBUTION'] = previous_attribution
     return result

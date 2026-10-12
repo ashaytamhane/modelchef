@@ -32,6 +32,13 @@ def build_workflow_bundle(root, settings):
     root = Path(root).resolve()
     path = root / settings['pipeline_config']
     workflow = Workflow.model_validate(yaml.safe_load(path.read_text(encoding='utf-8')))
+    if workflow.curation_recipe:
+        from modelchef.curation import CurationConfig
+        curation = CurationConfig.model_validate(yaml.safe_load((root / workflow.curation_recipe).read_text()))
+        collections = {source.collection for source in curation.sources} | {
+            source.pretraining_collection for source in curation.sources if source.pretraining_collection}
+        settings = {**settings, '_prepared_inputs': {
+            str((root / curation.output_dir / (name + '.jsonl')).resolve()) for name in collections}}
     plan = cook(path, root)
     files = {}
     cap = int(settings.get('max_bundle_bytes', 64_000_000))
@@ -56,6 +63,9 @@ def build_workflow_bundle(root, settings):
 
     recipe = workflow.model_dump(mode='json')
     recipe['output_dir'] = 'artifacts/workflows'
+    if workflow.curation_recipe:
+        files['configs/curation.yaml'] = (root / workflow.curation_recipe).read_bytes()
+        recipe['curation_recipe'] = 'configs/curation.yaml'
     for stage in recipe['stages']:
         raw = plan['resolved_recipes'][stage['name']]
         prefix = 'inputs/stages/' + stage['name'] + '/'
@@ -89,11 +99,20 @@ def workflow_preflight(root, settings):
     directory.mkdir(parents=True)
     recipe = workflow.model_dump(mode='json')
     recipe['output_dir'] = str(directory / 'workflows')
+    recipe['curation_recipe'] = None
     for stage in recipe['stages']:
         config = RunConfig.model_validate(plan['resolved_recipes'][stage['name']])
         config.output_dir = str(directory / 'training')
-        config.data.max_documents = min(config.data.max_documents, 64)
-        config.data.max_tokens = min(config.data.max_tokens, 16000)
+        if workflow.curation_recipe:
+            sample_dir = settings.get('preflight_data_dir')
+            if not sample_dir:
+                raise ValueError('Remote curation requires preflight_data_dir containing representative local samples')
+            config.data.local_paths = [str(root / sample_dir / Path(name).name)
+                                      for name in config.data.local_paths or [config.data.local_path]]
+            config.data.local_path = None
+        config.data.max_documents = min(config.data.max_documents, 256)
+        config.data.max_tokens = min(config.data.max_tokens, 262144)
+        config.processing.validation_fraction = config.processing.test_fraction = 0.1
         config.training.accelerator, config.training.precision = 'cpu', 'fp32'
         config.training.compile, config.training.allow_tf32 = False, False
         config.training.optimizer_kernel = 'default'
@@ -103,6 +122,7 @@ def workflow_preflight(root, settings):
         if config.model.peft.method == 'qlora':
             config.model.peft.method = 'lora'
         config.training.steps, config.training.warmup_steps = 2, 0
+        config.training.performance_gate = None
         config.training.micro_batch_size = config.training.gradient_accumulation = 1
         config.training.max_runtime_seconds = 60
         config.evaluation.benchmark, config.evaluation.batches = 'none', 1
@@ -110,7 +130,7 @@ def workflow_preflight(root, settings):
         if config.stage.kind == 'pretrain':
             config.model.layers, config.model.hidden_size = 1, 64
             config.model.attention_heads, config.model.kv_heads = 4, 2
-            config.model.intermediate_size, config.model.context_length = 128, 64
+            config.model.intermediate_size = 128
         stage_path = directory / (stage['name'] + '.yaml')
         stage_path.write_text(yaml.safe_dump(config.model_dump(mode='json')), encoding='utf-8')
         stage['recipe'] = str(stage_path)

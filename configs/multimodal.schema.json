@@ -170,9 +170,58 @@
       "title": "MediaModel",
       "type": "object"
     },
+    "PerformanceGate": {
+      "additionalProperties": false,
+      "properties": {
+        "probe_steps": {
+          "default": 50,
+          "exclusiveMinimum": 1,
+          "title": "Probe Steps",
+          "type": "integer"
+        },
+        "warmup_steps": {
+          "default": 10,
+          "minimum": 0,
+          "title": "Warmup Steps",
+          "type": "integer"
+        },
+        "safety_multiplier": {
+          "default": 2.0,
+          "minimum": 1,
+          "title": "Safety Multiplier",
+          "type": "number"
+        },
+        "overhead_seconds": {
+          "default": 600,
+          "minimum": 0,
+          "title": "Overhead Seconds",
+          "type": "integer"
+        },
+        "max_allocated_memory_fraction": {
+          "default": 0.9,
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Max Allocated Memory Fraction",
+          "type": "number"
+        }
+      },
+      "title": "PerformanceGate",
+      "type": "object"
+    },
     "Training": {
       "additionalProperties": false,
       "properties": {
+        "performance_gate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PerformanceGate"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "distributed": {
           "default": "none",
           "enum": [

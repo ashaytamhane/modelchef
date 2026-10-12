@@ -47,6 +47,34 @@ def test_preview_is_offline_allowlisted_and_requires_license(tmp_path, monkeypat
         PublishConfig.model_validate({**config.model_dump(), 'license': ''})
 
 
+def test_attribution_preview_preserves_authors_and_noncommercial_terms(tmp_path, monkeypatch):
+    config = export(tmp_path)
+    config.license = 'cc-by-nc-4.0'
+    config.data_attribution_path = 'attribution.json'
+    source = {'name': 'empathy', 'dataset': 'authors/empathy', 'dataset_url': 'https://example.org/data',
+        'license': 'cc-by-nc-4.0', 'license_url': 'https://example.org/license',
+        'attribution': 'Original authors and credited mirror', 'snapshot_sha256': 'a'*64,
+        'accepted_examples': 30, 'revision_note': 'Saved snapshot hash pins the sample.',
+        'citations': [{'title': 'Original paper', 'authors': ['Author One', 'Author Two'],
+                       'url': 'https://example.org/paper'}]}
+    path = tmp_path/'attribution.json'
+    path.write_text(json.dumps({'sources':[source], 'transformations':'Original complete replies.'}))
+    calls = fake_hub(monkeypatch)
+    result = publish(config, tmp_path)
+    assert not calls
+    assert 'Author One' in result['model_card'] and 'Author Two' in result['model_card']
+    assert 'cc-by-nc-4.0' in result['model_card']
+    assert 'attribution.json' not in {item['name'] for item in result['files']}
+    config.license = 'apache-2.0'
+    with pytest.raises(ValueError, match='noncommercial|cc-by-nc'):
+        publish(config, tmp_path)
+    config.license = 'cc-by-nc-4.0'
+    source.pop('name')
+    path.write_text(json.dumps({'sources':[source], 'transformations':'Original replies.'}))
+    with pytest.raises(ValueError, match='Incomplete'):
+        publish(config, tmp_path)
+
+
 def test_explicit_upload_and_visibility_match(tmp_path, monkeypatch):
     config = export(tmp_path)
     calls = fake_hub(monkeypatch)

@@ -1,0 +1,6 @@
+schema_version: 1
+name: huggingface-tiny-workflow
+stages:
+  - name: instruction
+    recipe: configs/sft-huggingface-tiny.yaml
+export: true

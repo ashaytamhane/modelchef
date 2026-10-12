@@ -1,0 +1,8 @@
+schema_version: 1
+name: assistant-persona-kernel-pilot
+stages:
+- name: baseline
+  recipe: configs/assistant-persona-kernel-pilot-baseline.yaml
+- name: compiled
+  recipe: configs/assistant-persona-kernel-pilot-compiled.yaml
+export: false

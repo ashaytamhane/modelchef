@@ -17,6 +17,26 @@ def test_budget_reservation(settings):
     assert budget_reservation(settings) == Decimal("0.50")
 
 
+def test_reconcile_old_unaccepted_launch_releases_only_after_confirmation(settings, tmp_path):
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    ledger = Ledger(tmp_path / settings['ledger_path'])
+    ledger.reserve('absent-run', 'test-account:us-east-1', Decimal('0.50'), Decimal(1))
+    report = {'started_at': (datetime.now(UTC) - timedelta(minutes=20)).isoformat()}
+    ledger.record('absent-run', 'cleanup-pending', report)
+    runner = SpotRunner.__new__(SpotRunner)
+    runner.root, runner.settings, runner.account = tmp_path, settings, 'test-account'
+    deleted = []
+    runner.ec2 = SimpleNamespace(describe_instances=lambda **kw: {'Reservations': []},
+        describe_security_groups=lambda **kw: {'SecurityGroups': [{'GroupId': 'sg-old'}]},
+        delete_security_group=lambda **kw: deleted.append(kw['GroupId']))
+    result = runner.reconcile('absent-run')
+    assert result['launch_error_code'] == 'ConfirmedNoInstance'
+    assert deleted == ['sg-old']
+    assert ledger.db.execute('SELECT reserved,state FROM runs').fetchone() == ('0', 'no-instance')
+
+
 def test_on_demand_budget_uses_declared_rate(settings):
     settings.update(market_type='on_demand', on_demand_hourly_usd='1.25',
                     per_run_budget_usd='0.40', total_budget_usd='1.00')
@@ -108,6 +128,10 @@ def test_unlaunched_budget_is_released_only_with_confirmed_no_instance(tmp_path)
     ledger.record('three', 'no-instance', {'launch_error_code': 'VcpuLimitExceeded'})
     ledger.release_unlaunched('three')
     assert ledger.db.execute("SELECT reserved FROM runs WHERE id='three'").fetchone()[0] == '0'
+    ledger.reserve('quota', 'account:region', Decimal('0.5'), '1.0')
+    ledger.record('quota', 'no-instance', {'launch_error_code': 'MaxSpotInstanceCountExceeded'})
+    ledger.release_unlaunched('quota')
+    assert ledger.db.execute("SELECT reserved FROM runs WHERE id='quota'").fetchone()[0] == '0'
 
 
 def test_userdata_contains_guest_deadline_and_termination(settings):

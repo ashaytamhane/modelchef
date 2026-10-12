@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yaml
 
+from modelchef.curation import CurationConfig
 from modelchef.multimodal_config import MultimodalConfig
 from modelchef.publishing import PublishConfig
 from modelchef.run_config import RunConfig
@@ -49,7 +50,8 @@ def check(root):
                        if 'name: full-reference' in block), None)
     assert documented == reference, 'README reference recipe differs from checked-in recipe'
     for model, name in [(RunConfig, 'pretrain'), (Workflow, 'workflow'),
-                        (MultimodalConfig, 'multimodal'), (PublishConfig, 'publish')]:
+                        (MultimodalConfig, 'multimodal'), (PublishConfig, 'publish'),
+                        (CurationConfig, 'curation')]:
         saved = json.loads((root / f'configs/{name}.schema.json').read_text(encoding='utf-8'))
         assert saved == model.model_json_schema(), f'{name} schema is stale'
     for path in (root / 'configs').glob('*.yaml'):
@@ -62,6 +64,8 @@ def check(root):
             PublishConfig.model_validate(config)
         elif isinstance(config, dict) and 'modality' in config:
             MultimodalConfig.model_validate(config)
+        elif isinstance(config, dict) and 'sources' in config:
+            CurationConfig.model_validate(config)
         elif isinstance(config, dict) and 'training' in config:
             RunConfig.model_validate(config).validate_execution()
     print('Documentation, commands, example recipes and schemas agree.')

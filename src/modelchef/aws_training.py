@@ -12,6 +12,9 @@ from modelchef.run_config import RunConfig
 
 
 def build_bundle(root, settings, *, raw_override=None, linked_stage=False):
+    if settings.get('job_backend') == 'neuron_probe':
+        from modelchef.aws_neuron import build_bundle as neuron_bundle
+        return neuron_bundle(root, settings)
     root = Path(root).resolve()
     raw = raw_override if raw_override is not None else yaml.safe_load((root / settings['pipeline_config']).read_text())
     if 'stages' in raw:
@@ -20,6 +23,8 @@ def build_bundle(root, settings, *, raw_override=None, linked_stage=False):
     if 'modality' in raw:
         return build_multimodal_bundle(root, settings, raw)
     config = RunConfig.model_validate(raw)
+    from modelchef.model_references import resolve_references
+    config, _ = resolve_references(config, root)
     config.validate_execution()
     cap = int(settings.get('max_bundle_bytes', 64_000_000))
     if cap <= 0:
@@ -81,7 +86,11 @@ def build_bundle(root, settings, *, raw_override=None, linked_stage=False):
 
     package_pretrained(recipe['model'])
     package_kernel(recipe['model'])
-    if config.data.provider == 'local_jsonl':
+    local_inputs = [(root / filename).resolve() for filename in
+                    config.data.local_paths or ([config.data.local_path] if config.data.local_path else [])]
+    prepared = settings.get('_prepared_inputs', set())
+    remote_prepared = bool(local_inputs) and all(str(path) in prepared for path in local_inputs)
+    if config.data.provider == 'local_jsonl' and not remote_prepared:
         rows, read_bytes = [], 0
         index = 0
         remaining = cap - sum(map(len, files.values()))
@@ -214,19 +223,26 @@ def training_user_data(settings):
     if len(checksum) != 64 or any(char not in '0123456789abcdef' for char in checksum):
         raise ValueError('Invalid bundle checksum')
     max_result = int(settings.get('max_result_bytes', 512_000_000))
+    result_mode = settings.get('result_mode', 'full')
+    if result_mode not in {'full', 'metadata'}:
+        raise ValueError('result_mode must be full or metadata')
+    archive_command = ('python -m modelchef.aws_results /opt/modelchef-training /tmp/results.tar.gz'
+                       if result_mode == 'metadata' else
+                       'tar -czf /tmp/results.tar.gz -C /opt/modelchef-training artifacts')
     if max_result <= 0:
         raise ValueError('max_result_bytes must be positive')
-    return f'''#!/bin/bash
+    script = f'''#!/bin/bash
 set -euo pipefail
 exec > >(tee -a /var/log/modelchef-training.log /dev/console) 2>&1
+export MODELCHEF_DEADLINE_EPOCH=$(($(date +%s) + {minutes} * 60 - 600))
 systemd-run --unit=modelchef-deadline --on-active={minutes}m /sbin/shutdown -h now
 finish() {{
   code=$?; trap - EXIT; set +e
   if [ -d /opt/modelchef-training/artifacts ]; then
-    tar -czf /tmp/results.tar.gz -C /opt/modelchef-training artifacts
+    {archive_command}
     size=$(stat -c %s /tmp/results.tar.gz)
     if [ "$size" -le {max_result} ]; then
-      timeout 45 aws s3 cp /tmp/results.tar.gz {result} --sse AES256 --cli-connect-timeout 5 --cli-read-timeout 10 || code=1
+      timeout 300 aws s3 cp /tmp/results.tar.gz {result} --sse AES256 --cli-connect-timeout 5 --cli-read-timeout 30 || code=1
     else code=1; fi
   fi
   echo "MODELCHEF_RESULT=$code"
@@ -245,14 +261,26 @@ tar -xzf /tmp/source.tar.gz
 python -m pip install '.[pipeline]'
 python -m modelchef.cli doctor
 # Guest preparation preserves the original recipe's optimization policy.
+export MODELCHEF_RECOVERY_S3_URI={shlex.quote(f's3://{bucket}/{prefix}/recovery')}
 python -m modelchef.aws_guest configs/job.yaml
 '''
+    if settings.get('job_backend') == 'neuron_probe':
+        script = script.replace('source /opt/pytorch/bin/activate',
+                                'source /opt/aws_neuronx_venv_pytorch_2_9/bin/activate')
+        script = script.replace('python -m modelchef.cli doctor',
+                                "neuron-ls\npython -c 'import torch, torch_neuronx; print(torch.__version__)'")
+        script = script.replace('python -m modelchef.aws_guest configs/job.yaml',
+                                'python -m modelchef.aws_neuron configs/job.yaml')
+    return script
 
 
 def training_preflight(root, settings):
     """Actually exercise bounded data/model training before the AWS lifecycle begins."""
     import subprocess
     import sys
+    if settings.get('job_backend') == 'neuron_probe':
+        from modelchef.aws_neuron import preflight
+        return preflight(root, settings)
     root = Path(root)
     raw = yaml.safe_load((root / settings['pipeline_config']).read_text())
     if 'stages' in raw:

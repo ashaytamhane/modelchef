@@ -39,6 +39,7 @@ processing:  # OPTIONAL: defaults are supplied when omitted.
 tokenizer:  # OPTIONAL: defaults are supplied when omitted.
   algorithm: byte_bpe  # OPTIONAL: byte_bpe | pretrained; pretrained is reused from an imported/parent run.
   vocab_size: 4096  # OPTIONAL: Requested BPE size (260..262144); a small corpus can learn fewer tokens.
+  training_max_documents: null # Optional BPE fitting sample; null uses every training document.
   min_frequency: 2  # OPTIONAL: defaults are supplied when omitted.
   special_tokens:  # OPTIONAL: Required identities: pad, unk, bos, eos; all entries must be unique.
   - <pad>
@@ -84,6 +85,7 @@ model:  # OPTIONAL: defaults are supplied when omitted.
   init_std: 0.02  # OPTIONAL: defaults are supplied when omitted.
   gradient_checkpointing: false  # OPTIONAL: Recompute activations during backward to trade compute for memory.
 training:  # OPTIONAL: defaults are supplied when omitted.
+  performance_gate: null  # OPTIONAL: measured throughput/memory gate; see the research tutorial.
   distributed: none  # OPTIONAL: none | ddp; DDP launches with torchrun.
   distributed_timeout_seconds: 300  # OPTIONAL: process-group timeout.
   compile: false  # OPTIONAL: Opt in to torch.compile; default leaves execution eager.
@@ -117,12 +119,13 @@ evaluation:  # OPTIONAL: defaults are supplied when omitted.
   benchmark: auto  # CONDITIONAL: auto | none | hellaswag | financial_phrasebank.
   benchmark_examples: 8  # OPTIONAL: 1..100; bounded custom protocol, not a full standard suite.
   benchmark_max_download_bytes: 2000000  # OPTIONAL: Separate benchmark payload-byte cap.
-  batches: 4  # OPTIONAL: Maximum loss-evaluation batches per split.
+  batches: 4  # OPTIONAL: Positive batch limit, or all for every packed example in each split.
   prompt: Education helps people  # OPTIONAL: defaults are supplied when omitted.
   generate_tokens: 24  # OPTIONAL: defaults are supplied when omitted.
   temperature: 0.8  # OPTIONAL: defaults are supplied when omitted.
   top_k: 30  # OPTIONAL: 0 disables top-k filtering.
 stage:  # OPTIONAL: defaults are supplied when omitted.
+  oversized_policy: error # OPTIONAL: error | skip; skip counts complete examples that cannot fit context.
   kind: pretrain  # OPTIONAL: pretrain | midtrain | sft | dpo | rlvr | distill; one objective per run.
   parent_run: null  # CONDITIONAL: Required completed/imported/initialized parent directory for later stages.
   teacher_run: null  # CONDITIONAL: Required for token distillation; retain teacher artifacts for resume.
@@ -135,3 +138,4 @@ stage:  # OPTIONAL: defaults are supplied when omitted.
   kl_coefficient: 0.02  # OPTIONAL: RLVR only: frozen-reference regularization weight.
   clip_ratio: 0.2  # OPTIONAL: RLVR only: policy-ratio clipping range.
   reasoning_format: plain  # OPTIONAL: plain | think_answer; optional SFT/distill fields, or RLVR final-answer extraction.
+  prompt_format: user_assistant  # OPTIONAL: user_assistant | chat_transcript; transcripts preserve system/persona roles.

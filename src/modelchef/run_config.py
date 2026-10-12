@@ -1,5 +1,5 @@
 """Strict, versioned configuration for the first complete pretraining workflow."""
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -50,6 +50,7 @@ class Tokenization(Section):
     algorithm: Literal["byte_bpe", "pretrained"] = "byte_bpe"
     vocab_size: int = Field(default=4096, ge=260, le=262144)
     min_frequency: int = Field(default=2, gt=0)
+    training_max_documents: int | None = Field(default=None, gt=0)
     special_tokens: list[str] = ["<pad>", "<unk>", "<bos>", "<eos>"]
     add_bos: bool = False
     append_eos: bool = True
@@ -96,7 +97,22 @@ class Architecture(Section):
     gradient_checkpointing: bool = False
 
 
+class PerformanceGate(Section):
+    probe_steps: int = Field(default=50, gt=1)
+    warmup_steps: int = Field(default=10, ge=0)
+    safety_multiplier: float = Field(default=2.0, ge=1)
+    overhead_seconds: int = Field(default=600, ge=0)
+    max_allocated_memory_fraction: float = Field(default=0.9, gt=0, le=1)
+
+    @model_validator(mode='after')
+    def window(self):
+        if self.warmup_steps >= self.probe_steps:
+            raise ValueError('Performance-gate warmup must be shorter than its probe')
+        return self
+
+
 class Training(Section):
+    performance_gate: PerformanceGate | None = None
     distributed: Literal['none', 'ddp'] = 'none'
     distributed_timeout_seconds: int = Field(default=300, gt=0)
     compile: bool = False
@@ -130,17 +146,25 @@ class Evaluation(Section):
     benchmark: Literal["auto", "none", "hellaswag", "financial_phrasebank"] = "auto"
     benchmark_examples: int = Field(default=8, ge=1, le=100)
     benchmark_max_download_bytes: int = Field(default=2000000, gt=0)
-    batches: int = Field(default=4, gt=0)
+    batches: Annotated[int, Field(gt=0)] | Literal['all'] = 4
     prompt: str = "Education helps people"
     generate_tokens: int = Field(default=24, ge=1)
     temperature: float = Field(default=0.8, gt=0)
     top_k: int = Field(default=30, ge=0)
 
 
+class HuggingFaceModel(Section):
+    repo_id: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]*(/[A-Za-z0-9][A-Za-z0-9_.-]*)?$')
+    revision: str = Field(default='main', min_length=1)
+    max_download_bytes: int = Field(default=500000000, gt=0)
+    context_length: int | None = Field(default=None, ge=8)
+
+
 class Stage(Section):
+    oversized_policy: Literal['error', 'skip'] = 'error'
     kind: Literal["pretrain", "midtrain", "sft", "dpo", "rlvr", "distill"] = "pretrain"
-    parent_run: str | None = None
-    teacher_run: str | None = None
+    parent_run: str | HuggingFaceModel | None = None
+    teacher_run: str | HuggingFaceModel | None = None
     distillation_temperature: float = Field(default=2, gt=0)
     distillation_alpha: float = Field(default=0.5, ge=0, le=1)
     dpo_beta: float = Field(default=0.1, gt=0)
@@ -150,6 +174,11 @@ class Stage(Section):
     kl_coefficient: float = Field(default=0.02, ge=0)
     clip_ratio: float = Field(default=0.2, gt=0, lt=1)
     reasoning_format: Literal['plain', 'think_answer'] = 'plain'
+    prompt_format: Literal['user_assistant', 'chat_transcript'] = 'user_assistant'
+
+    @property
+    def uses_distillation(self):
+        return self.kind == 'distill' or self.teacher_run is not None
 
     def data_fields(self):
         if self.kind == 'dpo':
@@ -185,6 +214,10 @@ class RunConfig(Section):
             raise ValueError("Invalid processing lengths or split fractions")
         if t.warmup_steps >= t.steps or any(not 0 <= b < 1 for b in t.betas):
             raise ValueError("Warmup must be shorter than training; betas must be in [0,1)")
+        if t.performance_gate and t.performance_gate.probe_steps >= t.steps:
+            raise ValueError('Performance probe must be shorter than training')
+        if t.performance_gate and t.distributed != 'none':
+            raise ValueError('Performance gates currently require single-process training')
         if len(set(self.tokenizer.special_tokens)) != len(self.tokenizer.special_tokens):
             raise ValueError("Special tokens must be unique")
         if not {"<pad>", "<unk>", "<bos>", "<eos>"} <= set(self.tokenizer.special_tokens):
@@ -203,10 +236,14 @@ class RunConfig(Section):
             raise ValueError("No automatic benchmark recipe for this domain; override or choose none")
         if self.stage.kind != "pretrain" and not self.stage.parent_run:
             raise ValueError("Post-training requires stage.parent_run")
+        if self.stage.kind == 'pretrain' and self.stage.parent_run:
+            raise ValueError('From-scratch pretraining cannot load parent weights; choose midtrain to continue a parent')
         if self.stage.kind in {"sft", "dpo", "rlvr", "distill"} and self.data.provider != "local_jsonl":
             raise ValueError("Structured post-training requires a local JSONL dataset")
         if self.stage.kind == 'distill' and not self.stage.teacher_run:
             raise ValueError('Token distillation requires a teacher_run')
+        if self.stage.teacher_run and self.stage.kind not in {'pretrain', 'midtrain', 'sft', 'distill'}:
+            raise ValueError('Online token distillation supports pretrain, midtrain, sft and distill only')
         if m.backend == 'huggingface' and not m.pretrained_path:
             raise ValueError('Hugging Face backend requires a local pretrained_path')
         if m.peft.method != 'none':
@@ -240,6 +277,9 @@ class RunConfig(Section):
         """Stored imports/students share the schema but are not from-scratch recipes."""
         if self.stage.kind == 'pretrain' and self.model.backend == 'huggingface':
             raise ValueError('Import the pretrained model, then choose a continuation/post-training stage')
-        if self.stage.kind == 'pretrain' and self.tokenizer.algorithm != 'byte_bpe':
+        if self.stage.kind == 'pretrain' and self.stage.uses_distillation:
+            if self.tokenizer.algorithm != 'pretrained':
+                raise ValueError('Distilled pretraining requires tokenizer.algorithm: pretrained to reuse the teacher vocabulary')
+        elif self.stage.kind == 'pretrain' and self.tokenizer.algorithm != 'byte_bpe':
             raise ValueError('From-scratch pretraining requires tokenizer.algorithm: byte_bpe')
         return self

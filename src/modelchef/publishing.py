@@ -20,6 +20,7 @@ class PublishConfig(Section):
     license: str = Field(min_length=1, pattern=r'^[a-z0-9][a-z0-9_.-]*$')
     summary: str = Field(min_length=1)
     training_data: str = Field(min_length=1)
+    data_attribution_path: str | None = None
     evaluation: str = Field(min_length=1)
     limitations: str = Field(min_length=1)
     base_model: str | None = None
@@ -39,7 +40,7 @@ SECRET = re.compile(rb'hf_[A-Za-z0-9]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|'
                     rb'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----')
 
 
-def model_card(config):
+def model_card(config, attribution=''):
     metadata = {'license': config.license, 'library_name': 'transformers',
                 'pipeline_tag': config.pipeline_tag, 'tags': ['modelchef']}
     if config.base_model:
@@ -47,7 +48,50 @@ def model_card(config):
     return ('---\n' + yaml.safe_dump(metadata, sort_keys=False) + '---\n\n# ' +
         config.repo_id + '\n\n' + config.summary + '\n\n## Training data\n\n' +
         config.training_data + '\n\n## Evaluation\n\n' + config.evaluation +
-        '\n\n## Limitations\n\n' + config.limitations + '\n')
+        '\n\n## Limitations\n\n' + config.limitations + '\n' + attribution)
+
+
+def attribution_section(config, root):
+    """Render reviewed source metadata into the Hub card without publishing raw data."""
+    if not config.data_attribution_path:
+        return ''
+    from modelchef.curation import Citation
+
+    path = (Path(root) / config.data_attribution_path).resolve()
+    if path.stat().st_size > config.max_text_file_bytes:
+        raise ValueError('Attribution manifest exceeds max_text_file_bytes')
+    content = path.read_bytes()
+    if SECRET.search(content):
+        raise ValueError('Possible credential in attribution manifest')
+    manifest = json.loads(content)
+    sources = manifest.get('sources', [])
+    if not sources or not manifest.get('transformations'):
+        raise ValueError('Attribution requires sources and transformations')
+    lines = ['\n## Dataset attribution and licenses\n',
+             'Attribution manifest SHA256: `' + hashlib.sha256(content).hexdigest() + '`.',
+             '\n' + manifest['transformations']]
+    for source in sources:
+        required = ['name', 'dataset', 'dataset_url', 'license', 'license_url', 'attribution',
+                    'snapshot_sha256', 'citations', 'accepted_examples', 'revision_note']
+        if any(key not in source or source[key] in ('', None, []) for key in required):
+            raise ValueError('Incomplete dataset attribution')
+        if not re.fullmatch(r'[a-f0-9]{64}', source['snapshot_sha256']):
+            raise ValueError('Dataset attribution needs a valid snapshot SHA256')
+        if source['license'] == 'cc-by-nc-4.0' and config.license != 'cc-by-nc-4.0':
+            raise ValueError('Noncommercial data recipe requires a cc-by-nc-4.0 research publication label')
+        lines.append(f"\n### {source['dataset']} ({source['name']})\n")
+        lines.append(f"Source: [{source['dataset']}]({source['dataset_url']}); "
+                     f"license: [{source['license']}]({source['license_url']}).")
+        lines.extend([source['attribution'],
+                      (f"Prepared examples: {source['accepted_examples']}; "
+                       f"snapshot SHA256: `{source['snapshot_sha256']}`."), source['revision_note']])
+        for citation in source['citations']:
+            citation = Citation.model_validate(citation)
+            lines.append(', '.join(citation.authors) + '. [' + citation.title + '](' + citation.url + ').')
+    lines.append('\nSource licenses retain their own terms; the model license label does not '
+                 'relicense datasets. Prepared counts are not proof that every row was consumed. '
+                 'Consult the training split/token manifests and publish the actual evaluation scope.\n')
+    return '\n\n'.join(lines)
 
 
 def publish(config, root, run=False):
@@ -90,7 +134,7 @@ def publish(config, root, run=False):
         index = json.loads((folder / 'model.safetensors.index.json').read_text())
         if not set(index['weight_map'].values()) <= names:
             raise ValueError('Publication index references missing or excluded shards')
-    card = model_card(config).encode()
+    card = model_card(config, attribution_section(config, root)).encode()
     if SECRET.search(card):
         raise ValueError('Possible credential in model card; remove it before publishing')
     total += len(card)

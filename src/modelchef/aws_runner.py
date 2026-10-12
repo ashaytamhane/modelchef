@@ -64,7 +64,12 @@ def budget_reservation(settings):
         raise ValueError("Configured runtime/rates cannot fit the per-run and total budgets")
     if minutes != int(minutes) or storage != int(storage):
         raise ValueError("Runtime minutes and storage GB must be integers")
-    if not settings["instance_type"].startswith(("g4dn.", "g5.", "g6.", "g6e.")):
+    neuron_probe = settings.get('job_backend') == 'neuron_probe'
+    if neuron_probe and (settings['instance_type'] != 'trn1.2xlarge'
+                         or not settings.get('pipeline_config')
+                         or minutes > 60 or storage > 100):
+        raise ValueError('Neuron probes require trn1.2xlarge, a recipe, <=60 minutes and <=100 GB')
+    if not neuron_probe and not settings["instance_type"].startswith(("g4dn.", "g5.", "g6.", "g6e.")):
         raise ValueError("Only x86 NVIDIA G-series types are supported by this test recipe")
     return per_run
 
@@ -101,7 +106,8 @@ class Ledger:
             row = self.db.execute(
                 "SELECT state,report FROM runs WHERE id=?", (run_id,)).fetchone()
             report = json.loads(row[1]) if row else {}
-            rejected = {'InsufficientInstanceCapacity', 'VcpuLimitExceeded'}
+            rejected = {'InsufficientInstanceCapacity', 'VcpuLimitExceeded', 'MaxSpotInstanceCountExceeded',
+                        'ConfirmedNoInstance'}
             if (not row or row[0] != 'no-instance' or report.get('instance_id') or
                     report.get('launch_error_code') not in rejected):
                 raise ValueError('Cannot release a reservation for an unconfirmed launch')
@@ -169,7 +175,7 @@ class SpotRunner:
         budget_reservation(settings)
         session = session or boto3.Session(profile_name=settings["profile"],
                                            region_name=settings["region"])
-        cfg = Config(connect_timeout=5, read_timeout=10,
+        cfg = Config(connect_timeout=15, read_timeout=30,
                      retries={"total_max_attempts": 3, "mode": "standard"})
         self.ec2 = session.client("ec2", config=cfg)
         self.iam = session.client("iam", config=cfg)
@@ -189,10 +195,26 @@ class SpotRunner:
         instance_id = report.get("instance_id")
         if not instance_id:
             response = self.ec2.describe_instances(Filters=[
-                {'Name': 'client-token', 'Values': [run_id]},
+                *([] if self.settings.get('fleet_instance_types') else
+                  [{'Name': 'client-token', 'Values': [run_id]}]),
                 {'Name': 'tag:Project', 'Values': ['ModelChef']},
                 {'Name': 'tag:RunId', 'Values': [run_id]}])
             found = [i for reservation in response['Reservations'] for i in reservation['Instances']]
+            if not found and report.get('started_at') and datetime.now(UTC) - datetime.fromisoformat(
+                    report['started_at']) >= timedelta(minutes=15):
+                # Avoid treating a briefly inconsistent EC2 listing as a rejected launch.
+                for group in self.ec2.describe_security_groups(Filters=[
+                        {'Name': 'group-name', 'Values': [run_id]}])['SecurityGroups']:
+                    self.ec2.delete_security_group(GroupId=group['GroupId'])
+                report.update(launch_error_code='ConfirmedNoInstance',
+                              no_instance_checked_at=datetime.now(UTC).isoformat())
+                report.pop('cleanup_error', None)
+                ledger.record(run_id, 'no-instance', report)
+                ledger.release_unlaunched(run_id)
+                out = self.root / 'artifacts/aws-runs' / run_id
+                out.mkdir(parents=True, exist_ok=True)
+                (out / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+                return report
             if len(found) != 1:
                 raise ValueError('Expected one instance for this run; inspect AWS before retrying')
             instance_id = found[0]['InstanceId']
@@ -351,6 +373,7 @@ class SpotRunner:
                     Body=bundle, ServerSideEncryption='AES256')
                 report.update(artifact_bucket=s['artifact_bucket'], artifact_prefix=prefix,
                               bundle_sha256=hashlib.sha256(bundle).hexdigest())
+                report['recovery_uri'] = f"s3://{s['artifact_bucket']}/{prefix}/recovery"
                 plan['user_data'] = user_data(self.root, {**s, '_artifact_prefix': prefix,
                                                          '_bundle_sha256': report['bundle_sha256']})
             progress('Preparing the shutdown deadline and outbound-only instance network.')
@@ -367,7 +390,13 @@ class SpotRunner:
             from botocore.exceptions import ClientError
 
             try:
-                launch = self.ec2.run_instances(
+                def request_instance(**request):
+                    if s.get('fleet_instance_types'):
+                        from modelchef.aws_fleet import launch as fleet_launch
+                        return fleet_launch(self.ec2, s, plan, request)
+                    return self.ec2.run_instances(**request)
+
+                launch = request_instance(
                     **profile,
                     ClientToken=run_id, MinCount=1, MaxCount=1,
                     ImageId=plan["ami_id"], InstanceType=s["instance_type"],
@@ -406,6 +435,9 @@ class SpotRunner:
                 instance = self.ec2.describe_instances(InstanceIds=[instance_id])[
                     "Reservations"][0]["Instances"][0]
                 state = instance["State"]["Name"]
+                if s.get('fleet_instance_types'):
+                    report['actual_instance_type'] = instance.get('InstanceType')
+                    report['actual_availability_zone'] = instance.get('Placement', {}).get('AvailabilityZone')
                 if state != last_state:
                     progress(f'EC2 state changed to {state}.')
                     last_state = state
@@ -432,7 +464,8 @@ class SpotRunner:
                 # Recover an instance ID if AWS accepted a launch whose response was lost.
                 if instance_id is None and security_group:
                     recovered = self.ec2.describe_instances(Filters=[
-                        {"Name": "client-token", "Values": [run_id]},
+                        *([] if s.get('fleet_instance_types') else
+                          [{"Name": "client-token", "Values": [run_id]}]),
                         {"Name": "instance-state-name", "Values": ["pending", "running",
                                                                   "shutting-down", "stopped"]}])
                     instances = [i for r in recovered["Reservations"] for i in r["Instances"]]
@@ -481,7 +514,7 @@ class SpotRunner:
                     self.ec2.delete_security_group(GroupId=security_group)
                 persist('terminated' if terminated else 'no-instance')
                 if (not instance_id and report.get('launch_error_code') in
-                        {'InsufficientInstanceCapacity', 'VcpuLimitExceeded'}):
+                        {'InsufficientInstanceCapacity', 'VcpuLimitExceeded', 'MaxSpotInstanceCountExceeded'}):
                     ledger.release_unlaunched(run_id)
             except BaseException as error:
                 report.update(terminated=terminated, elapsed_seconds=time.monotonic() - started,
