@@ -229,10 +229,11 @@ def adapt_rows(rows, source):
         if len((prompt + response).encode()) > source.max_example_bytes:
             skipped['oversized'] += 1
             continue
-        if group in groups:
-            skipped['duplicate_group'] += 1
+        example_key = digest((prompt + '\nAssistant: ' + response).encode())
+        if example_key in groups:
+            skipped['duplicate_example'] += 1
             continue
-        groups.add(group)
+        groups.add(example_key)
         result.append({'prompt': prompt, 'response': response, 'source': source.name,
                        'source_row': index, 'split_group': source.name + ':' + group})
     return result, dict(skipped)

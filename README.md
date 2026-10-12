@@ -1,52 +1,14 @@
 # ModelChef
 
-Optional AWS accelerator integration: [Trainium training and Inferentia2 compilation](docs/NEURON.md)
-use a separate Neuron environment. Start with the small feasibility recipe; the
-existing CUDA workflows remain unchanged. Neuron hardware validation and full
-AWS lifecycle integration are still pending.
+**Pick your ingredients. Choose a recipe. Cook your model. Serve it.**
 
-**Your ingredients. Your recipe. Your model.**
+ModelChef is a recipe-driven platform for preparing data, training models and using the results. Build a text model from scratch, adapt a pretrained text, vision-language or speech model, evaluate it, then use CLI inference, publish to Hugging Face or serve supported text models through a secured vLLM API.
 
-With ModelChef, **pick your ingredients, choose a recipe, cook your model and serve it**. Your ingredients are text, image or speech datasets and optional pretrained weights; your recipe defines processing, architecture and training. Cook a text model from scratch or refine an existing text, vision-language or Whisper model, taste-test it with evaluation, then use CLI inference, publish to Hugging Face, or serve supported text models through a secured vLLM API. The same Python/PyTorch codebase runs locally and on AWS, with precision, kernels and execution settings exposed in versioned configuration.
-
-Think of the workflow as **ingredients → recipe → training → evaluation → serving**. Start with one small experiment, then compose stages with `cook`: domain midtraining, instruction tuning, preference learning or distillation. ModelChef records manifests, checkpoints and lineage and explains progress as it runs. You decide what to build and how much to spend; the platform executes the declared steps.
-
-For large experiments on limited NVIDIA GPU memory, the optional `optimizer-8bit`
-extra provides `training.optimizer: adamw8bit`. The experimental
-`adamw8bit_in_backward` also frees each gradient after its update. It requires
-`gradient_accumulation: 1`, `gradient_clip_norm: 0`, `optimizer_kernel: default`,
-BF16/FP32, a single process, no compilation and a supervised training stage.
-`adamw_in_backward` uses the same restrictions with ordinary FP32 AdamW state;
-8-bit variants require an NVIDIA CUDA GPU and the optional extra.
-All optional optimizer policies require `optimizer_kernel: default`.
-These choices change optimizer behavior; fitting a larger model does not establish
-its quality. Ordinary `adamw` remains the default.
-
-For an experimental from-scratch model that learns explicit thought traces before
-answers, see the [reasoning-first pretraining tutorial](docs/REASONING_PRETRAINING.md).
-It includes a public-data curation recipe, document-preserving packing, and a
-1B local training configuration with recovery checkpoints.
-
-To start fresh weights using an existing disk-pretraining corpus, set the optional
-`data.prepared_run` to its run directory. Data, processing, tokenizer, evaluation
-and context settings must match. Both runs must use disk-based pretraining. ModelChef links the immutable snapshots on the
-same filesystem and verifies corpus/token checksums; it does not import model
-weights. This local reuse avoids another preprocessing pass and duplicate large
-files. Use the original acquisition settings for a separate AWS run.
-
-`training.checkpoint_every: 1000` saves every 1,000 optimizer steps. By default,
-local checkpoints are retained; set `MODELCHEF_LOCAL_CHECKPOINT_KEEP=2` in the
-training environment to keep the newest two after each successful save. Retention
-removes older checkpoints, so copy a checkpoint first if you want to preserve it.
+Versioned YAML recipes define the data, architecture and training stages. Run locally or on AWS, starting with a small test and progressing to precision, kernel and deployment controls as needed.
 
 ![ModelChef kitchen: datasets and a recipe become a trained model ready for serving.](docs/assets/modelchef-kitchen.png)
 
 ## Quick Start
-
-For scarce GPU Spot capacity, the AWS runner can optionally use an **instant EC2
-Fleet** with `price-capacity-optimized` selection across explicit G5/G6/G6e
-instance types and subnets. It requests one four-vCPU instance and keeps the
-existing budget, checkpoint and shutdown lifecycle. See [Fleet setup](docs/AWS_FLEET.md).
 
 The Quick Start examples below run on your current machine. ModelChef can also launch AWS instances: see [the Spot training example](#run-a-managed-training-stage) for a temporary training job that terminates when finished, or [the API hosting example](#persistent-api-hosting-on-ec2) for persistent on-demand serving. AWS launches require configured credentials and explicit execution with `--run`, and incur charges. Start with a small local experiment; the default training run tests the pipeline rather than producing a useful assistant.
 
@@ -553,6 +515,11 @@ The CLI supports `/reset` and `/exit`. A short training test produces limited te
 
 ### Hardware support and validation
 
+Optional AWS accelerator integration: [Trainium training and Inferentia2 compilation](docs/NEURON.md)
+use a separate Neuron environment. Start with the small feasibility recipe; the
+existing CUDA workflows remain unchanged. Neuron hardware validation and full
+AWS lifecycle integration are still pending.
+
 | Environment | Training / PyTorch CLI inference | Automatic precision | Validation status |
 | --- | --- | --- | --- |
 | NVIDIA CUDA on Linux/WSL | CUDA | BF16 when reported supported; otherwise FP32 | Local CUDA pretraining and checkpoint/inference checks exercised |
@@ -679,6 +646,18 @@ The native model is a decoder-only transformer: causal attention predicts each n
 The run separates training, validation and test documents before fitting the tokenizer. Validation tracks optimization; test loss is a held-out check. Neither a loss decrease nor a generated sample establishes usefulness on an application task.
 
 ### Checkpoints and reproducibility
+
+To start fresh weights using an existing disk-pretraining corpus, set the optional
+`data.prepared_run` to its run directory. Data, processing, tokenizer, evaluation
+and context settings must match. Both runs must use disk-based pretraining. ModelChef links the immutable snapshots on the
+same filesystem and verifies corpus/token checksums; it does not import model
+weights. This local reuse avoids another preprocessing pass and duplicate large
+files. Use the original acquisition settings for a separate AWS run.
+
+`training.checkpoint_every: 1000` saves every 1,000 optimizer steps. By default,
+local checkpoints are retained; set `MODELCHEF_LOCAL_CHECKPOINT_KEEP=2` in the
+training environment to keep the newest two after each successful save. Retention
+removes older checkpoints, so copy a checkpoint first if you want to preserve it.
 
 Use the original configuration and a saved checkpoint path:
 
@@ -1114,6 +1093,12 @@ Supply your own evaluation text through `processing.benchmark_files` and preserv
 
 ### Published recipes and small-scale adaptations
 
+Two experimental from-scratch recipes are documented separately: the
+[human-conversation 1B chatbot](docs/CHAT_HUMAN_1B.md) uses human dialogue without
+reasoning traces; the [reasoning-first 1B experiment](docs/REASONING_PRETRAINING.md)
+uses explicit thought/answer demonstrations. Both require capability evaluation
+before treating their outputs as useful models.
+
 Start with a published training pattern, then size the experiment for your hardware. These are reference recipes, not a universal best configuration or a reconstruction of unpublished proprietary frontier training. Each linked paper describes the original model; the YAML files below are deliberately small **ModelChef adaptations**, with project-chosen learning rates and budgets.
 
 | Pattern | Published recipe / original source | What to carry into an experiment | ModelChef example and limits |
@@ -1384,6 +1369,17 @@ These files compose: for example, `aws_test.pipeline_config` in the AWS training
 
 ### Tune the execution: performance and precision
 
+For large experiments on limited NVIDIA GPU memory, the optional `optimizer-8bit`
+extra provides `training.optimizer: adamw8bit`. The experimental
+`adamw8bit_in_backward` also frees each gradient after its update. It requires
+`gradient_accumulation: 1`, `gradient_clip_norm: 0`, `optimizer_kernel: default`,
+BF16/FP32, a single process, no compilation and a supervised training stage.
+`adamw_in_backward` uses the same restrictions with ordinary FP32 AdamW state;
+8-bit variants require an NVIDIA CUDA GPU and the optional extra.
+All optional optimizer policies require `optimizer_kernel: default`.
+These choices change optimizer behavior; fitting a larger model does not establish
+its quality. Ordinary `adamw` remains the default.
+
 Establish a correctness baseline before changing execution settings. Architecture changes affect what model you train; kernel and compiler choices affect how its operations execute. Compare tokens/second, peak memory and validation behavior under the same recipe, and include compilation/warmup overhead when evaluating short runs.
 
 `attention_kernel: auto` lets PyTorch select an available scaled-dot-product attention implementation. Explicit choices constrain the backend and can fail for unsupported shapes or devices. `torch.compile` captures and optimizes execution; it is not a new model architecture. Fused optimizers combine operations to reduce launch overhead; `foreach` batches operations across tensors. TF32 permits reduced mantissa precision for eligible FP32 matrix operations. None guarantees a speedup on every workload.
@@ -1471,6 +1467,11 @@ python -m modelchef.cli evaluate-standard PATH_TO_EXPORT --tasks hellaswag piqa 
 The default command only prints a plan. `--limit` caps scored examples, **not dataset download bytes**; obtain approval for large datasets before executing. The harness is an optional external integration: full suite execution and real GPT-2/Pythia/SmolLM2 comparisons have not been run in the bounded local validation. Finance selection in the built-in pipeline uses FinancialPhraseBank; choose additional harness tasks explicitly when needed.
 
 ### AWS execution
+
+For scarce GPU Spot capacity, the AWS runner can optionally use an **instant EC2
+Fleet** with `price-capacity-optimized` selection across explicit G5/G6/G6e
+instance types and subnets. It requests one four-vCPU instance and keeps the
+existing budget, checkpoint and shutdown lifecycle. See [Fleet setup](docs/AWS_FLEET.md).
 
 Choose the lifecycle before launching. A training job and a hosted API use different runners:
 

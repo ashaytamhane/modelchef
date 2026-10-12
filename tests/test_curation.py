@@ -16,6 +16,21 @@ def ingredient(**kwargs):
         'authors': ['Original Author'], 'url': 'https://example.org/paper'}], **kwargs)
 
 
+def test_persona_turns_preserved_but_share_split_group():
+    source = ingredient().model_copy(update={'adapter': 'persona_turn'})
+    profile = ['I enjoy gardening.']
+    first = {'row_idx': 0, 'row': {'personality': profile, 'history': ['Hello'],
+                                  'candidates': ['distractor', 'Hi there!']}}
+    second = {'row_idx': 1, 'row': {'personality': profile,
+        'history': ['Hello', 'Hi there!', 'What do you enjoy?'],
+        'candidates': ['distractor', 'Gardening.']}}
+    records, skipped = adapt_rows([first, second, first], source)
+    assert len(records) == 2
+    assert records[0]['split_group'] == records[1]['split_group']
+    assert records[1]['response'] == 'Gardening.'
+    assert skipped == {'duplicate_example': 1}
+
+
 def test_reasoning_column_adapter_preserves_order_and_problem_groups():
     source = Ingredient(name='reasoning', dataset='author/data', adapter='reasoning_fields',
         reasoning_fields={'prompt': 'question', 'reasoning': 'trace', 'answer': 'final'},
