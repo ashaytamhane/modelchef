@@ -40,16 +40,29 @@ def test_context_overflow_skips_whole_targets_and_reports_count():
     assert blocks[1][0].tolist() == [-100, 2, 2, 1, -100, -100, -100, -100]
 
 
-def test_full_workflow_packages_curation_without_local_full_dataset():
-    root = Path(__file__).parents[1]
-    bundle = build_bundle(root, {'pipeline_config': 'configs/workflow-assistant-persona-350m.yaml'})
+def test_full_workflow_packages_curation_without_local_full_dataset(tmp_path):
+    root = tmp_path
+    source_root = Path(__file__).parents[1]
+    (root / 'curation.yaml').write_text(yaml.safe_dump({
+        'name': 'fixture', 'output_dir': 'data/raw/fixture', 'max_download_bytes': 100000000000,
+        'sources': [{'name': 'fixture', 'dataset': 'example/corpus', 'adapter': 'text',
+                     'collection': 'foundation', 'license': 'test-only',
+                     'license_url': 'https://example.com/license', 'attribution': 'Fixture author',
+                     'citations': [{'title': 'Fixture source', 'authors': ['Fixture author'],
+                                    'url': 'https://example.com/source'}]}]}))
+    stage = RunConfig(data={'provider': 'local_jsonl',
+                           'local_paths': ['data/raw/fixture/foundation.jsonl']})
+    (root / 'stage.yaml').write_text(yaml.safe_dump(stage.model_dump(mode='json')))
+    (root / 'workflow.yaml').write_text(yaml.safe_dump({'name': 'fixture',
+        'curation_recipe': 'curation.yaml', 'stages': [{'name': 'foundation', 'recipe': 'stage.yaml'}]}))
+    bundle = build_bundle(root, {'pipeline_config': 'workflow.yaml', '_source_root': source_root})
     with tarfile.open(fileobj=io.BytesIO(bundle)) as archive:
         workflow = yaml.safe_load(archive.extractfile('configs/job.yaml').read())
         assert workflow['curation_recipe'] == 'configs/curation.yaml'
         curation = yaml.safe_load(archive.extractfile('configs/curation.yaml').read())
         assert curation['max_download_bytes'] == 100_000_000_000
         stage = yaml.safe_load(archive.extractfile('inputs/stages/foundation/recipe.yaml').read())
-        assert stage['data']['local_paths'][0].startswith('data/raw/assistant-persona-350m/')
+        assert stage['data']['local_paths'][0].startswith('data/raw/fixture/')
         assert not any(name.endswith('data.jsonl') for name in archive.getnames())
         # Sources and credentials never enter a config's lineage as a fake pretrained parent.
         assert json.loads(json.dumps(stage))['stage']['kind'] == 'pretrain'

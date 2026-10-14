@@ -1,6 +1,0 @@
-schema_version: 1
-name: dense-350m-menu
-stages:
-- name: foundation
-  recipe: configs/pretrain-dense-350m.yaml
-export: true

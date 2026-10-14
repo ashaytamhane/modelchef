@@ -53,16 +53,6 @@ Routine input and dependency errors give concise messages; add `--debug` to show
 
 ### Choose your recipe
 
-For a research example that combines **reasoning, emotional context, prompt-controlled
-personality and sensory concepts from scratch**, see the [assistant recipe tutorial](docs/ASSISTANT_RESEARCH.md).
-It starts with bounded ingredient curation, runs integrated pretraining and midtraining,
-then teaches assistant behavior with SFT. A small executable local test and a separate
-350M-class scale blueprint are provided; the latter requires prepared data and a budget pilot.
-
-The tutorial also includes a [longer learning pilot and overfit diagnostic](docs/ASSISTANT_RESEARCH.md#move-beyond-the-four-update-test)
-to distinguish functioning training from useful learning. Set `evaluation.batches: all`
-to evaluate every packed example in a split; saved loss reports show evaluation coverage.
-
 ModelChef uses **two levels of training recipe**:
 
 - **Workflow recipe:** the overall training plan. It lists stages in order, references their recipe files, connects checkpoints and optionally exports the final model. Run it with `cook`.
@@ -105,8 +95,6 @@ This is an edit guide, not a replacement for the complete copied recipe. Validat
 
 ### Pick a published starting point
 
-For longer from-scratch training, the [scratch-training guide](docs/SCRATCH_TRAINING.md) includes a TinyStories experiment and larger 150M/350M general-text paths, each with a matching workflow. Large recipes require curated data and measured budgets; they do not change AWS spending limits automatically.
-
 The included recipes also let you explore familiar training patterns at a manageable scale:
 
 | Start with | When to choose it | Ingredients needed |
@@ -145,11 +133,6 @@ python -m modelchef.cli cook configs/workflow-local.yaml --run
 This acquires up to 256 FineWeb-Edu documents within a 16 MB corpus-response cap, trains BPE and an approximately 18.6M-parameter decoder for 40 steps, and evaluates a bounded benchmark sample. The first command previews; `--run` permits the configured downloads and training.
 
 ### 2. Taste the result: try your checkpoint
-
-Want to move beyond the smoke test while still training from random weights? Follow
-the [TinyStories scratch-training experiment](docs/SCRATCH_TRAINING.md): a larger
-bounded corpus, about 21M parameters, a longer training budget and matching local/AWS
-commands. Its goal is short story continuation; general chat needs broader training.
 
 `RUN_DIR` means the completed directory printed after training, not a literal folder
 name. In Linux/WSL/macOS, assign that path once, then use the variable in each command:
@@ -1101,18 +1084,12 @@ multimodal pipeline tags.
 
 ### Data: audit the experiment inputs
 
-Choose sampling and licenses deliberately. The built-in acquisition paths are bounded viewer rows (`hf_rows`), cached bulk Parquet shards (`hf_parquet`), and local JSONL. TinyStories uses bulk shards to avoid repeated 100-row requests; see the [download and laptop setup guide](docs/SCRATCH_TRAINING.md#update-an-existing-laptop-recipe). Additional corpora require compatible source settings or external extraction to local data. Keyword filtering is a simple domain proxy, not a semantic classifier. Near-deduplication compares word shingles and is intended for small samples, not distributed corpus processing.
+Choose sampling and licenses deliberately. The built-in acquisition paths are bounded viewer rows (`hf_rows`), cached bulk Parquet shards (`hf_parquet`), and local JSONL. Bulk Parquet acquisition avoids repeated 100-row viewer requests. Additional corpora require compatible source settings or external extraction to local data. Keyword filtering is a simple domain proxy, not a semantic classifier. Near-deduplication compares word shingles and is intended for small samples, not distributed corpus processing.
 
 Supply your own evaluation text through `processing.benchmark_files` and preserve run snapshots. Automatic decontamination covers only the selected benchmark sample, and regex PII filtering is incomplete. For larger experiments, assess these limitations before treating a saved manifest as evidence of data quality. A manifest identifies bytes; it does not certify the corpus.
 
 
 ### Published recipes and small-scale adaptations
-
-Two experimental from-scratch recipes are documented separately: the
-[human-conversation 1B chatbot](docs/CHAT_HUMAN_1B.md) uses human dialogue without
-reasoning traces; the [reasoning-first 1B experiment](docs/REASONING_PRETRAINING.md)
-uses explicit thought/answer demonstrations. Both require capability evaluation
-before treating their outputs as useful models.
 
 Start with a published training pattern, then size the experiment for your hardware. These are reference recipes, not a universal best configuration or a reconstruction of unpublished proprietary frontier training. Each linked paper describes the original model; the YAML files below are deliberately small **ModelChef adaptations**, with project-chosen learning rates and budgets.
 
@@ -1283,7 +1260,7 @@ model:  # OPTIONAL: defaults are supplied when omitted.
   init_std: 0.02  # OPTIONAL: defaults are supplied when omitted.
   gradient_checkpointing: false  # OPTIONAL: Recompute activations during backward to trade compute for memory.
 training:  # OPTIONAL: defaults are supplied when omitted.
-  performance_gate: null  # OPTIONAL: measured throughput/memory gate; see the research tutorial.
+  performance_gate: null  # OPTIONAL: measured throughput/memory gate; choose acceptance thresholds from your own measurements.
   distributed: none  # OPTIONAL: none | ddp; DDP launches with torchrun.
   distributed_timeout_seconds: 300  # OPTIONAL: process-group timeout.
   compile: false  # OPTIONAL: Opt in to torch.compile; default leaves execution eager.
@@ -1653,27 +1630,13 @@ A successful termination request can still report `shutting-down`. Confirm `term
 
 #### Run a managed training stage
 
-For a **small scratch-to-serving integration test**, use
-[`workflow-assistant-aws-smoke.yaml`](configs/workflow-assistant-aws-smoke.yaml).
-Its first stage trains a new tokenizer and decoder from random weights; its second
-stage trains that checkpoint on the repository's 12 authored question/answer examples.
-These fixtures test stage linking, evaluation, export and serving. They are **not**
-FineWeb-Edu or SmolTalk samples, and the resulting tiny model will not give useful answers.
-The purpose is to prove the complete machinery before downloading large public corpora
-or committing a serious training budget.
+Use your own validated stage/workflow recipe for cloud training. For a small software demonstration, the included `workflow-demo.yaml` checks stage linking and export; it does not produce a useful assistant. Keep model-development experiments in a separate project.
 
 ```bash
-# Local validation first; the plan does not launch AWS.
-python -m pytest -q
-python -m modelchef.cli cook configs/workflow-assistant-aws-smoke.yaml
-
-# Copy the bounded $5 training settings into an ignored local file, then fill in
-# your AWS profile, private S3 artifact bucket and training instance profile.
-cp configs/aws-assistant-smoke.yaml configs/aws-assistant-smoke.local.yaml
-python -m modelchef.cli cook configs/workflow-assistant-aws-smoke.yaml \
-  --target aws --aws-config configs/aws-assistant-smoke.local.yaml
-python -m modelchef.cli cook configs/workflow-assistant-aws-smoke.yaml \
-  --target aws --aws-config configs/aws-assistant-smoke.local.yaml --run
+cp configs/aws-training.yaml configs/aws-training.local.yaml
+# Configure credentials, instance profile, artifact bucket, runtime and budget first.
+python -m modelchef.cli cook configs/workflow-demo.yaml --target aws --aws-config configs/aws-training.local.yaml
+python -m modelchef.cli cook configs/workflow-demo.yaml --target aws --aws-config configs/aws-training.local.yaml --run
 ```
 
 The last command requires interactive `yes` after showing the current Spot quote and
@@ -1689,10 +1652,7 @@ python -m modelchef.cli aws-export MODELCHEF_RUN_ID
 to `artifacts/exports/MODELCHEF_RUN_ID/`. It also writes an ignored inference recipe
 under `artifacts/aws-serving/`.
 
-The stage templates select CUDA BF16 for modern GPUs. On a Tesla T4 (`g4dn`), copy
-both stage recipes to ignored `*.local.yaml` files, set `training.precision: fp16`,
-and point a copied workflow at those files. Changing the AWS instance type alone
-does not change a stage's explicitly selected precision.
+For GPU training, select `training.accelerator: auto` or `cuda` in your own stage recipes. Use `precision: auto` or a precision supported by the selected GPU. Changing the instance type does not override explicitly selected stage settings.
 
 Spot is the default purchase option. If AWS reports insufficient capacity, select a
 different subnet/availability zone or instance type. A confirmed capacity or vCPU-quota
@@ -1712,8 +1672,7 @@ Put the generated inference recipe's path into a copy of
 [`aws-serving.yaml`](configs/aws-serving.yaml), then fill in its existing AMI,
 network, instance profile, S3 bucket and Secrets Manager fields as described in
 [persistent API hosting](#persistent-api-hosting-on-ec2). Serving is a separate
-**on-demand, persistent** EC2 instance; it does not inherit the training run's $5
-Spot cap. Preview and deploy with `aws-serve`, verify readiness over HTTPS, and
+**on-demand, persistent** EC2 instance; it uses its own serving budget. Preview and deploy with `aws-serve`, verify readiness over HTTPS, and
 chat from your local machine:
 
 ```bash
@@ -1786,8 +1745,7 @@ the training machine before its stages start. Bulk Parquet acquisition retains
 complete records and records source checksums and attribution. The local AWS
 preflight still uses bounded samples: set `preflight_data_dir` in the AWS resource
 configuration to their directory. Those samples do not replace the cloud corpus.
-See the [assistant research tutorial](docs/ASSISTANT_RESEARCH.md) for a complete
-example spanning data preparation, pretraining, midtraining and SFT.
+See [compose a complete workflow](#compose-a-complete-workflow) for generic stage linking. Supply your own independently evaluated datasets and stage recipes.
 
 With an artifact bucket configured, the text training guest writes resumable S3
 snapshots after checkpoints. A snapshot includes weights, optimizer and RNG states,
@@ -1957,7 +1915,7 @@ AWS launch journals are saved before provisioning steps so interrupted/lost laun
 | Budget exhausted | Review retained ledger reservations and intentionally adjust budget; do not delete the journal to bypass it |
 | CUDA unavailable | Check driver, installed wheel and `doctor`; choose an appropriate official PyTorch build |
 | WSL HTTPS timeout | Test networking inside Ubuntu before setup; this project does not repair host networking |
-| Dataset viewer HTTP 429 | Allow the announced retry cooldown; optionally use `hf auth login` in the same environment. Authentication is not a speed guarantee. See [acquisition and authentication](docs/SCRATCH_TRAINING.md#optional-hugging-face-authentication-and-rate-limits). |
+| Dataset viewer HTTP 429 | Allow the announced retry cooldown; optionally use `hf auth login` in the same environment. Authentication is not a speed guarantee. |
 | vLLM export missing | Provide local config/tokenizer/weights; a checkpoint alone cannot be served |
 | Termination timeout | Check EC2 state; use reconciliation after termination and retain the AWS deadline |
 
