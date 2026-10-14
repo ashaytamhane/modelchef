@@ -6,7 +6,8 @@ import uuid
 from collections import Counter
 from pathlib import Path
 
-from modelchef.corpus import clean_record, digest, file_digest, group_split, ngrams
+from modelchef.corpus import digest, file_digest, group_split, ngrams
+from modelchef.preparation_workers import cleaned_records, token_ids
 
 
 class JsonlRows:
@@ -108,8 +109,7 @@ def process_disk(records, config, root):
             CREATE TABLE bands (band INTEGER, signature BLOB, document INTEGER);
             CREATE INDEX bucket ON bands(band, signature);
         ''')
-        for row in records:
-            cleaned = clean_record(row, config, benchmark, counts)
+        for cleaned in cleaned_records(records, config, benchmark, counts):
             if cleaned is None:
                 continue
             text = cleaned['text']
@@ -215,36 +215,46 @@ class TokenBlocks:
 
 
 def pack_disk(rows, tokenizer, tokenization, context, limit, folder, split):
-    import numpy as np
     path = folder / ('tokens-' + split + '.bin')
     temporary = path.with_suffix('.tmp')
+    with temporary.open('wb') as target:
+        encoded = token_ids(rows, tokenizer)
+        try:
+            return _write_packed(encoded, tokenizer, tokenization, context, limit,
+                                 target, temporary, path)
+        finally:
+            encoded.close()
+
+
+def _write_packed(encoded, tokenizer, tokenization, context, limit,
+                  target, temporary, path):
+    import numpy as np
     count = 0
     document = tokenization.packing == 'document'
     pad = tokenizer.token_to_id('<pad>') if document else None
     real_tokens, skipped = 0, 0
-    with temporary.open('wb') as target:
-        for row in rows:
-            ids = tokenizer.encode(row['text'], add_special_tokens=False).ids
-            if tokenization.add_bos:
-                ids.insert(0, tokenizer.token_to_id('<bos>'))
-            if tokenization.append_eos:
-                ids.append(tokenizer.token_to_id('<eos>'))
-            if document:
-                if len(ids) > context:
-                    skipped += 1
-                    continue
-                if count + context + 1 > limit:
-                    break
-                real_tokens += len(ids)
-                ids += [pad] * (context - len(ids))
-            ids = ids[:max(0, limit - count)]
-            target.write(np.asarray(ids, dtype='<u4').tobytes())
-            count += len(ids)
-            if count >= limit:
+    for ids in encoded:
+        if tokenization.add_bos:
+            ids.insert(0, tokenizer.token_to_id('<bos>'))
+        if tokenization.append_eos:
+            ids.append(tokenizer.token_to_id('<eos>'))
+        if document:
+            if len(ids) > context:
+                skipped += 1
+                continue
+            if count + context + 1 > limit:
                 break
-        if document and count:
-            target.write(np.asarray([pad], dtype='<u4').tobytes())
-            count += 1
+            real_tokens += len(ids)
+            ids += [pad] * (context - len(ids))
+        ids = ids[:max(0, limit - count)]
+        target.write(np.asarray(ids, dtype='<u4').tobytes())
+        count += len(ids)
+        if count >= limit:
+            break
+    if document and count:
+        target.write(np.asarray([pad], dtype='<u4').tobytes())
+        count += 1
+    target.close()
     if (count - 1) // context < 1:
         temporary.unlink(missing_ok=True)
         raise ValueError('Split has too few tokens for a context block; increase corpus/token budget')

@@ -5,6 +5,8 @@ import shutil
 import subprocess
 import sys
 
+from modelchef.resources import preparation_plan
+
 
 def detect_hardware(progress=None):
     def announce(message):
@@ -16,6 +18,7 @@ def detect_hardware(progress=None):
             "os": platform.system(), "architecture": platform.machine(),
             "torch_installed": False, "cuda_available": False,
             "mps_available": False, "backend": "cpu", "bf16_supported": False}
+    info['cpu_preparation'] = preparation_plan()
     try:
         announce('Importing PyTorch; the first import can take several seconds.')
         import torch
