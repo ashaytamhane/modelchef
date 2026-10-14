@@ -11,12 +11,14 @@ class S3:
     def __init__(self):
         self.objects = {}
         self.fail = False
+        self.uploads = []
 
     def upload_file(self, path, bucket, key, ExtraArgs):
         if self.fail:
             raise OSError('interrupted transfer')
         assert ExtraArgs['ServerSideEncryption'] == 'AES256'
         self.objects[key] = Path(path).read_bytes()
+        self.uploads.append(key)
 
     def put_object(self, Bucket, Key, Body, **kwargs):
         self.objects[Key] = Body
@@ -74,3 +76,33 @@ def test_lineage_and_checksum(tmp_path):
     client.objects[key] = b'corrupt'
     with pytest.raises(ValueError, match='checksum'):
         store.fetch(tmp_path / 'restore', 10000)
+
+
+def test_training_data_restored_and_not_reuploaded_at_each_checkpoint(tmp_path):
+    root = tmp_path / 'guest'
+    run = root / 'artifacts/training/run'
+    (run / 'checkpoints').mkdir(parents=True)
+    (run / 'config.json').write_text('{"stage": {}}')
+    names = ['raw.jsonl', 'train.jsonl', 'validation.jsonl', 'test.jsonl',
+             'tokens.pt', 'tokens-train.bin', 'tokens-validation.bin', 'tokens-test.bin',
+             'tokenizer.json', 'source-manifest.json', 'processing.json', 'data-attribution.json']
+    for name in names:
+        (run / name).write_bytes(('saved-' + name).encode())
+    (run / 'dedup.sqlite').write_bytes(b'regenerable-cache')
+    first = run / 'checkpoints/step-000001.pt'
+    first.write_bytes(b'first-weights')
+    client = S3()
+    store = RecoveryStore(client, 's3://bucket/run/recovery')
+    initial = store.snapshot(root, run, first)
+    second = run / 'checkpoints/step-000002.pt'
+    second.write_bytes(b'second-weights')
+    final = store.snapshot(root, run, second)
+    for name in names:
+        relative = 'artifacts/training/run/' + name
+        assert final['files'][relative] == initial['files'][relative]
+        assert client.uploads.count(final['files'][relative]['key']) == 1
+    assert 'artifacts/training/run/dedup.sqlite' not in final['files']
+    restored = tmp_path / 'restored'
+    store.fetch(restored, 100000)
+    for name in names:
+        assert (restored / 'artifacts/training/run' / name).read_bytes() == (run / name).read_bytes()

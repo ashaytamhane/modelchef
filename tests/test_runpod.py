@@ -199,3 +199,25 @@ def test_shared_guest_dependency_policy_is_provider_independent():
     assert 'aws' not in plan['extras']
     assert 'cuda13-toolchain' in plan['extras']
     assert 'pipeline' in plan['extras']
+
+
+def test_result_transfer_contains_training_data_and_tokenizer(tmp_path, monkeypatch):
+    names = ['raw.jsonl', 'train.jsonl', 'validation.jsonl', 'test.jsonl',
+             'tokens.pt', 'tokens-train.bin', 'tokens-validation.bin', 'tokens-test.bin',
+             'tokenizer.json', 'config.json', 'checkpoints/step-000001.pt']
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode='w:gz') as archive:
+        for name in names:
+            content = ('saved-' + name).encode()
+            entry = tarfile.TarInfo('artifacts/training/run/' + name)
+            entry.size = len(content)
+            archive.addfile(entry, io.BytesIO(content))
+    payload = buffer.getvalue()
+    runner = RunpodRunner(settings(), tmp_path, tmp_path / 'recipe.yaml')
+    monkeypatch.setattr(runner, 'ssh', lambda *a, **kw: str(len(payload)))
+    monkeypatch.setattr(runner, 'copy', lambda pod, directory, local, remote, **kw:
+                        Path(local).write_bytes(payload))
+    runner.fetch({}, tmp_path, '/workspace/owned-run')
+    for name in names:
+        restored = tmp_path / 'results/artifacts/training/run' / name
+        assert restored.read_bytes() == ('saved-' + name).encode()

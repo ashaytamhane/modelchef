@@ -25,6 +25,8 @@ The cloud commands above preview; add `--run` to request a reviewed launch. `pip
 
 Runpod authentication reuses `RUNPOD_API_KEY` or the credentials saved by its CLI. Configure the volume ID and SSH key paths in [configs/runpod.yaml](configs/runpod.yaml); keep keys out of that file. Use `runpod-job` to inspect status/logs, fetch available results or terminate an owned job. The integration has local lifecycle tests and a verified read-only account connection; a paid GPU training deployment remains to be validated.
 
+Managed training recovery preserves the data as well as the model: raw snapshots, processed splits, packed token arrays, tokenizer and configuration. AWS checkpoints commit these files to S3, reusing unchanged content-addressed objects; Runpod writes them directly to its retained network volume. Resume from the last successfully persisted checkpoint, not from updates that were still in memory when compute stopped.
+
 ### Prepare your kitchen: set up once
 
 With Git and [uv](https://docs.astral.sh/uv/getting-started/installation/) installed, run these commands in Linux, WSL or macOS Terminal. Windows GPU users should first follow the [WSL setup](#windows-with-an-nvidia-gpu-prepare-wsl2). The repository currently requires GitHub access.
