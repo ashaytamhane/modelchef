@@ -162,10 +162,21 @@ def _main() -> None:
     aws_reconcile = command.add_parser("aws-reconcile", help="Recover reports/cleanup for a saved run")
     aws_reconcile.add_argument("run_id")
     aws_reconcile.add_argument("--path", type=Path, default=Path("configs/aws-test.yaml"))
+    aws_volume = command.add_parser('aws-volume', help='Inspect or explicitly delete a retained EBS volume')
+    aws_volume.add_argument('volume_id')
+    aws_volume.add_argument('--region', required=True)
+    aws_volume.add_argument('--profile')
+    aws_volume.add_argument('--action', choices=['status', 'delete'], default='status')
+    aws_volume.add_argument('--run', action='store_true', help='Permanently delete the named volume')
     runpod_manage = command.add_parser('runpod-job', help='Inspect or terminate an owned Runpod training job')
     runpod_manage.add_argument('run_dir', type=Path)
     runpod_manage.add_argument('--action', choices=['status', 'logs', 'fetch', 'terminate'], default='status')
     runpod_manage.add_argument('--run', action='store_true', help='Execute Pod termination')
+    runpod_volume = command.add_parser('runpod-volume', help='Inspect or explicitly delete a network volume')
+    runpod_volume.add_argument('volume_id')
+    runpod_volume.add_argument('--config', type=Path, required=True)
+    runpod_volume.add_argument('--action', choices=['status', 'delete'], default='status')
+    runpod_volume.add_argument('--run', action='store_true', help='Permanently delete the named volume')
     pipeline = command.add_parser("pipeline", help="Plan/run a training stage locally, on AWS or on Runpod")
     pipeline.add_argument("path", type=Path)
     pipeline.add_argument("--run", action="store_true")
@@ -280,6 +291,14 @@ def _main() -> None:
         elif args.command == 'runpod-job':
             from modelchef.runpod_runner import manage_run
             print(json.dumps(manage_run(args.run_dir, args.action, args.run), indent=2))
+        elif args.command == 'runpod-volume':
+            from modelchef.runpod_runner import manage_volume
+            settings = _settings(args.config, 'runpod')
+            print(json.dumps(manage_volume(settings, args.volume_id, args.action, args.run), indent=2))
+        elif args.command == 'aws-volume':
+            from modelchef.aws_storage import manage_volume
+            print(json.dumps(manage_volume(args.volume_id, args.region, args.action,
+                                           args.run, args.profile), indent=2, default=str))
         elif args.command in {'pipeline', 'cook'} and args.aws_config and args.runpod_config:
             raise ValueError('Choose one cloud resource configuration, not both')
         elif args.command in {'pipeline', 'cook'} and args.target == 'runpod':

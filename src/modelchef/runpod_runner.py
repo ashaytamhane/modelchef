@@ -47,6 +47,7 @@ class RunpodConfig(BaseModel):
     max_result_bytes: int = Field(default=20_000_000_000, ge=1)
     budget_scope: str = 'default'
     local_preflight: bool = True
+    download_results: bool = False
 
     @model_validator(mode='after')
     def budget(self):
@@ -370,7 +371,10 @@ class RunpodRunner:
                     status = {'state': 'starting'}
                 if status['state'] in {'completed', 'failed'}:
                     report['guest'] = status
-                    self.fetch(pod, directory, remote)
+                    if s.download_results:
+                        self.fetch(pod, directory, remote)
+                    report['results_location'] = 'network-volume'
+                    report['results_downloaded'] = s.download_results
                     report['test_passed'] = status['state'] == 'completed'
                     report['state'] = status['state']
                     break
@@ -404,3 +408,27 @@ class RunpodRunner:
             save()
             ledger.db.close()
         return report
+
+
+def manage_volume(settings, volume_id, action='status', execute=False, api=None):
+    """Network volumes are deleted only by an explicit command naming their ID."""
+    if action not in {'status', 'delete'}:
+        raise ValueError('Volume action must be status or delete')
+    api = api or RunpodAPI(RunpodConfig.model_validate(settings))
+    path = '/network-volumes/' + quote(volume_id, safe='')
+    volume = api.request('GET', path)
+    if volume['id'] != volume_id:
+        raise ValueError('Volume read-back identity differs')
+    result = {'volume': volume, 'action': action, 'deleted': False,
+              'note': 'Stored data is permanently removed only with delete --run; storage bills until deletion.'}
+    if action == 'delete' and execute:
+        api.request('DELETE', path)
+        try:
+            api.request('GET', path)
+        except RunpodHTTPError as error:
+            if error.status != 404:
+                raise
+            result['deleted'] = True
+        else:
+            raise RuntimeError('Volume deletion unconfirmed by read-back')
+    return result

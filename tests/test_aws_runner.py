@@ -273,7 +273,8 @@ def test_failed_local_preflight_prevents_cloud_plan(settings, tmp_path, monkeypa
         local_preflight(tmp_path)
 
 
-def test_training_uploads_bundle_and_terminates_before_result_fetch(settings, tmp_path, monkeypatch):
+@pytest.mark.parametrize('download', [False, True])
+def test_training_uploads_bundle_and_terminates_before_result_fetch(settings, tmp_path, monkeypatch, download):
     import io
     from types import SimpleNamespace
 
@@ -281,7 +282,7 @@ def test_training_uploads_bundle_and_terminates_before_result_fetch(settings, tm
 
     calls = []
     settings.update(pipeline_config='job.yaml', artifact_bucket='test-bucket',
-                    instance_profile_name='test-profile')
+                    instance_profile_name='test-profile', download_results=download)
     monkeypatch.setattr('modelchef.aws_runner.local_preflight', lambda _: {'passed': True})
     monkeypatch.setattr('modelchef.aws_training.build_bundle', lambda *a: b'allowed-source')
     monkeypatch.setattr('modelchef.aws_training.training_preflight', lambda *a: {'passed': True})
@@ -307,11 +308,16 @@ def test_training_uploads_bundle_and_terminates_before_result_fetch(settings, tm
     result = runner.run()
     assert result['terminated'] and result['test_passed']
     kinds = [kind for kind, _ in calls]
-    assert kinds.index('upload') < kinds.index('launch') < kinds.index('cleanup') < kinds.index('download')
+    assert kinds.index('upload') < kinds.index('launch') < kinds.index('cleanup')
+    assert ('download' in kinds) == download
+    if download:
+        assert kinds.index('cleanup') < kinds.index('download')
     arguments = next(value for kind, value in calls if kind == 'launch')
     assert arguments['InstanceMarketOptions']['MarketType'] == 'spot'
     assert arguments['IamInstanceProfile'] == {'Name': 'test-profile'}
-    assert Path(result['results_path']).read_bytes() == b'results'
+    assert arguments['BlockDeviceMappings'][0]['Ebs']['DeleteOnTermination'] is False
+    if download:
+        assert Path(result['results_path']).read_bytes() == b'results'
 
 
 @pytest.mark.parametrize("state", ["shutting-down", "terminated"])

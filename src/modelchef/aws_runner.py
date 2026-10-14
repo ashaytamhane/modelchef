@@ -37,6 +37,9 @@ def local_preflight(root):
 
 
 def budget_reservation(settings):
+    for key in ['download_results', 'delete_storage_on_termination']:
+        if key in settings and not isinstance(settings[key], bool):
+            raise ValueError(f'{key} must be a boolean')
     def amount(key):
         value = Decimal(str(settings[key]))
         if not value.is_finite() or value <= 0:
@@ -263,7 +266,7 @@ class SpotRunner:
                 {"Name": "group-name", "Values": [run_id]}])["SecurityGroups"]
             for group in groups:
                 self.ec2.delete_security_group(GroupId=group["GroupId"])
-            if report.get('artifact_bucket'):
+            if report.get('artifact_bucket') and self.settings.get('download_results', False):
                 self.fetch_training_results(report, out)
         return report
 
@@ -433,7 +436,7 @@ class SpotRunner:
                         "Groups": [security_group], "AssociatePublicIpAddress": True}],
                     BlockDeviceMappings=[{"DeviceName": plan["root_device"], "Ebs": {
                         "VolumeSize": s["storage_gb"], "VolumeType": "gp3", "Encrypted": True,
-                        "DeleteOnTermination": True}}],
+                        "DeleteOnTermination": s.get('delete_storage_on_termination', False)}}],
                     TagSpecifications=[{"ResourceType": kind, "Tags": [
                         {"Key": "Project", "Value": "ModelChef"},
                         {"Key": "RunId", "Value": run_id}]} for kind in ["instance", "volume"]])
@@ -443,6 +446,10 @@ class SpotRunner:
                 raise
             instance_id = launch["Instances"][0]["InstanceId"]
             report["instance_id"] = instance_id
+            report['storage_retained'] = not s.get('delete_storage_on_termination', False)
+            report['volume_ids'] = [mapping['Ebs']['VolumeId']
+                                    for mapping in launch['Instances'][0].get('BlockDeviceMappings', [])
+                                    if 'Ebs' in mapping]
             persist('launched')
             self.scheduler.create_schedule(Name=run_id, GroupName="modelchef",
                 ScheduleExpression="at(" + deadline.strftime("%Y-%m-%dT%H:%M:%S") + ")",
@@ -544,7 +551,7 @@ class SpotRunner:
                               cleanup_error=str(error))
                 persist('cleanup-pending')
                 raise
-        if bundle is not None and terminated:
+        if bundle is not None and terminated and s.get('download_results', False):
             progress('Downloading the completed training result bundle from S3.')
             self.fetch_training_results(report, out)
         return report

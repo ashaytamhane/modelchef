@@ -135,12 +135,13 @@ def test_result_extraction_rejects_traversal_and_links(tmp_path):
     assert not (tmp_path/'results').exists()
 
 
-@pytest.mark.parametrize('failure', [None, 'download', 'guest', 'ambiguous', 'cleanup'])
+@pytest.mark.parametrize('failure', [None, 'download', 'guest', 'ambiguous', 'cleanup', 'no-download'])
 def test_lifecycle_always_attempts_cleanup_and_preserves_recovery(tmp_path, monkeypatch, failure):
     private, public = tmp_path/'key', tmp_path/'key.pub'
     private.write_text('private-not-uploaded')
     public.write_text('ssh-ed25519 AAAA')
-    configuration = {**settings(), 'ssh_private_key': str(private), 'ssh_public_key': str(public)}
+    configuration = {**settings(), 'ssh_private_key': str(private), 'ssh_public_key': str(public),
+                     'download_results': failure != 'no-download'}
     calls = []
 
     class API:
@@ -175,6 +176,8 @@ def test_lifecycle_always_attempts_cleanup_and_preserves_recovery(tmp_path, monk
     monkeypatch.setattr(runner, 'copy', lambda *args, **kw: None)
 
     def fetch(*args):
+        if failure == 'no-download':
+            raise AssertionError('Downloads must be explicitly enabled')
         if failure == 'download':
             raise OSError('Disk full')
     monkeypatch.setattr(runner, 'fetch', fetch)
@@ -187,6 +190,35 @@ def test_lifecycle_always_attempts_cleanup_and_preserves_recovery(tmp_path, monk
     assert report['network_volume_id'] == 'volume'
     assert 'private-not-uploaded' not in json.dumps(report)
     assert len([call for call in calls if call[0] == 'POST']) == 1
+
+
+def test_network_volume_deletion_requires_explicit_action_and_run():
+    from modelchef.runpod_runner import RunpodHTTPError, manage_volume
+    calls = []
+
+    class API:
+        deleted = False
+
+        def request(self, method, path):
+            calls.append((method, path))
+            if method == 'DELETE':
+                self.deleted = True
+                return None
+            if self.deleted:
+                raise RunpodHTTPError('GET', 404)
+            return {'id': 'named-volume', 'size': 100}
+
+    api = API()
+    assert not manage_volume({}, 'named-volume', 'delete', False, api)['deleted']
+    assert not manage_volume({}, 'named-volume', 'status', True, api)['deleted']
+    assert not any(method == 'DELETE' for method, _ in calls)
+    assert manage_volume({}, 'named-volume', 'delete', True, api)['deleted']
+    assert calls[-2:] == [('DELETE', '/network-volumes/named-volume'),
+                         ('GET', '/network-volumes/named-volume')]
+
+
+def test_runpod_results_stay_on_volume_by_default():
+    assert RunpodConfig.model_validate(settings()).download_results is False
 
 
 def test_guest_deadline_preserves_outputs_and_stops_child_group(tmp_path, monkeypatch):

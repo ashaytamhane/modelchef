@@ -193,7 +193,8 @@ class ServingRunner:
                 'Groups': s['security_group_ids'], 'AssociatePublicIpAddress': True}],
             BlockDeviceMappings=[{'DeviceName': root_device, 'Ebs': {
                 'VolumeSize': int(s.get('storage_gb', 100)), 'VolumeType': 'gp3',
-                'Encrypted': True, 'DeleteOnTermination': True}}],
+                'Encrypted': True,
+                'DeleteOnTermination': s.get('delete_storage_on_termination', False)}}],
             TagSpecifications=[{'ResourceType': kind, 'Tags': [
                 {'Key': 'Project', 'Value': 'ModelChef'}, {'Key': 'DeploymentId', 'Value': deployment},
                 {'Key': 'Lifecycle', 'Value': 'persistent-serving'}]} for kind in ['instance', 'volume']],
