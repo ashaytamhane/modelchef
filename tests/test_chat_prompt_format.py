@@ -9,6 +9,7 @@ from modelchef.run_config import RunConfig
 @pytest.mark.parametrize('interactive', [False, True])
 @pytest.mark.parametrize('transcript', [False, True])
 def test_pretraining_chat_respects_declared_format(tmp_path, monkeypatch, interactive, transcript):
+    pytest.importorskip('torch')
     import modelchef.chat as module
     from modelchef import engines
 
