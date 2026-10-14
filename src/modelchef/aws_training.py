@@ -41,11 +41,12 @@ def build_bundle(root, settings, *, raw_override=None, linked_stage=False):
             raise ValueError('Uncompressed training bundle exceeds max_bundle_bytes')
         files[name] = content
 
-    for path in sorted((root / 'src/modelchef').glob('*.py')):
-        add_file(path.relative_to(root).as_posix(), path)
-    add_file('pyproject.toml', root / 'pyproject.toml')
-    if (root / 'README.md').is_file():
-        add_file('README.md', root / 'README.md')
+    source_root = Path(settings.get('_source_root', root)).resolve()
+    for path in sorted((source_root / 'src/modelchef').glob('*.py')):
+        add_file(path.relative_to(source_root).as_posix(), path)
+    add_file('pyproject.toml', source_root / 'pyproject.toml')
+    if (source_root / 'README.md').is_file():
+        add_file('README.md', source_root / 'README.md')
     recipe = config.model_dump(mode='json')
     pretrained = {}
     kernels = {}

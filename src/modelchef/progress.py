@@ -33,6 +33,7 @@ _activities = {
     'aws-train': 'Preparing the training bundle; execution monitors the Spot job and cleanup.',
     'aws-serve': 'Processing the requested persistent API hosting action.',
     'aws-reconcile': 'Recovering the recorded cloud run status and reconciling cleanup.',
+    'runpod-job': 'Reading the owned Runpod job report and processing status, logs, recovery or cleanup.',
     'convert-data': 'Reading bounded input records and writing normalized JSONL.',
     'init-student': 'Loading teacher vocabulary and initializing the student model.',
     'stage-config': 'Reading parent settings and writing the requested training-stage recipe.',

@@ -11,14 +11,14 @@ import yaml
 from modelchef.run_config import RunConfig
 
 
-def guest_plan(config, related_models=()):
+def guest_plan(config, related_models=(), cloud_extra='aws'):
     if hasattr(config, 'modality'):
         return {'extras': ['train', 'multimodal'],
                 'command': [sys.executable, '-m', 'modelchef.cli', 'multimodal', 'configs/job.yaml', '--run'],
                 'execution_policy': {'model': config.model.model_dump(mode='json'),
                                      'training': config.training.model_dump(mode='json')}}
     config.validate_execution()
-    extras = ['train', 'pipeline', 'aws']
+    extras = ['train', 'pipeline'] + ([cloud_extra] if cloud_extra else [])
     if config.training.optimizer.startswith('adamw8bit'):
         extras.append('optimizer-8bit')
     models = [config.model, *related_models]
@@ -41,7 +41,7 @@ def guest_plan(config, related_models=()):
                                  'training': config.training.model_dump(mode='json')}}
 
 
-def prepare_and_run(path):
+def prepare_and_run(path, cloud_extra='aws'):
     raw = yaml.safe_load(path.read_text(encoding='utf-8'))
     if 'stages' in raw:
         from modelchef.workflow import Workflow
@@ -53,7 +53,7 @@ def prepare_and_run(path):
             for folder in [config.stage.parent_run, config.stage.teacher_run]:
                 if folder and folder != 'resolved-at-execution':
                     related.append(RunConfig.model_validate_json((Path(folder) / 'config.json').read_text()).model)
-        plans = [guest_plan(config, related) for config in configs]
+        plans = [guest_plan(config, related, cloud_extra) for config in configs]
         plan = {'extras': sorted({extra for item in plans for extra in item['extras']}),
                 'command': [sys.executable, '-m', 'modelchef.cli', 'cook', 'configs/job.yaml', '--run'],
                 'execution_policy': [item['execution_policy'] for item in plans]}
@@ -66,7 +66,7 @@ def prepare_and_run(path):
                    for folder in [config.stage.parent_run, config.stage.teacher_run] if folder]
     if 'stages' not in raw:
         configs = [config]
-        plan = guest_plan(config, related)
+        plan = guest_plan(config, related, cloud_extra)
     print(json.dumps(plan, indent=2), flush=True)
     # Pin the training build instead of inheriting an arbitrary AMI PyTorch version.
     subprocess.run([sys.executable, '-m', 'pip', 'install', 'torch==2.13.0',
@@ -75,7 +75,7 @@ def prepare_and_run(path):
                     '.[' + ','.join(plan['extras']) + ']'], check=True)
     import torch
     if not torch.cuda.is_available():
-        raise RuntimeError('Managed GPU training requires a CUDA-compatible AMI and driver')
+        raise RuntimeError('Managed GPU training requires a CUDA-compatible host driver and environment')
     if any(config.training.distributed == 'ddp' for config in configs) and torch.cuda.device_count() < 2:
         raise ValueError('DDP recipe requires an instance with at least two visible GPUs')
     models = [config.model for config in configs] + related
@@ -96,8 +96,9 @@ def prepare_and_run(path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('recipe', type=Path)
+    parser.add_argument('--cloud-extra', choices=['aws', 'none'], default='aws')
     args = parser.parse_args()
-    prepare_and_run(args.recipe)
+    prepare_and_run(args.recipe, None if args.cloud_extra == 'none' else args.cloud_extra)
 
 
 if __name__ == '__main__':

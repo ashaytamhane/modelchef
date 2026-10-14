@@ -1,0 +1,24 @@
+# Provider resources only. Use the same stage/workflow recipe for local, AWS or Runpod.
+runpod:
+  gpu_type_id: NVIDIA GeForce RTX 4090
+  gpu_count: 1
+  cloud: SECURE
+  image: runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
+  min_cuda_version: '13.0'  # Host driver must support the project's cu130 PyTorch build.
+  network_volume_id: REPLACE_WITH_EXISTING_VOLUME_ID
+  data_center_ids: []  # Select compatible GPU placement in the volume's data center.
+  container_disk_gb: 50
+  ssh_private_key: ~/.ssh/id_ed25519
+  ssh_public_key: ~/.ssh/id_ed25519.pub
+  api_key_env: RUNPOD_API_KEY  # Environment variable name; never put the key here.
+  max_compute_hourly_usd: 1.00  # Total compute ceiling for all requested GPUs, not a price quote.
+  storage_hourly_usd: 0.05  # Conservative allowance for all storage during this run.
+  safety_reserve_usd: 0.50
+  per_run_budget_usd: 2.00
+  total_budget_usd: 10.00
+  max_runtime_minutes: 30  # Includes provisioning, installation, training and result transfer.
+  poll_seconds: 15
+  max_bundle_bytes: 64000000
+  max_result_bytes: 20000000000
+  budget_scope: default
+  local_preflight: true

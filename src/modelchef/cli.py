@@ -68,6 +68,31 @@ def cloud_job(path, aws_config, execute=False, command='pipeline', yes=False):
             'lifecycle': 'One temporary EC2 instance; termination after completion or deadline.'}
 
 
+def runpod_job(path, resource_config, execute=False, command='pipeline', yes=False):
+    from modelchef.runpod_runner import RunpodRunner
+    raw = yaml.safe_load(Path(path).read_text(encoding='utf-8'))
+    if not isinstance(raw, dict) or (command == 'cook') != ('stages' in raw):
+        raise ValueError('pipeline requires a stage recipe; cook requires a workflow recipe')
+    runner = RunpodRunner(_settings(resource_config, 'runpod'), Path.cwd(), path)
+    plan = runner.plan()
+    if not execute:
+        return plan
+    print(f"Runpod launch review: {plan['gpu_count']} x {plan['gpu_type_id']}; "
+          f"deadline {plan['max_runtime_minutes']} minutes; estimated upper allowance "
+          f"${plan['estimated_maximum_usd']}; reservation ${plan['reserved_usd']}; "
+          f"overall limit ${plan['total_budget_usd']}. "
+          "Keep this controller running. Network-volume storage continues billing after Pod deletion.",
+          file=sys.stderr, flush=True)
+    if not yes:
+        try:
+            approved = input('Launch this billable Runpod job? Type yes: ').strip().lower() == 'yes'
+        except EOFError:
+            approved = False
+        if not approved:
+            raise ValueError('Runpod launch requires confirmation; preview first or use --yes')
+    return runner.run()
+
+
 def _main() -> None:
     # Randomly initialized models can generate Unicode characters unsupported by
     # the active Windows console code page. Preserve the run instead of crashing
@@ -83,7 +108,7 @@ def _main() -> None:
     neuron_parser.add_argument('--run', action='store_true')
     neuron_parser.add_argument('--checkpoint', type=Path)
     neuron_parser.add_argument('--resume', type=Path)
-    workflow_parser = command.add_parser('cook', help='Plan/run ordered stage recipes locally or on AWS')
+    workflow_parser = command.add_parser('cook', help='Plan/run ordered stages locally, on AWS or on Runpod')
     workflow_parser.add_argument('path', type=Path)
     workflow_parser.add_argument('--run', action='store_true')
     multimodal = command.add_parser('multimodal', help='Plan/train local vision-language or speech recipes')
@@ -137,17 +162,23 @@ def _main() -> None:
     aws_reconcile = command.add_parser("aws-reconcile", help="Recover reports/cleanup for a saved run")
     aws_reconcile.add_argument("run_id")
     aws_reconcile.add_argument("--path", type=Path, default=Path("configs/aws-test.yaml"))
-    pipeline = command.add_parser("pipeline", help="Plan/run a training stage locally or on AWS")
+    runpod_manage = command.add_parser('runpod-job', help='Inspect or terminate an owned Runpod training job')
+    runpod_manage.add_argument('run_dir', type=Path)
+    runpod_manage.add_argument('--action', choices=['status', 'logs', 'fetch', 'terminate'], default='status')
+    runpod_manage.add_argument('--run', action='store_true', help='Execute Pod termination')
+    pipeline = command.add_parser("pipeline", help="Plan/run a training stage locally, on AWS or on Runpod")
     pipeline.add_argument("path", type=Path)
     pipeline.add_argument("--run", action="store_true")
     pipeline.add_argument("--resume", type=Path)
     for targeted in [pipeline, workflow_parser]:
-        targeted.add_argument('--target', choices=['local', 'aws'], default='local',
+        targeted.add_argument('--target', choices=['local', 'aws', 'runpod'], default='local',
                               help='Execution location; local is the default')
         targeted.add_argument('--aws-config', type=Path,
                               help='AWS resource/budget configuration required for --target aws')
+        targeted.add_argument('--runpod-config', type=Path,
+                              help='Runpod resource/budget configuration required for --target runpod')
         targeted.add_argument('--yes', action='store_true',
-                              help='Explicitly approve AWS launch without an interactive prompt; budgets still apply')
+                              help='Explicitly approve cloud launch without an interactive prompt; budgets still apply')
     for cloud_parser in [aws_test, aws_train]:
         cloud_parser.add_argument('--yes', action='store_true',
                                   help='Approve the reviewed AWS launch without an interactive prompt')
@@ -246,6 +277,24 @@ def _main() -> None:
             result = (train(config, args.resume) if args.action == 'train' else
                       compile_model(config, args.checkpoint)) if args.run else plan(config, args.action)
             print(json.dumps(result, indent=2))
+        elif args.command == 'runpod-job':
+            from modelchef.runpod_runner import manage_run
+            print(json.dumps(manage_run(args.run_dir, args.action, args.run), indent=2))
+        elif args.command in {'pipeline', 'cook'} and args.aws_config and args.runpod_config:
+            raise ValueError('Choose one cloud resource configuration, not both')
+        elif args.command in {'pipeline', 'cook'} and args.target == 'runpod':
+            if not args.runpod_config:
+                raise ValueError('--target runpod requires --runpod-config')
+            if args.aws_config:
+                raise ValueError('--aws-config requires --target aws')
+            if getattr(args, 'resume', None):
+                raise ValueError('Cloud --resume is not supported; recover network-volume results first')
+            result = runpod_job(args.path, args.runpod_config, args.run, args.command, args.yes)
+            print(json.dumps(result, indent=2, default=str))
+            if args.run and (not result.get('test_passed') or not result.get('termination_confirmed')):
+                parser.exit(1, 'Runpod success/termination was not confirmed; inspect the saved report.\n')
+        elif args.command in {'pipeline', 'cook'} and args.runpod_config:
+            raise ValueError('--runpod-config requires --target runpod')
         elif args.command in {'pipeline', 'cook'} and args.target == 'aws':
             if not args.aws_config:
                 raise ValueError('--target aws requires --aws-config')
@@ -432,6 +481,9 @@ def _main() -> None:
             elif args.command == 'check-config' and 'sources' in config:
                 from modelchef.curation import CurationConfig
                 config = CurationConfig.model_validate(config).model_dump(mode='json')
+            elif args.command == 'check-config' and 'runpod' in config:
+                from modelchef.runpod_runner import RunpodConfig
+                config = {'runpod': RunpodConfig.model_validate(config['runpod']).model_dump(mode='json')}
             elif args.command == "check-config" and "runtime" not in config:
                 from modelchef.run_config import RunConfig
                 config = RunConfig.model_validate(config).validate_execution().model_dump(mode="json")

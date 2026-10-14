@@ -4,13 +4,26 @@
 
 ModelChef is a recipe-driven platform for preparing data, training models and using the results. Build a text model from scratch, adapt a pretrained text, vision-language or speech model, evaluate it, then use CLI inference, publish to Hugging Face or serve supported text models through a secured vLLM API.
 
-Versioned YAML recipes define the data, architecture and training stages. Run locally or on AWS, starting with a small test and progressing to precision, kernel and deployment controls as needed.
+Versioned YAML recipes define the data, architecture and training stages. Run locally, on AWS or on Runpod, starting with a small test and progressing to precision, kernel and deployment controls as needed.
 
 ![ModelChef kitchen: datasets and a recipe become a trained model ready for serving.](docs/assets/modelchef-kitchen.png)
 
 ## Quick Start
 
-The Quick Start examples below run on your current machine. ModelChef can also launch AWS instances: see [the Spot training example](#run-a-managed-training-stage) for a temporary training job that terminates when finished, or [the API hosting example](#persistent-api-hosting-on-ec2) for persistent on-demand serving. AWS launches require configured credentials and explicit execution with `--run`, and incur charges. Start with a small local experiment; the default training run tests the pipeline rather than producing a useful assistant.
+The Quick Start examples below run on your current machine. ModelChef can also launch cloud GPUs: see [AWS training](#run-a-managed-training-stage), [Runpod training](docs/RUNPOD.md), or [persistent AWS API hosting](#persistent-api-hosting-on-ec2). Cloud launches require configured credentials, budget review and explicit execution with `--run`, and incur charges. Start with a small local experiment; the default training run tests the pipeline rather than producing a useful assistant.
+
+Use the same stage or workflow recipe for each training target; provider resources stay in a separate file:
+
+```bash
+python -m modelchef.cli cook configs/workflow-demo.yaml                  # Local preview
+python -m modelchef.cli cook configs/workflow-demo.yaml --run            # Local execution
+python -m modelchef.cli cook configs/workflow-demo.yaml --target aws --aws-config configs/aws-training.yaml
+python -m modelchef.cli cook configs/workflow-demo.yaml --target runpod --runpod-config configs/runpod.yaml
+```
+
+The cloud commands above preview; add `--run` to request a reviewed launch. `pipeline` accepts the same target options for one stage. Runpod uses an API key rather than an OAuth login, requires a persistent network volume for recovery, and relies on the local controller for Pod termination. Follow the [Runpod setup and budget tutorial](docs/RUNPOD.md) before launching.
+
+Runpod authentication reuses `RUNPOD_API_KEY` or the credentials saved by its CLI. Configure the volume ID and SSH key paths in [configs/runpod.yaml](configs/runpod.yaml); keep keys out of that file. Use `runpod-job` to inspect status/logs, fetch available results or terminate an owned job. The integration has local lifecycle tests and a verified read-only account connection; a paid GPU training deployment remains to be validated.
 
 ### Prepare your kitchen: set up once
 
