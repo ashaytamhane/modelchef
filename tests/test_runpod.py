@@ -23,6 +23,26 @@ def settings():
             'max_runtime_minutes': 30, 'local_preflight': False}
 
 
+def test_settlement_keeps_conservative_spend_and_requires_verified_cleanup(tmp_path):
+    from decimal import Decimal
+
+    from modelchef.aws_runner import Ledger
+    ledger = Ledger(tmp_path / 'budget.sqlite')
+    ledger.reserve('owned', 'runpod:test', Decimal(2), 3)
+    report = {'termination_confirmed': True, 'cleanup_verified_by_read': True,
+              'elapsed_seconds': 3600, 'estimated_spend_bound_usd': '1.2',
+              'settings': {'max_compute_hourly_usd': 1, 'storage_hourly_usd': .1,
+                           'safety_reserve_usd': .1}}
+    with pytest.raises(ValueError, match='Settlement'):
+        ledger.settle_terminated('owned', {**report, 'cleanup_verified_by_read': False})
+    with pytest.raises(ValueError, match='Settlement'):
+        ledger.settle_terminated('owned', {**report, 'estimated_spend_bound_usd': '0'})
+    ledger.settle_terminated('owned', report)
+    assert ledger.db.execute('SELECT reserved,state FROM runs').fetchone() == ('1.2', 'settled')
+    ledger.reserve('next', 'runpod:test', Decimal('1.8'), 3)
+    ledger.db.close()
+
+
 @pytest.mark.parametrize('field,value', [('max_compute_hourly_usd', float('nan')),
     ('max_runtime_minutes', 0), ('gpu_count', 0), ('per_run_budget_usd', 0.1),
     ('total_budget_usd', 0.5), ('api_key', 'never-in-recipes')])
@@ -73,6 +93,8 @@ def test_pod_payload_does_not_include_control_plane_key(tmp_path, monkeypatch):
     assert payload['ports'] == ['22/tcp']
     assert payload['mounts']['network'][0]['volumeId'] == 'volume'
     assert payload['gpu']['minCudaVersion'] == '13.0'
+    bootstrap = payload['cmd'][0]
+    assert bootstrap.index('ssh-keygen -A') < bootstrap.index('exec /usr/sbin/sshd')
 
 
 def test_reconciliation_reads_all_pages():
@@ -199,6 +221,18 @@ def test_shared_guest_dependency_policy_is_provider_independent():
     assert 'aws' not in plan['extras']
     assert 'cuda13-toolchain' in plan['extras']
     assert 'pipeline' in plan['extras']
+
+
+def test_guest_system_python_creates_venv_before_package_install(tmp_path, monkeypatch):
+    from modelchef import runpod_guest
+    monkeypatch.setattr(runpod_guest.sys, 'prefix', '/system')
+    monkeypatch.setattr(runpod_guest.sys, 'base_prefix', '/system')
+    commands, python = runpod_guest.runtime_commands(tmp_path / 'runtime')
+    assert commands[0][1:5] == ['-m', 'venv', '--without-pip', '--system-site-packages']
+    assert str(tmp_path / 'runtime') in python
+    assert python != runpod_guest.sys.executable
+    monkeypatch.setattr(runpod_guest.sys, 'prefix', '/isolated-venv')
+    assert runpod_guest.runtime_commands(tmp_path) == ([], runpod_guest.sys.executable)
 
 
 def test_result_transfer_contains_training_data_and_tokenizer(tmp_path, monkeypatch):

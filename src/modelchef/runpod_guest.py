@@ -9,6 +9,19 @@ import time
 from pathlib import Path
 
 
+def runtime_commands(directory):
+    """Use an existing venv or create an isolated one without altering system Python."""
+    if sys.prefix != sys.base_prefix:
+        return [], sys.executable
+    directory = Path(directory).resolve()
+    python = directory / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+    # The image already supplies pip. Inherit it, avoiding a dependency on Debian's
+    # optional ensurepip package and PEP 668's system-package installation restriction.
+    create = [sys.executable, '-m', 'venv', '--without-pip', '--system-site-packages',
+              str(directory)]
+    return [create], str(python)
+
+
 def execute(seconds):
     started = time.monotonic()
     Path('artifacts').mkdir(exist_ok=True)
@@ -24,10 +37,11 @@ def execute(seconds):
     os.environ['MODELCHEF_LOCAL_CHECKPOINT_KEEP'] = '1'
     # Never carry AWS recovery settings into a different provider's guest.
     os.environ.pop('MODELCHEF_RECOVERY_S3_URI', None)
-    setup = [sys.executable, '-m', 'pip', 'install', 'pyyaml>=6,<7', 'pydantic>=2.10,<3']
-    train = [sys.executable, '-m', 'modelchef.aws_guest', 'configs/job.yaml', '--cloud-extra', 'none']
+    initialization, python = runtime_commands(Path('.runtime'))
+    setup = [python, '-m', 'pip', 'install', 'pyyaml>=6,<7', 'pydantic>=2.10,<3']
+    train = [python, '-m', 'modelchef.aws_guest', 'configs/job.yaml', '--cloud-extra', 'none']
     try:
-        for command in [setup, train]:
+        for command in [*initialization, setup, train]:
             remaining = seconds-(time.monotonic()-started)
             if remaining <= 0:
                 raise TimeoutError('Guest runtime limit reached')

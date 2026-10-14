@@ -113,6 +113,29 @@ class Ledger:
                 raise ValueError('Cannot release a reservation for an unconfirmed launch')
             self.db.execute("UPDATE runs SET reserved='0' WHERE id=?", (run_id,))
 
+    def settle_terminated(self, run_id, report):
+        """Replace a reservation with its conservative bound after confirmed cleanup."""
+        from decimal import Decimal
+        with self.db:
+            self.db.execute('BEGIN IMMEDIATE')
+            row = self.db.execute('SELECT reserved FROM runs WHERE id=?', (run_id,)).fetchone()
+            bound = Decimal(str(report.get('estimated_spend_bound_usd', 'NaN')))
+            settings = report.get('settings', {})
+            elapsed = Decimal(str(report.get('elapsed_seconds', 'NaN')))
+            rate = Decimal(str(settings.get('max_compute_hourly_usd', 'NaN')))
+            storage = Decimal(str(settings.get('storage_hourly_usd', 'NaN')))
+            reserve = Decimal(str(settings.get('safety_reserve_usd', 'NaN')))
+            valid_components = all(value.is_finite() and value >= 0
+                                   for value in [elapsed, rate, storage, reserve])
+            minimum = elapsed / 3600 * (rate + storage) + reserve if valid_components else None
+            if (not row or not report.get('termination_confirmed') or
+                    not report.get('cleanup_verified_by_read') or
+                    not bound.is_finite() or not valid_components or bound < minimum or
+                    bound > Decimal(row[0])):
+                raise ValueError('Settlement requires verified termination and a valid spend bound')
+            self.db.execute('UPDATE runs SET reserved=?,state=?,report=? WHERE id=?',
+                            (str(bound), 'settled', json.dumps(report, default=str), run_id))
+
 
 def package_source(root):
     """Allowlist code files only: never package .aws, .env, keys, or Git history."""

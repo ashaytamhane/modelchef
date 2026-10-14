@@ -214,7 +214,8 @@ class RunpodRunner:
                 '(apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server); '
                 'mkdir -p /root/.ssh /run/sshd; chmod 700 /root/.ssh; '
                 'printf "%s\\n" "$PUBLIC_KEY" > /root/.ssh/authorized_keys; '
-                'chmod 600 /root/.ssh/authorized_keys; exec /usr/sbin/sshd -D -e')
+                'chmod 600 /root/.ssh/authorized_keys; ssh-keygen -A; '
+                'exec /usr/sbin/sshd -D -e')
         return {'name': name, 'cloud': s.cloud, 'image': s.image,
                 'gpu': {'id': s.gpu_type_id, 'count': s.gpu_count, 'minCudaVersion': s.min_cuda_version},
                 'disk': s.container_disk_gb, 'ports': ['22/tcp'],
