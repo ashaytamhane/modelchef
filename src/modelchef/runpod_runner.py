@@ -317,9 +317,12 @@ class RunpodRunner:
             progress('Requesting one Runpod GPU Pod and waiting for its direct SSH connection.')
             try:
                 pod = api.request('POST', '/pods', self.payload(run_id, public_key))
-            except Exception:  # noqa: BLE001 -- reconcile every ambiguous launch failure
+            except Exception as launch_error:  # noqa: BLE001 -- reconcile ambiguous launch failures
                 # Never blindly retry creation: reconcile the unique saved name instead.
                 report['state'] = 'launch-uncertain'
+                report['launch_error_type'] = type(launch_error).__name__
+                if isinstance(launch_error, RunpodHTTPError):
+                    report['launch_http_status'] = launch_error.status
                 save()
                 candidates = find_owned_pods(api, run_id)
                 if len(candidates) == 1:
@@ -350,8 +353,8 @@ class RunpodRunner:
             seconds = max(1, int(deadline-time.monotonic()))
             start = (f'cd {shlex.quote(remote)} && echo {report["bundle_sha256"]} " bundle.tar.gz" '
                      '| sha256sum -c - && tar -xzf bundle.tar.gz && '
-                     f'nohup env PYTHONPATH=src python -u -m modelchef.runpod_guest --seconds {seconds} '
-                     '>guest.log 2>&1 </dev/null &')
+                     f'(nohup env PYTHONPATH=src python -u -m modelchef.runpod_guest --seconds {seconds} '
+                     '>guest.log 2>&1 </dev/null &)')
             self.ssh(pod, directory, start)
             report['state'] = 'running'
             save()

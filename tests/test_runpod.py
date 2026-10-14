@@ -165,9 +165,13 @@ def test_lifecycle_always_attempts_cleanup_and_preserves_recovery(tmp_path, monk
     runner = RunpodRunner(configuration, tmp_path, tmp_path/'recipe.yaml', api=API())
     monkeypatch.setattr(runner, 'bundle', lambda: b'allowlisted-source')
     monkeypatch.setattr('modelchef.runpod_runner.shutil.which', lambda _: 'tool')
-    monkeypatch.setattr(runner, 'ssh', lambda *args, **kw: (
+    ssh_commands = []
+    def ssh(*args, **kw):
+        ssh_commands.append(args[2])
+        return (
         json.dumps({'state': 'failed' if failure == 'guest' else 'completed'})
-        if args[2].startswith('cat ') else ''))
+        if args[2].startswith('cat ') else '')
+    monkeypatch.setattr(runner, 'ssh', ssh)
     monkeypatch.setattr(runner, 'copy', lambda *args, **kw: None)
 
     def fetch(*args):
@@ -175,6 +179,8 @@ def test_lifecycle_always_attempts_cleanup_and_preserves_recovery(tmp_path, monk
             raise OSError('Disk full')
     monkeypatch.setattr(runner, 'fetch', fetch)
     report = runner.run()
+    launch = next(command for command in ssh_commands if 'nohup' in command)
+    assert '&& (nohup ' in launch and launch.endswith('&)')
     assert ('DELETE', '/pods/owned') in calls
     assert report['termination_confirmed'] == (failure != 'cleanup')
     assert report['test_passed'] == (failure not in {'download', 'guest'})
