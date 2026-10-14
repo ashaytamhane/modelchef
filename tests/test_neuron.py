@@ -1,5 +1,4 @@
 import pytest
-import torch
 
 from modelchef.neuron import NeuronRecipe, create_decoder, plan
 
@@ -18,6 +17,7 @@ def test_neuron_plan_does_not_import_sdk_or_launch_cloud():
 
 
 def test_portable_decoder_matches_native_logits_and_gradients():
+    torch = pytest.importorskip('torch')
     from modelchef.model import Decoder
     config = recipe()
     native = Decoder(config.model, config.vocab_size)
@@ -53,6 +53,7 @@ def test_cli_preview_without_token_file_or_neuron_sdk(monkeypatch, capsys):
 
 
 def test_training_resume_with_mocked_xla_matches_uninterrupted(tmp_path, monkeypatch):
+    torch = pytest.importorskip('torch')
     import sys
     import types
 
@@ -94,6 +95,7 @@ def test_training_resume_with_mocked_xla_matches_uninterrupted(tmp_path, monkeyp
 
 
 def test_compilation_writes_fixed_shape_artifact_manifest(tmp_path, monkeypatch):
+    torch = pytest.importorskip('torch')
     import json
     import types
 
@@ -123,6 +125,7 @@ def test_compilation_writes_fixed_shape_artifact_manifest(tmp_path, monkeypatch)
 
 
 def test_neuron_cloud_bundle_and_shutdown_do_not_install_cuda(tmp_path):
+    pytest.importorskip('torch')
     import io
     import tarfile
 

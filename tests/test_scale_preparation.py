@@ -4,15 +4,16 @@ import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import yaml
 
 from modelchef.aws_training import build_bundle
-from modelchef.objectives import pack_structured
-from modelchef.pipeline import train_tokenizer
 from modelchef.run_config import RunConfig, Tokenization
 
 
 def test_bpe_fitting_document_limit_does_not_consume_full_corpus():
+    pytest.importorskip('torch')
+    from modelchef.pipeline import train_tokenizer
     def documents():
         for i in range(3):
             yield {'text': f'Training document {i} contains varied words.'}
@@ -22,6 +23,8 @@ def test_bpe_fitting_document_limit_does_not_consume_full_corpus():
 
 
 def test_context_overflow_skips_whole_targets_and_reports_count():
+    pytest.importorskip('torch')
+    from modelchef.objectives import pack_structured
     class Tokenizer:
         def encode(self, text, **kwargs):
             return SimpleNamespace(ids=[2] * (100 if 'oversized' in text else 2))
