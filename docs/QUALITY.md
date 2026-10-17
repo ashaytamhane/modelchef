@@ -57,6 +57,55 @@ completion; persistent API hosting follows its explicit lifecycle instead.
 
 ## Boundaries
 
+### Consecutive sentence cleanup
+
+Raw-text pretraining/midtraining preparation supports optional document-local cleanup:
+
+```yaml
+processing:
+  collapse_consecutive_duplicate_sentences: true
+  minimum_sentence_words: 6
+```
+
+The shared memory/disk cleaning path keeps the first sentence in an adjacent run,
+compares whitespace-normalized text, and preserves case and punctuation. Short
+sentences and intervening content break runs. It uses conservative `.?!` sentence
+boundaries with common English abbreviation guards; it is not a multilingual
+sentence parser, semantic repetition detector, or corpus-wide deduplicator. No
+language model or tokenizer download is required. Existing quality/line-repetition
+filters still apply. Counts include `sentence_cleanup_documents`,
+`duplicate_sentences_removed`, and `duplicate_sentence_chars_removed` (including
+whitespace); these count cleanup operations even if a later filter drops a record.
+The option is disabled by default and rejected for structured training stages.
+
+For already-split corpora, clean only explicitly selected files without recomputing
+split membership. This command streams one bounded JSONL record at a time:
+
+```bash
+modelchef clean-text train.jsonl --output train-cleaned.jsonl
+```
+
+It preserves document order/metadata, updates existing ModelChef text `sha256`
+fields when text changes, and reports input/output file hashes and removal counts.
+Unchanged records retain their original bytes. `--text-field`,
+`--minimum-sentence-words`, and `--max-record-bytes` control the bounded operation.
+An existing output is refused. An explicit `--in-place` instead of `--output`
+uses a temporary file in the same directory, flushes it, then atomically replaces
+the selected path. Other hard links retain the original bytes. Failed processing
+leaves the previous destination intact; a filesystem crash can leave a temporary
+file. Atomic publication requires filesystem support for rename (in-place) or
+exclusive Windows rename or POSIX hard links (new output). Temporary disk space
+must fit the cleaned output.
+
+This is text cleanup only: it does not regenerate packed tokens or update snapshot
+manifests. Prefer a new output and repack in a new preparation directory using the
+existing tokenizer; preserve source snapshots and fixed validation/test files.
+Enabling the recipe option during fresh preparation cleans before splitting, so
+it can change hash-based split assignments. Do not rerun a split to clean an
+existing training partition. Changed processing settings prevent silent reuse of
+an incompatible prepared snapshot. This feature makes no claim to fix model
+generation loops or improve factual accuracy.
+
 Disk mode currently covers local JSONL pretraining and midtraining. Exact deduplication
 uses a SQLite index; near deduplication uses deterministic MinHash/LSH candidate search
 and exact Jaccard verification. LSH can miss duplicate pairs. Token batches use mapped

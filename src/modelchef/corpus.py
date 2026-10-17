@@ -220,6 +220,13 @@ def clean_record(row, config, benchmark, counts):
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     repetition = 1 - len(set(lines)) / max(len(lines), 1)
     text = " ".join(" ".join(lines).split())
+    if c.collapse_consecutive_duplicate_sentences:
+        from modelchef.text_cleaning import collapse_duplicate_sentences
+        text, removed, chars = collapse_duplicate_sentences(text, c.minimum_sentence_words)
+        if removed:
+            counts['sentence_cleanup_documents'] += 1
+            counts['duplicate_sentences_removed'] += removed
+            counts['duplicate_sentence_chars_removed'] += chars
     if not c.min_chars <= len(text) <= c.max_chars:
         counts["length"] += 1
         return None

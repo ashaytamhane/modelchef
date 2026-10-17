@@ -221,6 +221,14 @@ def _main() -> None:
     curation = command.add_parser('curate', help='Plan/acquire bounded dataset mixtures with attribution')
     curation.add_argument('path', type=Path)
     curation.add_argument('--run', action='store_true')
+    clean_text = command.add_parser('clean-text', help='Stream adjacent-sentence cleanup of one JSONL file')
+    clean_text.add_argument('source', type=Path)
+    clean_target = clean_text.add_mutually_exclusive_group(required=True)
+    clean_target.add_argument('--output', type=Path, help='New JSONL output; refuses existing files')
+    clean_target.add_argument('--in-place', action='store_true', help='Atomically replace the selected file')
+    clean_text.add_argument('--minimum-sentence-words', type=int, default=6)
+    clean_text.add_argument('--text-field', default='text')
+    clean_text.add_argument('--max-record-bytes', type=int, default=4000000)
     export_parser = command.add_parser("export", help="Export a trained run for HF/vLLM")
     export_parser.add_argument("run_dir", type=Path)
     download = command.add_parser('download-model', help='Preview/download capped safetensors model')
@@ -410,6 +418,12 @@ def _main() -> None:
             from modelchef.curation import curate
             from modelchef.progress import report
             print(json.dumps(curate(args.path, Path.cwd(), args.run, progress=report), indent=2))
+        elif args.command == 'clean-text':
+            from modelchef.text_cleaning import clean_jsonl
+            result = clean_jsonl(args.source, args.source if args.in_place else args.output,
+                min_words=args.minimum_sentence_words, text_field=args.text_field,
+                max_record_bytes=args.max_record_bytes, overwrite=args.in_place)
+            print(json.dumps(result, indent=2))
         elif args.command == "export":
             from modelchef.chat import export_model
             print(export_model(args.run_dir))

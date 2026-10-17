@@ -36,6 +36,8 @@ class Processing(Section):
     max_chars: int = Field(default=20000, gt=0)
     min_alnum_fraction: float = Field(default=0.5, ge=0, le=1)
     max_repeated_line_fraction: float = Field(default=0.4, ge=0, le=1)
+    collapse_consecutive_duplicate_sentences: bool = False
+    minimum_sentence_words: int = Field(default=6, ge=1)
     exact_dedup: bool = True
     near_dedup: bool = True
     near_dedup_jaccard: float = Field(default=0.9, gt=0, le=1)
@@ -215,6 +217,8 @@ class RunConfig(Section):
             raise ValueError("RoPE head dimension must be even")
         if p.min_chars > p.max_chars or p.validation_fraction + p.test_fraction >= 1:
             raise ValueError("Invalid processing lengths or split fractions")
+        if p.collapse_consecutive_duplicate_sentences and self.stage.kind not in {'pretrain', 'midtrain'}:
+            raise ValueError('Sentence cleanup requires raw-text pretraining or midtraining')
         if t.warmup_steps >= t.steps or any(not 0 <= b < 1 for b in t.betas):
             raise ValueError("Warmup must be shorter than training; betas must be in [0,1)")
         if t.performance_gate and t.performance_gate.probe_steps >= t.steps:

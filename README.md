@@ -1212,6 +1212,8 @@ processing:  # OPTIONAL: defaults are supplied when omitted.
   max_chars: 20000  # OPTIONAL: defaults are supplied when omitted.
   min_alnum_fraction: 0.5  # OPTIONAL: defaults are supplied when omitted.
   max_repeated_line_fraction: 0.4  # OPTIONAL: defaults are supplied when omitted.
+  collapse_consecutive_duplicate_sentences: false  # OPTIONAL: Raw-text preparation only; keep first adjacent exact sentence.
+  minimum_sentence_words: 6  # OPTIONAL: Minimum words per sentence eligible for adjacent cleanup.
   exact_dedup: true  # OPTIONAL: defaults are supplied when omitted.
   near_dedup: true  # OPTIONAL: defaults are supplied when omitted.
   near_dedup_jaccard: 0.9  # OPTIONAL: Word-shingle similarity threshold, not embedding similarity.

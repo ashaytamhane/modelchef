@@ -584,6 +584,17 @@
           "title": "Max Repeated Line Fraction",
           "type": "number"
         },
+        "collapse_consecutive_duplicate_sentences": {
+          "default": false,
+          "title": "Collapse Consecutive Duplicate Sentences",
+          "type": "boolean"
+        },
+        "minimum_sentence_words": {
+          "default": 6,
+          "minimum": 1,
+          "title": "Minimum Sentence Words",
+          "type": "integer"
+        },
         "exact_dedup": {
           "default": true,
           "title": "Exact Dedup",
