@@ -330,6 +330,8 @@ def test_guest_deadline_preserves_outputs_and_stops_child_group(tmp_path, monkey
     monkeypatch.setattr(runpod_guest.os, 'killpg', lambda pid, signal: killed.append(pid), raising=False)
     with pytest.raises(TimeoutError):
         runpod_guest.execute(30)
+    assert runpod_guest.os.environ['MODELCHEF_LOCAL_CHECKPOINT_KEEP'] == '2'
+    assert runpod_guest.os.environ['MODELCHEF_RECOVERY_S3_URI'] == 'unused-test-value'
     assert killed == [123]
     assert json.loads((tmp_path/'status.json').read_text())['state'] == 'failed'
     assert checkpoint.read_text() == 'preserve-me'
@@ -361,8 +363,10 @@ def test_guest_starts_dashboard_and_cleans_it_up(tmp_path, monkeypatch):
     from modelchef import runpod_guest
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv('MODELCHEF_TENSORBOARD_URL', 'https://owned-6006.proxy.runpod.net/')
+    monkeypatch.setenv('MODELCHEF_LOCAL_CHECKPOINT_KEEP', '2')
+    monkeypatch.setenv('MODELCHEF_RECOVERY_S3_URI', 's3://parent-recovery/prefix')
     monkeypatch.setattr(runpod_guest, 'runtime_commands', lambda path: ([], 'python'))
-    commands, terminated, ready = [], [], []
+    commands, terminated, ready, environments = [], [], [], []
 
     class Process:
         def wait(self, timeout=None):
@@ -376,11 +380,16 @@ def test_guest_starts_dashboard_and_cleans_it_up(tmp_path, monkeypatch):
 
     def launch(command, **kwargs):
         commands.append(command)
+        environments.append(kwargs['env'].copy())
         return Process()
 
     monkeypatch.setattr(runpod_guest.subprocess, 'Popen', launch)
     monkeypatch.setattr(runpod_guest, 'wait_tensorboard', lambda process, seconds: ready.append(True))
     runpod_guest.execute(30)
+    assert all(env['MODELCHEF_LOCAL_CHECKPOINT_KEEP'] == '1' for env in environments)
+    assert all('MODELCHEF_RECOVERY_S3_URI' not in env for env in environments)
+    assert runpod_guest.os.environ['MODELCHEF_LOCAL_CHECKPOINT_KEEP'] == '2'
+    assert runpod_guest.os.environ['MODELCHEF_RECOVERY_S3_URI'] == 's3://parent-recovery/prefix'
     assert 'tensorboard.main' in commands[1]
     assert commands[1][-3:] == ['6006', '--reload_interval', '5']
     assert ready and terminated == [True]

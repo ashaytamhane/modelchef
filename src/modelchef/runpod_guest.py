@@ -51,9 +51,10 @@ def execute(seconds):
         temporary.replace(path)
 
     status('running')
-    os.environ['MODELCHEF_LOCAL_CHECKPOINT_KEEP'] = '1'
+    guest_env = os.environ.copy()
+    guest_env['MODELCHEF_LOCAL_CHECKPOINT_KEEP'] = '1'
     # Never carry AWS recovery settings into a different provider's guest.
-    os.environ.pop('MODELCHEF_RECOVERY_S3_URI', None)
+    guest_env.pop('MODELCHEF_RECOVERY_S3_URI', None)
     initialization, python = runtime_commands(Path('.runtime'))
     setup = [python, '-m', 'pip', 'install', 'pyyaml>=6,<7', 'pydantic>=2.10,<3', 'tensorboard>=2.19,<3']
     train = [python, '-m', 'modelchef.aws_guest', 'configs/job.yaml', '--cloud-extra', 'none']
@@ -64,12 +65,12 @@ def execute(seconds):
                 with Path('tensorboard.log').open('a') as server_log:
                     server = subprocess.Popen([python, '-m', 'tensorboard.main', '--logdir', 'artifacts',
                         '--host', '0.0.0.0', '--port', '6006', '--reload_interval', '5'],
-                        stdout=server_log, stderr=server_log)
+                        stdout=server_log, stderr=server_log, env=guest_env)
                 wait_tensorboard(server, min(20, seconds-(time.monotonic()-started)))
             remaining = seconds-(time.monotonic()-started)
             if remaining <= 0:
                 raise TimeoutError('Guest runtime limit reached')
-            process = subprocess.Popen(command, start_new_session=True)
+            process = subprocess.Popen(command, start_new_session=True, env=guest_env)
             try:
                 code = process.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
