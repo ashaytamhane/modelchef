@@ -220,3 +220,9 @@ def test_real_multimodal_training_resume_export_and_inference(tmp_path, modality
     config.data.max_media_bytes = 1
     with pytest.raises(ValueError, match='max_media_bytes'):
         train(config, tmp_path, middle)
+
+
+def test_multimodal_rejects_unimplemented_phase_profiling():
+    with pytest.raises(ValueError, match='text training only'):
+        MultimodalConfig(modality='speech', data={'manifest': 'media.jsonl'},
+            model={'path': 'model'}, training={'profile_phases': True})

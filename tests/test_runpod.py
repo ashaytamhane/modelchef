@@ -73,6 +73,9 @@ def test_preview_needs_no_key_and_packages_external_recipe(tmp_path, monkeypatch
     runner = RunpodRunner(settings(), tmp_path, recipe)
     plan = runner.plan()
     assert plan['target'] == 'runpod'
+    assert plan['memory_plan']['status'] == 'estimated'
+    assert plan['memory_plan']['gpu_count'] == 1
+    assert not plan['memory_plan']['capacity_verified']
     assert plan['bundle_bytes'] > 0
     assert not (tmp_path/'artifacts').exists()
     with pytest.raises(ValueError, match='RUNPOD_API_KEY'):

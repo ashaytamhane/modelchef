@@ -200,7 +200,14 @@ class RunpodRunner:
 
     def plan(self):
         bundle = self.bundle()
+        import yaml
+
+        from modelchef.planning import memory_preview
+        memory = memory_preview(yaml.safe_load(self.recipe.read_text(encoding='utf-8')), self.root,
+                                gpu_count=self.settings.gpu_count,
+                                hourly_usd=self.settings.max_compute_hourly_usd)
         return {'target': 'runpod', 'gpu_type_id': self.settings.gpu_type_id,
+                'memory_plan': memory,
                 'gpu_count': self.settings.gpu_count, 'recipe': str(self.recipe),
                 'max_runtime_minutes': self.settings.max_runtime_minutes,
                 'estimated_maximum_usd': str(self.settings.estimated_maximum),

@@ -15,22 +15,32 @@ def require_run_folder(folder):
 
 
 def checkpoint_for(folder, selected=None):
-    if selected is not None:
-        selected = Path(selected)
-        selected = (selected if selected.is_absolute() else folder / 'checkpoints' / selected).resolve()
-        if selected.parent != (folder / 'checkpoints').resolve() or not selected.is_file():
-            raise ValueError('Select an existing checkpoint inside this run\'s checkpoints directory')
-        return selected
-    report = json.loads((folder / "report.json").read_text())
-    if report["status"] != "completed":
-        raise ValueError("Run is incomplete; resume/finish training before chatting")
-    return folder / "checkpoints" / f"step-{report['optimizer_steps']:06d}.pt"
+    if selected is None:
+        report = json.loads((folder / "report.json").read_text())
+        if report["status"] != "completed":
+            raise ValueError("Run is incomplete; resume/finish training before chatting")
+        selected = Path(report.get('checkpoint', f"step-{report['optimizer_steps']:06d}.pt")).name
+    selected = Path(selected)
+    selected = (selected if selected.is_absolute() else folder / 'checkpoints' / selected).resolve()
+    valid = selected.is_file() or (selected.suffix == '.dcp' and (selected / 'manifest.json').is_file())
+    if selected.parent != (folder / 'checkpoints').resolve() or not valid:
+        raise ValueError('Select an existing checkpoint inside this run\'s checkpoints directory')
+    return selected
+
+
+def checkpoint_model_state(folder, checkpoint, config, tokenizer):
+    """Common inference loader for ordinary checkpoints and verified sharded DCP."""
+    import torch
+    path = checkpoint_for(folder, checkpoint)
+    if path.is_file():
+        return torch.load(path, map_location='cpu', weights_only=True, mmap=True)['model']
+    from modelchef.sharded_checkpoint import load_sharded_model
+    return load_sharded_model(path, config.model, tokenizer.get_vocab_size(), run_folder=folder)
 
 
 def export_model(folder, checkpoint=None, output_dir=None):
     folder = require_run_folder(folder)
     progress('Loading the completed checkpoint for inference-compatible export.')
-    import torch
     from safetensors.torch import save_file
 
     from modelchef.run_config import RunConfig
@@ -38,7 +48,8 @@ def export_model(folder, checkpoint=None, output_dir=None):
     folder = Path(folder).resolve()
     config = RunConfig.model_validate_json((folder / "config.json").read_text())
     c = config.model
-    state = torch.load(checkpoint_for(folder, checkpoint), map_location="cpu", weights_only=True, mmap=True)["model"]
+    from modelchef.engines import load_tokenizer
+    state = checkpoint_model_state(folder, checkpoint, config, load_tokenizer(folder))
     if c.backend == 'native' and c.peft.method == 'lora':
         from modelchef.adapters import merged_state
         adapter_dir = folder / 'adapter'
@@ -185,8 +196,7 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
         device = runtime["device"]
         progress('Constructing the model and loading checkpoint weights on the selected device.')
         model = create_model(config.model, tokenizer.get_vocab_size()).to(device)
-        model.load_state_dict(torch.load(checkpoint_for(folder, checkpoint), map_location="cpu",
-                                        weights_only=True, mmap=True)["model"])
+        model.load_state_dict(checkpoint_model_state(folder, checkpoint, config, tokenizer))
         model.eval()
         def generate(text):
             ids = tokenizer.encode(text).ids or [tokenizer.token_to_id("<bos>")]

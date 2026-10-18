@@ -42,6 +42,16 @@ matrix is evidence of links, not a bandwidth benchmark or a promise of scaling.
 NVLink/PCIe labels alone cannot identify the cheapest cloud configuration. Remote
 catalog GPU names do not establish the actual interconnect. No resource is rented.
 
+Local pipeline/cook previews and Runpod plans now include this allocation-free
+estimate automatically. Runpod previews remain offline and do not verify GPU memory
+capacity. Managed AWS plans read `ec2:DescribeInstanceTypes` for GPU count and memory;
+the controller therefore needs that read permission. Capacity metadata is not a fit
+guarantee. Unsupported model policies or unresolved parent metadata produce an explicit
+unavailable reason rather than a misleading estimate. These previews do not select
+hardware or change a recipe. Execution batch counts use one worker for a
+non-distributed recipe even if more GPUs are available; unresolved distributed
+worker counts remain unknown. Use the explicit command for measured throughput/topology.
+
 ## Measure phases
 
 Set `training.profile_phases: true` to record synchronized phase durations and CUDA
@@ -54,7 +64,8 @@ validation, checkpoint writing and reload. DDP reports per-rank phases. FSDP2 re
 per-rank initialization, combined forward/backward, optimizer, validation, checkpoint
 and reload phases. Peaks are absolute live allocations, not incremental allocations.
 Saved reports on failed runs may not contain a completed phase summary. These are
-diagnostic timings, not an unbiased steady-state throughput benchmark.
+diagnostic timings, not an unbiased steady-state throughput benchmark. Multimodal
+recipes reject `profile_phases: true` until their execution path implements it.
 
 ## Run FSDP2 explicitly
 
@@ -132,17 +143,23 @@ Protected resume paths are resolved to absolute identities. Retention orders upd
 numerically, ignores incomplete directories and rejects paths escaping the checkpoint
 directory before deleting anything.
 
-These directories are not ordinary `.pt` checkpoints and cannot yet be passed directly
-to ModelChef chat/export or used as a new stage's parent. Use the same FSDP recipe's
-resume interface. Consolidation/export is a separate future capability; silently
-gathering the entire model during checkpointing would defeat the memory contract.
+The ordinary chat/export commands accept these directories via `--checkpoint`.
+They verify the committed shard inventory and consolidate only model tensors on CPU;
+optimizer state is not loaded. CPU RAM must fit the full model, and export also needs
+disk space for the converted weights. This happens explicitly at inference/export,
+never during sharded training saves. Conversion requires the same PyTorch public
+release (CPU/CUDA build suffixes may differ); exact training resume remains stricter.
+DCP directories are not yet supported as a new stage's parent. Use the same FSDP
+recipe's resume interface for continuation.
 
 The Runpod guest recognizes the torchrun launch policy, retaining checkpoints on the
 network volume. Managed AWS also recognizes this policy and commits complete DCP
 directories to its existing S3 recovery location. Only rank zero uploads, while all
 ranks wait for success or receive the failure before retention or further updates.
 A complete sharded step-zero snapshot is committed before optimizer updates begin;
-the CPU preparation `.pt` is not advertised as an FSDP recovery checkpoint. Lazy
+the CPU preparation `.pt` is not advertised as a distributed recovery checkpoint.
+DDP likewise publishes a genuine step-zero snapshot with per-rank state, each
+periodic checkpoint and final reports through the shared S3 recovery interface. Lazy
 AdamW state materialization during that save must leave its step counters at zero.
 
 S3 recovery uploads content-addressed shards, RNG, tokenizer, prepared snapshots and
@@ -175,7 +192,8 @@ changed-identity rejection, wrong-world-size rejection and checksum corruption. 
 exercise real PyTorch sharding and DCP, not mocked collectives. They do not establish
 NCCL behavior, CUDA peaks, BF16 numerical quality, GPU throughput or cloud reliability.
 A separate two-CUDA-GPU pipeline/resume test skips when hardware is unavailable.
-The same real CPU/Gloo checkpoint also round-trips through mocked S3 and reproduces
+Model-only CPU loading is checked tensor-for-tensor and exported through the normal
+inference export interface. The same real CPU/Gloo checkpoint also round-trips through mocked S3 and reproduces
 the next AdamW update exactly. Failure-injection tests cover mid-upload interruption,
 missing/corrupt downloads, preservation of the prior S3 pointer and propagation of
 rank-zero upload failures to all ranks without hanging.

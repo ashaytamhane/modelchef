@@ -487,9 +487,10 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         report['checkpoint'] = str(path)
         n.say(f"Checkpoint saved at step {index}: {path.name}", detail=True)
         from modelchef.recovery import checkpoint_to_s3
-        # FSDP acknowledges a distributed checkpoint after training shards exist,
+        # Distributed runners acknowledge recovery only after per-rank state exists,
         # not this temporary CPU initialization checkpoint.
-        uploaded = checkpoint_to_s3(root, folder, path) if not preparing_shards else None
+        preparing_distributed = prepare_only and c.training.distributed != 'none'
+        uploaded = checkpoint_to_s3(root, folder, path) if not preparing_distributed else None
         if uploaded is not None:
             n.say(f'S3 recovery committed at step {index}: weights, optimizer, RNG, tokenizer and data snapshots.')
         if uploaded is not None or 'MODELCHEF_LOCAL_CHECKPOINT_KEEP' in os.environ:

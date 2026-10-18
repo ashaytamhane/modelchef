@@ -467,7 +467,10 @@ def _main() -> None:
             else:
                 print("Validated plan only: no dataset download, training or AWS launch. "
                       "Add --run to execute on this machine.")
-                print(json.dumps(config.model_dump(mode="json"), indent=2))
+                from modelchef.planning import memory_preview
+                print(json.dumps({**config.model_dump(mode='json'), 'memory_plan':
+                    memory_preview(config.model_dump(mode='json'), Path.cwd(),
+                                   gpu_count=1 if config.training.distributed == 'none' else None)}, indent=2))
         elif args.command in {"aws-test", "aws-train", "aws-reconcile"}:
             from modelchef.aws_runner import SpotRunner
             settings = _settings(args.path, "aws_test")

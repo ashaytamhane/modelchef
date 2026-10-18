@@ -162,6 +162,21 @@ def test_two_rank_fsdp_cpu_math_and_sharded_recovery(tmp_path):
                 process.kill()
                 process.wait()
     assert all(json.loads((tmp_path / 'result.json').read_text()).values())
+    from modelchef.chat import checkpoint_model_state, export_model
+    from modelchef.engines import load_tokenizer
+    restored = tmp_path / 'restored/artifacts/training/run'
+    config = RunConfig.model_validate_json((restored / 'config.json').read_text())
+    state = checkpoint_model_state(restored, 'step-000001.dcp', config, load_tokenizer(restored))
+    expected = torch.load(tmp_path / 'expected-model.pt', weights_only=True)
+    assert state.keys() == expected.keys()
+    assert all(torch.equal(state[key], value) for key, value in expected.items())
+    exported = export_model(restored, 'step-000001.dcp', tmp_path / 'export')
+    assert (exported / 'model.safetensors').is_file()
+    original_config = (restored / 'config.json').read_bytes()
+    (restored / 'config.json').write_bytes(original_config + b'\n')
+    with pytest.raises(ValueError, match='identity changed'):
+        checkpoint_model_state(restored, 'step-000001.dcp', config, load_tokenizer(restored))
+    (restored / 'config.json').write_bytes(original_config)
     from modelchef.sharded_checkpoint import read_manifest
     path = tmp_path / 'guest/artifacts/training/run/checkpoints/step-000001.dcp'
     with pytest.raises(ValueError, match='world size'):
@@ -265,3 +280,20 @@ def test_fsdp_two_cuda_training_and_resume(tmp_path):
                             capture_output=True, text=True, timeout=180, check=False)
     assert second.returncode == 0, second.stdout + second.stderr
     assert (resume / 'manifest.json').exists()
+
+
+def test_shared_preview_reports_unknown_and_unsupported_without_allocation(tmp_path, monkeypatch):
+    from modelchef.planning import memory_preview
+    monkeypatch.setattr('modelchef.engines.create_model', lambda *a, **kw: pytest.fail('Allocated a model'))
+    result = memory_preview({}, tmp_path)
+    assert result['status'] == 'estimated' and not result['gpu_count_verified']
+    assert any('illustrative' in item for item in result['limitations'])
+    assert memory_preview({'modality': 'vision'}, tmp_path)['status'] == 'unavailable'
+    (tmp_path / 'stage.yaml').write_text('{}')
+    stages = memory_preview({'stages': [{'name': 'base', 'recipe': 'stage.yaml'}]}, tmp_path, gpu_count=2)
+    assert stages['stages']['base']['gpu_count'] == 2
+    assert stages['stages']['base']['execution_world_size'] == 1
+    assert stages['stages']['base']['global_batch_sequences'] == result['global_batch_sequences']
+    distributed = memory_preview({'training': {'distributed': 'ddp'}}, tmp_path)
+    assert distributed['execution_world_size'] is None
+    assert distributed['global_batch_input_tokens'] is None

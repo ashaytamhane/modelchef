@@ -124,14 +124,16 @@ def _save_sharded(model, optimizer, path, metadata, rank_state, group):
     return path
 
 
-def read_manifest(path, world_size=None):
+def read_manifest(path, world_size=None, *, for_export=False):
     path = Path(path)
     manifest = json.loads((path / 'manifest.json').read_text(encoding='utf-8'))
     if manifest.get('format') != 'modelchef-fsdp2-v1':
         raise ValueError('Not a committed ModelChef FSDP2 checkpoint')
     if world_size is not None and manifest['world_size'] != world_size:
         raise ValueError('Exact FSDP2 resume requires the same world size (RNG and batch semantics)')
-    if manifest['torch_version'] != torch.__version__:
+    version_matches = (manifest['torch_version'].split('+')[0] == torch.__version__.split('+')[0]
+                       if for_export else manifest['torch_version'] == torch.__version__)
+    if not version_matches:
         raise ValueError('FSDP2 resume requires the recorded PyTorch version; DCP is version-sensitive')
     from modelchef.recovery import sharded_files
     try:
@@ -139,6 +141,25 @@ def read_manifest(path, world_size=None):
     except (OSError, ValueError) as error:
         raise ValueError(f'Sharded checkpoint contents changed or are incomplete: {error}') from error
     return manifest
+
+
+def load_sharded_model(checkpoint, architecture, vocab_size, *, run_folder=None):
+    """Consolidate only native model tensors on CPU; do not load optimizer/RNG state."""
+    if dist.is_initialized():
+        raise ValueError('DCP inference/export must run outside an initialized distributed job')
+    from modelchef.engines import create_model
+    manifest = read_manifest(checkpoint, for_export=True)
+    if run_folder is not None:
+        identities = manifest.get('identities', {})
+        for name in ['config.json', 'tokenizer.json', 'tokenizer-roles.json']:
+            if name in identities and file_digest(Path(run_folder) / name) != identities[name]:
+                raise ValueError('DCP inference configuration/tokenizer identity changed')
+    with torch.device('meta'):
+        model = create_model(architecture, vocab_size)
+    model.to_empty(device='cpu')
+    state = {'train': {'model': model.state_dict()}}
+    dcp.load(state, checkpoint_id=Path(checkpoint) / 'state', no_dist=True)
+    return state['train']['model']
 
 
 def load_sharded(model, optimizer, path, identities):
@@ -162,7 +183,7 @@ def _load_sharded(model, optimizer, path, identities, group):
     return manifest, rank_state
 
 
-def publish_sharded_to_s3(root, folder, checkpoint):
+def publish_checkpoint_to_s3(root, folder, checkpoint):
     """All ranks wait for rank zero's complete S3 commit before acknowledging recovery."""
     if not os.environ.get('MODELCHEF_RECOVERY_S3_URI'):
         return
@@ -177,6 +198,11 @@ def publish_sharded_to_s3(root, folder, checkpoint):
             except Exception as exc:  # noqa: BLE001 - every rank must receive upload failure
                 error = exc
         _collective_error(error, group)
+
+
+def publish_sharded_to_s3(root, folder, checkpoint):
+    """Compatibility entry point for sharded callers; ordinary DDP files use the same commit."""
+    return publish_checkpoint_to_s3(root, folder, checkpoint)
 
 
 def prune_sharded(checkpoints, keep, protected=()):

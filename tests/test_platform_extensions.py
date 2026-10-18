@@ -145,6 +145,8 @@ def test_two_cpu_rank_ddp_and_resume(tmp_path, model_type):
     env = {**os.environ, 'PYTHONPATH': str(root / 'src'), 'OMP_NUM_THREADS': '1'}
     command = [sys.executable, '-m', 'torch.distributed.run', '--standalone', '--nproc_per_node=2',
                '--module', '--', 'modelchef.cli', 'pipeline', str(path), '--run', '--quiet']
+    if model_type == 'decoder_rope':
+        command = command[:5] + [str(root / 'tests/ddp_recovery_worker.py'), str(path)]
     executed = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True,
                               timeout=120, check=False)
     assert executed.returncode == 0, executed.stdout + executed.stderr
@@ -155,7 +157,18 @@ def test_two_cpu_rank_ddp_and_resume(tmp_path, model_type):
     assert report['test'] is None and report['test_evaluation'] == 'withheld'
     assert len(report['phase_metrics_by_rank']) == 2
     final = torch.load(report['checkpoint'], weights_only=True)['model']
-    executed = subprocess.run(command + ['--resume', str(folder / 'checkpoints/step-000001.pt')],
+    resume_args = ['--resume', str(folder / 'checkpoints/step-000001.pt')]
+    if model_type == 'decoder_rope':
+        restored_path = Path((tmp_path / 's3-checkpoint.txt').read_text())
+        restored_payload = torch.load(restored_path, weights_only=True)
+        assert restored_payload['world_size'] == 2 and len(restored_payload['rank_states']) == 2
+        # Restore at the original identity; compare exact continuation after replacing
+        # the local checkpoint with the verified cloud recovery payload.
+        import shutil
+        shutil.copyfile(restored_path, folder / 'checkpoints/step-000001.pt')
+        assert 'step-000000.pt' in json.loads((tmp_path / 's3-published.json').read_text())
+        resume_args = [str(folder / 'checkpoints/step-000001.pt')]
+    executed = subprocess.run(command + resume_args,
                               cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120, check=False)
     assert executed.returncode == 0, executed.stdout + executed.stderr
     recovered = torch.load(report['checkpoint'], weights_only=True)['model']
@@ -171,6 +184,8 @@ def test_two_cpu_rank_ddp_and_resume(tmp_path, model_type):
     if model_type == 'decoder_rope':
         config.model.peft.method = 'lora'
     path.write_text(yaml.safe_dump(config.model_dump(mode='json')))
+    command = [sys.executable, '-m', 'torch.distributed.run', '--standalone', '--nproc_per_node=2',
+               '--module', '--', 'modelchef.cli', 'pipeline', str(path), '--run', '--quiet']
     executed = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True,
                               timeout=120, check=False)
     assert executed.returncode == 0, executed.stdout + executed.stderr

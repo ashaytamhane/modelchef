@@ -22,7 +22,7 @@ from modelchef.progress import report
 def run_distributed(config, root, resume=None):
     from modelchef.pipeline import evaluate, run_pipeline
     from modelchef.run_config import RunConfig
-    from modelchef.sharded_checkpoint import checkpoint_io_group
+    from modelchef.sharded_checkpoint import checkpoint_io_group, publish_checkpoint_to_s3
     if int(os.environ.get('WORLD_SIZE', '1')) < 2:
         raise ValueError('DDP requires torchrun --standalone --nproc_per_node=2 (or more)')
     os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
@@ -148,8 +148,13 @@ def run_distributed(config, root, resume=None):
                 if error[0]:
                     raise OSError(error[0])
                 dist.barrier(group=group)
+            publish_checkpoint_to_s3(root, folder, path)
             return path
 
+        if os.environ.get('MODELCHEF_RECOVERY_S3_URI') and resume:
+            publish_checkpoint_to_s3(root, folder, Path(resume))
+        elif os.environ.get('MODELCHEF_RECOVERY_S3_URI') or (t.checkpoint_at_start and not resume):
+            checkpoint()
         while step < t.steps:
             expired = torch.tensor(int(time.monotonic() - started > t.max_runtime_seconds), device=device)
             dist.all_reduce(expired, op=dist.ReduceOp.MAX)
@@ -285,6 +290,7 @@ def run_distributed(config, root, resume=None):
                 (folder / 'report.json').write_text(json.dumps(result, indent=2))
             final_report = [result if rank == 0 else None]
             dist.broadcast_object_list(final_report, src=0, group=group)
+        publish_checkpoint_to_s3(root, folder, path)
         return final_report[0]
     except Exception as error:
         if rank == 0 and 'folder' in locals():

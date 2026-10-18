@@ -95,6 +95,9 @@ def cook(path, root, execute=False):
             'imported_model': config.imported_model, 'export': config.export,
             'resolved_recipes': {name: preview.model_dump(mode='json') for name, preview in previews.items()},
             'note': 'Plan only; --run executes stage recipes in order. This does not launch AWS or serve an API.'}
+    from modelchef.planning import memory_preview
+    plan['memory_plan'] = {name: memory_preview(preview.model_dump(mode='json'), root, gpu_count=1)
+                           for name, preview in previews.items()}
     if not execute:
         return plan
     previous_attribution = os.environ.get('MODELCHEF_DATA_ATTRIBUTION')

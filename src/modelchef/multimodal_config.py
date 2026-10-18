@@ -50,6 +50,8 @@ class MultimodalConfig(Section):
 
     @model_validator(mode='after')
     def supported(self):
+        if self.training.profile_phases:
+            raise ValueError('Phase profiling currently supports text training only; set profile_phases: false')
         if self.training.performance_gate:
             raise ValueError('Performance gates currently apply to text training stages')
         if self.training.distributed != 'none':

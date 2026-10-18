@@ -326,7 +326,7 @@ class SpotRunner:
         if root_mapping["Ebs"]["VolumeSize"] > s["storage_gb"]:
             raise ValueError("AMI root volume exceeds configured storage budget")
         script = user_data(self.root, s)
-        return {"account": self.account, "region": s["region"], "ami_id": ami,
+        plan = {"account": self.account, "region": s["region"], "ami_id": ami,
                 "ami_name": image["Name"], "instance_type": s["instance_type"],
                 "subnet_id": subnet["SubnetId"], "vpc_id": subnet["VpcId"],
                 "availability_zone": subnet["AvailabilityZone"],
@@ -339,6 +339,24 @@ class SpotRunner:
                 "reserved_usd": str(budget_reservation(s)),
                 "source_sha256": hashlib.sha256(script.encode()).hexdigest(),
                 "user_data": script}
+        if s.get('pipeline_config'):
+            import yaml
+
+            from modelchef.planning import memory_preview
+            if s.get('job_backend') == 'neuron_probe':
+                plan['memory_plan'] = {'status': 'unavailable', 'reason': 'CUDA memory accounting does not apply to Neuron'}
+            else:
+                types = self.ec2.describe_instance_types(InstanceTypes=[s['instance_type']])['InstanceTypes']
+                if len(types) != 1 or types[0]['InstanceType'] != s['instance_type']:
+                    raise ValueError('EC2 returned unexpected hardware metadata')
+                gpus = types[0].get('GpuInfo', {}).get('Gpus', [])
+                count = sum(gpu['Count'] for gpu in gpus)
+                capacity = min((gpu.get('MemoryInfo', {}).get('SizeInMiB', 0) for gpu in gpus), default=0)
+                plan['memory_plan'] = memory_preview(yaml.safe_load(
+                    (self.root / s['pipeline_config']).read_text(encoding='utf-8')), self.root,
+                    gpu_count=count or None, memory_bytes=capacity*1024**2 if capacity else None,
+                    hourly_usd=float(plan['hourly_budget_rate_usd']))
+        return plan
 
     def prepare_deadline_role(self):
         region = self.settings["region"]

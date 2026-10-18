@@ -1468,7 +1468,8 @@ with torchrun. Checkpoints use committed sharded DCP directories; exact resume r
 the same world size and PyTorch version. GPU/cloud performance remains unverified;
 real two-process CPU/Gloo tests cover numerical updates and sharded AdamW recovery.
 Managed AWS incremental S3 recovery supports complete DCP directories with commit-last
-publication and verified staged restore. Direct chat/export of DCP is not yet supported.
+publication and verified staged restore. Chat/export can consolidate verified DCP model
+weights on CPU without loading optimizer state. This requires RAM for full model weights.
 See [memory planning and sharded training](docs/DISTRIBUTED.md) for scope and limitations.
 
 Use `modelchef plan-memory configs/pretrain-demo.yaml --gpu-count 2 --memory-gib 24`

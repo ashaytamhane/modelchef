@@ -10,7 +10,7 @@ from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_
 
 from modelchef.engines import create_model
 from modelchef.fsdp_training import shard_native
-from modelchef.run_config import Architecture
+from modelchef.run_config import Architecture, RunConfig
 from modelchef.sharded_checkpoint import load_sharded, publish_sharded_to_s3, save_sharded
 
 
@@ -66,13 +66,23 @@ def main():
         checkpoint = run / 'checkpoints/step-000001.dcp'
         if rank == 0:
             checkpoint.parent.mkdir(parents=True)
-            (run / 'config.json').write_text('{"stage": {}, "training": {"distributed": "fsdp2"}}')
-            (run / 'tokenizer.json').write_text('frozen tokenizer')
+            config = RunConfig(model=architecture, tokenizer={'vocab_size': 300},
+                training={'distributed': 'fsdp2', 'precision': 'fp32'})
+            (run / 'config.json').write_text(config.model_dump_json())
+            from tokenizers import Tokenizer, models, pre_tokenizers
+            vocab = {'<pad>': 0, '<unk>': 1, '<bos>': 2, '<eos>': 3,
+                     **{f'token{i}': i for i in range(4, 300)}}
+            tokenizer = Tokenizer(models.WordLevel(vocab, unk_token='<unk>'))
+            tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+            tokenizer.save(str(run / 'tokenizer.json'))
+            torch.save(weights, root / 'expected-model.pt')
             (run / 'tokens-train.bin').write_bytes(b'prepared tokens')
         dist.barrier()
         sampler = torch.Generator().manual_seed(17 + rank)
         state = {'sampler_rng': sampler.get_state(), 'torch_rng': torch.get_rng_state()}
-        identities = {'synthetic': 'same-data'}
+        from modelchef.corpus import file_digest
+        identities = {'synthetic': 'same-data',
+                      **{name: file_digest(run / name) for name in ['config.json', 'tokenizer.json']}}
         save_sharded(model, optimizer, checkpoint, {'step': 1, 'tokens_seen': 8,
                      'identities': identities}, state)
         from test_recovery import S3

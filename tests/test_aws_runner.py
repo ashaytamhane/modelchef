@@ -46,7 +46,8 @@ def test_on_demand_budget_uses_declared_rate(settings):
     assert budget_reservation(settings) == Decimal('5.00')
 
 
-def test_on_demand_plan_does_not_require_spot_offering(settings):
+@pytest.mark.parametrize("with_recipe", [False, True])
+def test_on_demand_plan_does_not_require_spot_offering(settings, with_recipe):
     from types import SimpleNamespace
 
     runner = SpotRunner.__new__(SpotRunner)
@@ -54,8 +55,14 @@ def test_on_demand_plan_does_not_require_spot_offering(settings):
     runner.settings = {**settings, 'market_type': 'on_demand',
                        'on_demand_hourly_usd': '1.25', 'ami_id': 'ami-test',
                        'subnet_id': 'subnet-test'}
+    if with_recipe:
+        runner.settings.update(pipeline_config='configs/pretrain-demo.yaml',
+                               artifact_bucket='test-bucket', instance_profile_name='test-profile',
+                               per_run_budget_usd=10, total_budget_usd=10)
     runner.account = '123456789012'
     runner.ec2 = SimpleNamespace(
+        describe_instance_types=lambda **kw: {'InstanceTypes': [{'InstanceType': settings['instance_type'],
+            'GpuInfo': {'Gpus': [{'Count': 4, 'MemoryInfo': {'SizeInMiB': 24576}}]}}]},
         describe_subnets=lambda **kw: {'Subnets': [{'SubnetId': 'subnet-test',
             'VpcId': 'vpc-test', 'AvailabilityZone': 'us-east-1a', 'State': 'available'}]},
         describe_images=lambda **kw: {'Images': [{'Name': 'GPU AMI', 'Architecture': 'x86_64',
@@ -66,6 +73,10 @@ def test_on_demand_plan_does_not_require_spot_offering(settings):
     assert plan['market_type'] == 'on_demand'
     assert plan['spot_price_usd_hour'] is None
     assert plan['hourly_budget_rate_usd'] == '1.25'
+    if with_recipe:
+        assert plan['memory_plan']['gpu_count'] == 4
+        assert plan['memory_plan']['memory_bytes_per_gpu'] == 24576 * 1024**2
+        assert plan['memory_plan']['capacity_verified']
 
 
 def test_result_download_error_preserves_success_and_shutdown_evidence(tmp_path):
