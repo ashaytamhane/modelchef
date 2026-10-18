@@ -336,6 +336,24 @@
     "Evaluation": {
       "additionalProperties": false,
       "properties": {
+        "batch_size": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Batch Size"
+        },
+        "evaluate_test": {
+          "default": true,
+          "title": "Evaluate Test",
+          "type": "boolean"
+        },
         "benchmark": {
           "default": "auto",
           "enum": [

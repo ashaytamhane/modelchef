@@ -1,4 +1,5 @@
 """Compose stage recipes into one explicit local model-development workflow."""
+import copy
 import json
 import os
 import uuid
@@ -82,6 +83,8 @@ def cook(path, root, execute=False):
                     if key in supplied:
                         preview['model'][key] = supplied[key]
                 preview['tokenizer'] = parent.tokenizer.model_dump()
+                if 'packing' in recipes[stage.name].get('tokenizer', {}):
+                    preview['tokenizer']['packing'] = recipes[stage.name]['tokenizer']['packing']
         elif stage.parent_stage:
             raise ValueError('A pretraining stage cannot reference parent weights')
         if stage.teacher_stage:
@@ -114,7 +117,7 @@ def cook(path, root, execute=False):
     try:
         previous = register_model(root / config.imported_model, root, config.imported_context) if config.imported_model else None
         for stage_index, stage in enumerate(config.stages):
-            recipe = recipes[stage.name]
+            recipe = copy.deepcopy(recipes[stage.name])
             recipe['stage'] = dict(recipe.get('stage', {}))
             kind = recipe['stage'].get('kind', 'pretrain')
             if kind != 'pretrain':
@@ -135,6 +138,8 @@ def cook(path, root, execute=False):
                         if key in supplied:
                             recipe['model'][key] = supplied[key]
                     recipe['tokenizer'] = parent_config.tokenizer.model_dump()
+                    if 'packing' in recipes[stage.name].get('tokenizer', {}):
+                        recipe['tokenizer']['packing'] = recipes[stage.name]['tokenizer']['packing']
             if stage.teacher_stage:
                 recipe['stage']['teacher_run'] = result['stages'][stage.teacher_stage]['run_dir']
             report(f'Cooking stage {stage.name}: {kind}.')

@@ -27,7 +27,7 @@ def checkpoint_for(folder, selected=None):
     return folder / "checkpoints" / f"step-{report['optimizer_steps']:06d}.pt"
 
 
-def export_model(folder, checkpoint=None):
+def export_model(folder, checkpoint=None, output_dir=None):
     folder = require_run_folder(folder)
     progress('Loading the completed checkpoint for inference-compatible export.')
     import torch
@@ -47,8 +47,8 @@ def export_model(folder, checkpoint=None):
                   str(adapter_dir / 'adapter.safetensors'))
         (adapter_dir / 'config.json').write_text(c.peft.model_dump_json(indent=2))
         state = merged_state(state, c.peft)
-    output = folder / "export"
-    output.mkdir(exist_ok=True)
+    output = Path(output_dir).resolve() if output_dir is not None else folder / "export"
+    output.mkdir(parents=True, exist_ok=True)
     if c.quantization != 'none':
         (output / 'modelchef-quantization.json').write_text(json.dumps({
             'training': c.quantization, 'export': 'full_precision_master_weights',
@@ -185,8 +185,8 @@ def chat(folder, backend="torch", prompt=None, max_tokens=32, temperature=0.8, t
         device = runtime["device"]
         progress('Constructing the model and loading checkpoint weights on the selected device.')
         model = create_model(config.model, tokenizer.get_vocab_size()).to(device)
-        model.load_state_dict(torch.load(checkpoint_for(folder, checkpoint), map_location=device,
-                                        weights_only=True)["model"])
+        model.load_state_dict(torch.load(checkpoint_for(folder, checkpoint), map_location="cpu",
+                                        weights_only=True, mmap=True)["model"])
         model.eval()
         def generate(text):
             ids = tokenizer.encode(text).ids or [tokenizer.token_to_id("<bos>")]

@@ -10,6 +10,32 @@ from modelchef.pipeline import run_pipeline
 from modelchef.run_config import RunConfig
 
 
+def test_prepare_only_detaches_in_backward_optimizer_hooks(tmp_path, monkeypatch):
+    from modelchef import optimizers
+    torch.set_num_threads(1)
+    source = tmp_path / 'data.jsonl'
+    source.write_text(''.join(json.dumps({'text': f'Topic {i}: students study science. ' * 8})
+                            + '\n' for i in range(30)))
+    c = RunConfig(name='prepare-hooks', data={'provider': 'local_jsonl',
+        'local_path': str(source)}, processing={'min_chars': 1, 'near_dedup': False},
+        tokenizer={'vocab_size': 300}, model={'layers': 1, 'hidden_size': 32,
+        'attention_heads': 4, 'kv_heads': 2, 'intermediate_size': 64, 'context_length': 32},
+        training={'accelerator': 'cpu', 'precision': 'fp32', 'optimizer': 'adamw_in_backward',
+        'gradient_clip_norm': 0, 'micro_batch_size': 1, 'gradient_accumulation': 1},
+        evaluation={'benchmark': 'none'})
+    original, captured = optimizers.create_optimizer, []
+
+    def capture(groups, training, device):
+        result = original(groups, training, device)
+        captured.extend(p for group in groups for p in group['params'])
+        assert any(p._post_accumulate_grad_hooks for p in captured)
+        return result
+
+    monkeypatch.setattr(optimizers, 'create_optimizer', capture)
+    assert run_pipeline(c, tmp_path, prepare_only=True)['status'] == 'prepared'
+    assert captured and all(not p._post_accumulate_grad_hooks for p in captured)
+
+
 def test_disk_resume_skips_processing_and_reproduces_weights(tmp_path, monkeypatch):
     torch.set_num_threads(1)
     source = tmp_path / 'data.jsonl'

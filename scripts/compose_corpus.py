@@ -35,10 +35,13 @@ def compose(path, root):
         with data.open(encoding='utf-8') as stream:
             for line in stream:
                 record = json.loads(line)
+                if not isinstance(record.get('text'), str) and all(isinstance(record.get(k), str)
+                                                                  for k in ['prompt', 'response']):
+                    record['text'] = record['prompt'].rstrip() + '\nAssistant: ' + record['response']
                 if not isinstance(record.get('text'), str):
                     raise TypeError('Composition requires text records')
                 prefix = record['text'].split('\nAssistant:', 1)[0]
-                record['split_group'] = 'prompt:' + digest(' '.join(prefix.casefold().split()).encode())
+                record.setdefault('split_group', 'prompt:' + digest(' '.join(prefix.casefold().split()).encode()))
                 ordering = digest(f"{config['seed']}:{record['text']}".encode())
                 grouped.setdefault(record['source'], []).append((ordering, record))
     selected, seen = [], set()

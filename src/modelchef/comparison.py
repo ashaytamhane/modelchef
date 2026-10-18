@@ -70,16 +70,41 @@ def compare(run_dir, baselines, output):
     return report
 
 
-def standard_plan(model_path, tasks=None, limit=100, output='artifacts/standard-evaluation', run=False, device='auto'):
+def standard_plan(model_path, tasks=None, limit=100, output='artifacts/standard-evaluation', run=False,
+                  device='auto', *, checkpoint=None, batch_size=1, cpu_threads=None):
     """Explicit harness execution may download task data; preview is entirely local."""
+    import os
     import subprocess
     import sys
     model = Path(model_path).resolve()
     if not (model / 'config.json').exists():
-        raise ValueError('Provide an existing HF export directory')
-    if not any(model.glob('*.safetensors')) and not any(model.glob('*.bin')):
+        raise ValueError('Provide an existing HF export or ModelChef run directory')
+    if batch_size < 1 or (cpu_threads is not None and cpu_threads < 1):
+        raise ValueError('Batch size and CPU threads must be positive')
+    config = json.loads((model / 'config.json').read_text())
+    native_run = 'training' in config and 'tokenizer' in config
+    preparation = []
+    selected = None
+    if native_run:
+        from modelchef.chat import checkpoint_for
+        if checkpoint is None and not (model / 'report.json').is_file():
+            raise ValueError('Unfinished run: select an existing checkpoint with --checkpoint')
+        selected = checkpoint_for(model, checkpoint)
+        if not selected.is_file():
+            raise ValueError('Evaluation checkpoint does not exist')
+        if not (model / 'tokenizer.json').is_file():
+            raise ValueError('Evaluation requires the run tokenizer')
+        source = model
+        model = Path(output).resolve() / 'model'
+        if model.exists():
+            raise ValueError('Evaluation model export already exists; choose a fresh --output directory')
+        preparation = [[sys.executable, '-m', 'modelchef.cli', 'export', str(source),
+                        '--checkpoint', str(selected), '--output', str(model)]]
+    elif checkpoint is not None:
+        raise ValueError('--checkpoint requires a ModelChef run directory')
+    if not native_run and not any(model.glob('*.safetensors')) and not any(model.glob('*.bin')):
         raise ValueError('HF evaluation requires local model weights')
-    if not any((model / name).is_file() for name in ['tokenizer.json', 'tokenizer.model', 'vocab.json']):
+    if not native_run and not any((model / name).is_file() for name in ['tokenizer.json', 'tokenizer.model', 'vocab.json']):
         raise ValueError('HF evaluation requires local tokenizer files')
     runtime = resolve_runtime({'accelerator': device, 'precision': 'fp32'}, detect_hardware())
     if limit < 1:
@@ -91,10 +116,22 @@ def standard_plan(model_path, tasks=None, limit=100, output='artifacts/standard-
         raise ValueError('Harness model path cannot contain commas')
     command = [sys.executable, '-m', 'lm_eval', 'run', '--model', 'hf', '--model_args',
                f'pretrained={model},trust_remote_code=False,local_files_only=True', '--tasks', *tasks,
-               '--limit', str(limit), '--batch_size', '1', '--device', runtime['device'],
+               '--limit', str(limit), '--batch_size', str(batch_size), '--device', runtime['device'],
                '--output_path', str(output)]
+    environment = {}
+    if cpu_threads is not None:
+        environment = {'OMP_NUM_THREADS': str(cpu_threads), 'MKL_NUM_THREADS': str(cpu_threads)}
     if run:
+        import importlib.util
+        if importlib.util.find_spec('lm_eval') is None:
+            raise ImportError('Install the evaluation extra before running: pip install "modelchef[evaluation]"')
+        env = {**os.environ, **environment}
+        for prepare_command in preparation:
+            subprocess.run(prepare_command, check=True, env=env)
         progress('Starting the standard evaluation harness; its logs below report dataset loading and task progress.')
-        subprocess.run(command, check=True)
+        subprocess.run(command, check=True, env=env)
     return {'command': command, 'executed': run, 'device': runtime['device'],
-            'note': 'Execution may download benchmark datasets; --limit bounds scored examples, not download bytes.'}
+            'preparation_commands': preparation, 'environment': environment,
+            'checkpoint': str(selected) if selected else None,
+            'note': 'Execution may download benchmark datasets; --limit bounds examples per task, not download bytes. '
+                    'A limited task selection is a development diagnostic, not an official CORE score.'}

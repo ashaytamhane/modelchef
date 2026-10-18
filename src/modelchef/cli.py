@@ -231,6 +231,8 @@ def _main() -> None:
     clean_text.add_argument('--max-record-bytes', type=int, default=4000000)
     export_parser = command.add_parser("export", help="Export a trained run for HF/vLLM")
     export_parser.add_argument("run_dir", type=Path)
+    export_parser.add_argument('--checkpoint', type=Path)
+    export_parser.add_argument('--output', type=Path)
     download = command.add_parser('download-model', help='Preview/download capped safetensors model')
     download.add_argument('repo')
     download.add_argument('--revision', default='main')
@@ -275,6 +277,9 @@ def _main() -> None:
     standard.add_argument('--output', default='artifacts/standard-evaluation')
     standard.add_argument('--run', action='store_true')
     standard.add_argument('--device', choices=['auto', 'cpu', 'cuda', 'rocm', 'mps'], default='auto')
+    standard.add_argument('--checkpoint', type=Path, help='Explicit checkpoint inside a ModelChef run')
+    standard.add_argument('--batch-size', type=int, default=1)
+    standard.add_argument('--cpu-threads', type=int, help='Bound evaluation subprocess CPU threads')
     parser.add_argument("--debug", action="store_true", help="Show tracebacks for troubleshooting")
     parser.add_argument("--quiet", action="store_true", help="Hide CLI progress on stderr")
     for subparser in command.choices.values():
@@ -383,7 +388,9 @@ def _main() -> None:
         elif args.command == 'evaluate-standard':
             from modelchef.comparison import standard_plan
             print(json.dumps(standard_plan(args.model_path, args.tasks, args.limit,
-                                           args.output, args.run, args.device), indent=2))
+                                           args.output, args.run, args.device,
+                                           checkpoint=args.checkpoint, batch_size=args.batch_size,
+                                           cpu_threads=args.cpu_threads), indent=2))
         elif args.command == 'download-model':
             from modelchef.pretrained import download_model
             print(json.dumps(download_model(args.repo, Path.cwd(), args.revision,
@@ -426,7 +433,7 @@ def _main() -> None:
             print(json.dumps(result, indent=2))
         elif args.command == "export":
             from modelchef.chat import export_model
-            print(export_model(args.run_dir))
+            print(export_model(args.run_dir, args.checkpoint, args.output))
         elif args.command == "pipeline":
             from modelchef.run_config import RunConfig
             with args.path.open(encoding="utf-8") as stream:

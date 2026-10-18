@@ -17,6 +17,10 @@ def reuse_prepared_data(config, root, destination):
         if section == 'data':
             current.pop('prepared_run')
             original.pop('prepared_run')
+        if section == 'evaluation':
+            for key in ['evaluate_test', 'batch_size', 'batches']:
+                current.pop(key)
+                original.pop(key)
         if current != original:
             raise ValueError(f'Prepared reuse requires matching {section} settings')
     if config.model.context_length != previous.model.context_length:

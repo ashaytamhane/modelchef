@@ -113,6 +113,12 @@ def test_offline_starter_workflow_trains_and_exports(tmp_path, monkeypatch, caps
     for stage in workflow['stages']:
         recipe = yaml.safe_load((root / stage['recipe']).read_text())
         recipe['output_dir'] = str(tmp_path / 'training')
+        recipe.setdefault('tokenizer', {})['packing'] = (
+            'document' if recipe.get('stage', {}).get('kind', 'pretrain') == 'pretrain'
+            else 'concatenate')
+        if recipe['tokenizer']['packing'] == 'document':
+            recipe['data']['storage'] = 'disk'
+            recipe.setdefault('model', {})['context_length'] = 1024
         target = tmp_path / (stage['name'] + '.yaml')
         target.write_text(yaml.safe_dump(recipe))
         stage['recipe'] = str(target)
@@ -123,6 +129,8 @@ def test_offline_starter_workflow_trains_and_exports(tmp_path, monkeypatch, caps
     assert result['status'] == 'completed'
     assert all(stage['checkpoint_recovery'] == 'passed' for stage in result['stages'].values())
     assert (Path(result['export_dir']) / 'model.safetensors').is_file()
+    final_config = json.loads((Path(result['final_run']) / 'config.json').read_text())
+    assert final_config['tokenizer']['packing'] == 'concatenate'
     chat(Path(result['final_run']), prompt='A model', max_tokens=2)
     assert 'Loaded checkpoint' in capsys.readouterr().out
 

@@ -111,6 +111,7 @@
           "enum": [
             "text",
             "messages",
+            "thread_turn",
             "persona_turn",
             "empathy_turn",
             "measurements",
@@ -118,6 +119,36 @@
           ],
           "title": "Adapter",
           "type": "string"
+        },
+        "thread_fields": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Thread Fields",
+          "type": "object"
+        },
+        "thread_roles": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Thread Roles",
+          "type": "object"
+        },
+        "thread_language": {
+          "default": "en",
+          "title": "Thread Language",
+          "type": "string"
+        },
+        "thread_max_rank": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Thread Max Rank",
+          "type": "integer"
+        },
+        "thread_human_only": {
+          "default": true,
+          "title": "Thread Human Only",
+          "type": "boolean"
         },
         "reasoning_fields": {
           "additionalProperties": {

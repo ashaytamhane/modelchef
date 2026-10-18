@@ -43,6 +43,20 @@ def test_settlement_keeps_conservative_spend_and_requires_verified_cleanup(tmp_p
     ledger.db.close()
 
 
+def test_active_reservation_resize_keeps_overall_limit(tmp_path):
+    from modelchef.aws_runner import Ledger
+    ledger = Ledger(tmp_path / 'budget.sqlite')
+    ledger.reserve('prior', 'shared', 3, 20)
+    ledger.reserve('active', 'shared', 11, 20)
+    ledger.resize_reservation('active', 16.7, 20)
+    with pytest.raises(ValueError, match='Overall budget'):
+        ledger.resize_reservation('active', 18, 20)
+    assert ledger.db.execute("SELECT reserved FROM runs WHERE id='active'").fetchone()[0] == '16.7'
+    ledger.record('active', 'settled', {})
+    with pytest.raises(ValueError, match='active run'):
+        ledger.resize_reservation('active', 10, 20)
+
+
 @pytest.mark.parametrize('field,value', [('max_compute_hourly_usd', float('nan')),
     ('max_runtime_minutes', 0), ('gpu_count', 0), ('per_run_budget_usd', 0.1),
     ('total_budget_usd', 0.5), ('api_key', 'never-in-recipes')])

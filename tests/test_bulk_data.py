@@ -102,7 +102,8 @@ def test_redirect_does_not_forward_token_to_download_cdn():
         DownloadRedirect().redirect_request(request, None, 302, 'Found', {}, 'http://cdn.example/file')
 
 
-def test_bulk_reader_selects_rows_and_reuses_complete_snapshot(tmp_path, monkeypatch):
+@pytest.mark.parametrize('storage', ['memory', 'disk'])
+def test_bulk_reader_selects_rows_and_reuses_complete_snapshot(tmp_path, monkeypatch, storage):
     pa = pytest.importorskip('pyarrow')
     import pyarrow.parquet as pq
 
@@ -121,11 +122,11 @@ def test_bulk_reader_selects_rows_and_reuses_complete_snapshot(tmp_path, monkeyp
     monkeypatch.setattr('modelchef.bulk_data.build_opener', lambda *args: SimpleNamespace(
         open=lambda *args, **kw: calls.append('download') or io.BytesIO(payload)))
     config = RunConfig(data={'provider': 'hf_parquet', 'dataset': 'test/stories', 'subset': 'default',
-                            'offset': 2, 'max_documents': 3})
+                            'offset': 2, 'max_documents': 3, 'storage': storage})
     rows, manifest = acquire(config, tmp_path, lambda msg: None)
     assert [row['text'] for row in rows] == ['story 2', 'story 3', 'story 4']
     assert manifest['files'][0]['sha256']
-    assert acquire(config, tmp_path, lambda msg: None)[0] == rows
+    assert list(acquire(config, tmp_path, lambda msg: None)[0]) == list(rows)
     assert calls == ['download']
     config.data.max_download_bytes = 10
     with pytest.raises(ValueError, match='byte cap'):
@@ -137,3 +138,30 @@ def test_bulk_guest_dependencies_use_pipeline_extra():
     from modelchef.run_config import RunConfig
 
     assert 'pipeline' in guest_plan(RunConfig(data={'provider': 'hf_parquet'}))['extras']
+
+
+def test_bulk_disk_snapshot_streams_replays_and_rejects_corruption(tmp_path, monkeypatch):
+    from modelchef.corpus import acquire
+    from modelchef.disk_data import JsonlRows
+    from modelchef.run_config import RunConfig
+
+    calls = []
+    def streaming(config, cache, explain, row_sink=None):
+        assert row_sink is not None
+        calls.append('download')
+        for index in range(3):
+            row_sink({'text': f'story {index}', 'source_index': index})
+        return 3, 100, {'provider': 'hf_parquet', 'dataset': 'test/stories', 'files': []}
+    monkeypatch.setattr('modelchef.bulk_data.acquire_parquet', streaming)
+    config = RunConfig(data={'provider': 'hf_parquet', 'storage': 'disk',
+                            'dataset': 'test/stories', 'max_documents': 3})
+    config.validate_execution()
+    rows, info = acquire(config, tmp_path, lambda message: None)
+    assert isinstance(rows, JsonlRows)
+    assert [row['text'] for row in rows] == ['story 0', 'story 1', 'story 2']
+    replay, repeated_info = acquire(config, tmp_path, lambda message: None)
+    assert repeated_info == info and list(replay) == list(rows)
+    assert calls == ['download']
+    rows.path.write_text('corrupt')
+    with pytest.raises(ValueError, match='checksum changed'):
+        acquire(config, tmp_path, lambda message: None)

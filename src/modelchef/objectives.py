@@ -56,8 +56,10 @@ def prepare_structured(records, c, root):
     return splits, info
 
 
-def response_pair(prompt, response, tokenizer, context, prompt_format='user_assistant'):
+def response_pair(prompt, response, tokenizer, context, prompt_format='user_assistant', add_bos=False):
     prefix = tokenizer.encode(format_prompt(prompt, prompt_format), add_special_tokens=False).ids
+    if add_bos and (not prefix or prefix[0] != tokenizer.token_to_id('<bos>')):
+        prefix.insert(0, tokenizer.token_to_id('<bos>'))
     answer = tokenizer.encode(' ' + response, add_special_tokens=False).ids + [tokenizer.token_to_id('<eos>')]
     # Do not silently turn a partial response into a complete supervised example.
     if len(prefix) + len(answer) > context + 1:
@@ -77,7 +79,7 @@ def pack_structured(rows, tokenizer, c, token_limit, progress=None):
             'answer' if c.stage.kind == 'rlvr' else 'response']
         try:
             pairs = [response_pair(row['prompt'], row[field], tokenizer, c.model.context_length,
-                                   c.stage.prompt_format) for field in fields]
+                                   c.stage.prompt_format, add_bos=c.tokenizer.add_bos) for field in fields]
         except ValueError as error:
             if c.stage.oversized_policy != 'skip' or not str(error).startswith('Structured example exceeds context'):
                 raise
@@ -195,7 +197,7 @@ def evaluate_stage(model, reference, blocks, tokenizer, c, device, amp):
         return None
     model.eval()
     count = (len(blocks[0]) if c.evaluation.batches == 'all' else
-             min(len(blocks[0]), c.evaluation.batches * c.training.micro_batch_size))
+             min(len(blocks[0]), c.evaluation.batches * (c.evaluation.batch_size or c.training.micro_batch_size)))
     parts = [part[:count].to(device) for part in blocks]
     with torch.no_grad(), amp():
         if c.stage.kind == 'dpo':

@@ -102,6 +102,22 @@ class Ledger:
             self.db.execute("UPDATE runs SET state=?,report=? WHERE id=?",
                             (state, json.dumps(report, default=str), run_id))
 
+    def resize_reservation(self, run_id, reserve, total):
+        """Apply a newly authorized ceiling atomically to an existing active run."""
+        reserve, total = Decimal(str(reserve)), Decimal(str(total))
+        if not reserve.is_finite() or not total.is_finite() or reserve <= 0 or total <= 0:
+            raise ValueError('Budget limits must be positive and finite')
+        with self.db:
+            self.db.execute('BEGIN IMMEDIATE')
+            row = self.db.execute('SELECT scope,state FROM runs WHERE id=?', (run_id,)).fetchone()
+            if not row or row[1] not in {'reserved', 'running'}:
+                raise ValueError('Only active run reservations can be resized')
+            used = sum((Decimal(value[0]) for value in self.db.execute(
+                'SELECT reserved FROM runs WHERE scope=? AND id!=?', (row[0], run_id))), Decimal(0))
+            if used + reserve > total:
+                raise ValueError('Overall budget exhausted or reserved by another run')
+            self.db.execute('UPDATE runs SET reserved=? WHERE id=?', (str(reserve), run_id))
+
     def release_unlaunched(self, run_id):
         """Return budget only after the report proves EC2 never created an instance."""
         with self.db:

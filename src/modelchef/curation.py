@@ -33,7 +33,12 @@ class Ingredient(Section):
     max_rows: int = Field(default=64, ge=3, le=10000000)
     collection: str = Field(pattern=r'^[a-zA-Z0-9_-]+$')
     pretraining_collection: str | None = Field(default=None, pattern=r'^[a-zA-Z0-9_-]+$')
-    adapter: Literal['text', 'messages', 'persona_turn', 'empathy_turn', 'measurements', 'reasoning_fields']
+    adapter: Literal['text', 'messages', 'thread_turn', 'persona_turn', 'empathy_turn', 'measurements', 'reasoning_fields']
+    thread_fields: dict[str, str] = Field(default_factory=dict)
+    thread_roles: dict[str, str] = Field(default_factory=dict)
+    thread_language: str = 'en'
+    thread_max_rank: int = Field(default=0, ge=0)
+    thread_human_only: bool = True
     reasoning_fields: dict[str, str] = Field(default_factory=dict)
     answer_extraction: Literal['none', 'last_boxed'] = 'none'
     exclude_sources: list[str] = Field(default_factory=list)
@@ -54,6 +59,9 @@ class Ingredient(Section):
 
     @model_validator(mode='after')
     def valid_source(self):
+        if self.adapter == 'thread_turn' and not {'id', 'parent', 'role', 'text', 'language',
+                'rank', 'synthetic', 'deleted', 'review'}.issubset(self.thread_fields):
+            raise ValueError('Thread adapter requires explicit identity, content and quality field mappings')
         if self.answer_extraction != 'none' and self.adapter != 'reasoning_fields':
             raise ValueError('Answer extraction requires a reasoning-fields adapter')
         if self.adapter == 'reasoning_fields' and set(self.reasoning_fields) != {'prompt', 'reasoning', 'answer'}:
@@ -96,9 +104,12 @@ def transcript(messages, system='', system_prefix=''):
     return '\n'.join(parts)
 
 
-def adapt_rows(rows, source):
+def adapt_rows(rows, source, context=None):
     """Produce complete examples; reject oversized traces instead of clipping targets."""
     result, skipped, groups = [], Counter(), set()
+    if source.adapter == 'thread_turn':
+        from modelchef.dialogue_threads import thread_pairs
+        return thread_pairs(rows, source, context)
     empathy = defaultdict(list)
     if source.adapter == 'empathy_turn':
         for entry in rows:

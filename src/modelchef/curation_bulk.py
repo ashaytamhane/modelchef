@@ -103,6 +103,7 @@ def curate_bulk(config, root, progress):
                 cache = folder / 'parquet' / source.name
                 cache.mkdir(parents=True, exist_ok=True)
                 used = 0
+                thread_context = {} if source.adapter == 'thread_turn' else None
                 with raw_path.open('w', encoding='utf-8') as raw:
                     for rows, used, parquet_manifest in parquet_rows(source, cache,
                             config.max_download_bytes - downloaded, config.timeout_seconds, progress):
@@ -114,7 +115,7 @@ def curate_bulk(config, root, progress):
                                 continue
                             raw.write(payload + '\n')
                             bounded_rows.append(row)
-                        converted, rejected = adapt_rows(bounded_rows, source)
+                        converted, rejected = adapt_rows(bounded_rows, source, thread_context)
                         count += len(rows)
                         skipped.update(rejected)
                         accepted += len(converted)

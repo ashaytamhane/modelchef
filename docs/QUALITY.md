@@ -121,3 +121,5 @@ patching, monitoring, backups and availability requirements described in SECURIT
 No software change alone establishes a 10/10 model-quality, scalability or production
 rating. Those dimensions require the acceptance evidence above; scores should follow
 the evidence rather than serve as a completion switch.
+
+When both `processing.exact_dedup` and `processing.near_dedup` are false, disk processing streams filtered documents directly to split JSONL files without SQLite. Split membership remains seeded; rows retain input order within each split. Immutable disk snapshots use hard links on the same filesystem and byte copies otherwise.

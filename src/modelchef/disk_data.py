@@ -1,6 +1,8 @@
 """Bounded JSONL shards, SQLite deduplication and read-only mapped training tokens."""
 import hashlib
 import json
+import os
+import shutil
 import sqlite3
 import uuid
 from collections import Counter
@@ -25,6 +27,8 @@ class JsonlRows:
 
 def acquire_disk(config, root, explain):
     c = config.data
+    if c.provider == 'hf_parquet':
+        return _acquire_parquet_disk(config, root, explain)
     paths = [(root / name).resolve() for name in (c.local_paths or [c.local_path])]
     identity = digest(json.dumps(c.model_dump(), sort_keys=True).encode())
     folder = root / 'data/cache' / identity
@@ -74,6 +78,41 @@ def acquire_disk(config, root, explain):
     return JsonlRows(raw, count), info
 
 
+def _acquire_parquet_disk(config, root, explain):
+    """Stream bulk rows to an immutable snapshot without retaining corpus text in RAM."""
+    from modelchef.bulk_data import acquire_parquet
+    c = config.data
+    identity = digest(json.dumps(c.model_dump(), sort_keys=True).encode())
+    folder = root / 'data/cache' / identity
+    folder.mkdir(parents=True, exist_ok=True)
+    manifest = folder / 'source.json'
+    if manifest.exists():
+        info = json.loads(manifest.read_text())
+        raw = folder / (info['raw_sha256'] + '.jsonl')
+        if not raw.exists() or file_digest(raw) != info['raw_sha256']:
+            raise ValueError('Cached raw snapshot checksum changed; refuse silent reuse')
+        return JsonlRows(raw, info['documents']), info
+    temporary = folder / ('raw-' + uuid.uuid4().hex + '.tmp')
+    checksum = hashlib.sha256()
+    try:
+        with temporary.open('wb') as target:
+            def sink(row):
+                payload = (json.dumps(row, ensure_ascii=False) + '\n').encode()
+                target.write(payload)
+                checksum.update(payload)
+            count, downloaded, origin = acquire_parquet(c, folder, explain, row_sink=sink)
+        raw = folder / (checksum.hexdigest() + '.jsonl')
+        temporary.replace(raw)
+        info = {'schema_version': 1, **origin, 'storage': 'disk', 'documents': count,
+                'response_bytes': downloaded, 'raw_sha256': checksum.hexdigest()}
+        pending = manifest.with_suffix('.tmp')
+        pending.write_text(json.dumps(info, indent=2), encoding='utf-8')
+        pending.replace(manifest)
+        return JsonlRows(raw, count), info
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _sketch(text, words):
     """64 deterministic minhash permutations in 16 bands; candidates get exact Jaccard."""
     import numpy as np
@@ -90,24 +129,108 @@ def _sketch(text, words):
     return shingles, [signatures[i:i + 4].tobytes() for i in range(0, 64, 4)]
 
 
+def snapshot_rows(rows, destination, ensure_ascii=False):
+    """Reuse immutable disk rows without duplicating bytes on the same filesystem."""
+    if isinstance(rows, JsonlRows):
+        try:
+            os.link(rows.path, destination)
+        except OSError:
+            shutil.copyfile(rows.path, destination)
+        return
+    with destination.open('w', encoding='utf-8', newline='\n') as target:
+        for row in rows:
+            target.write(json.dumps(row, ensure_ascii=ensure_ascii) + '\n')
+
+
+def _process_streaming(records, config, root, benchmark):
+    """Filter and split in bounded memory when no duplicate index is requested."""
+    from contextlib import ExitStack
+    c = config.processing
+    folder = root / 'data/cache/processed' / uuid.uuid4().hex
+    folder.mkdir(parents=True)
+    counts, sizes, smallest = Counter(), Counter(), {}
+    names = ['train', 'validation', 'test']
+    grouped = False
+    with ExitStack() as stack:
+        outputs = {name: stack.enter_context((folder / (name + '.jsonl')).open(
+            'w', encoding='utf-8')) for name in names}
+        for cleaned in cleaned_records(records, config, benchmark, counts):
+            if cleaned is None:
+                continue
+            ordering = digest(f'{config.training.seed}:'.encode() + cleaned['text'].encode())
+            fraction = int(ordering[:16], 16) / 2**64
+            name = ('validation' if fraction < c.validation_fraction else
+                    'test' if fraction < c.validation_fraction + c.test_fraction else 'train')
+            if 'split_group' in cleaned:
+                grouped = True
+                name = group_split(cleaned['split_group'], config)
+            outputs[name].write(json.dumps(cleaned) + '\n')
+            sizes[name] += 1
+            counts['accepted'] += 1
+            if name not in smallest or ordering < smallest[name][0]:
+                smallest[name] = (ordering, cleaned)
+            if counts['input'] % 10000 == 0:
+                print(f"Streaming preparation: {counts['input']} input, "
+                      f"{counts['accepted']} accepted documents", flush=True)
+    if counts['accepted'] < 3:
+        raise ValueError(f'Too few documents after processing: {dict(counts)}')
+    if grouped and any(not sizes[name] for name in names):
+        raise ValueError('Grouped data has an empty split; acquire more independent groups')
+    for name in names:
+        if sizes[name]:
+            continue
+        donor = max(sizes, key=sizes.get)
+        selected = smallest[donor][1]
+        path = folder / (donor + '.jsonl')
+        temporary = path.with_suffix('.tmp')
+        next_smallest = None
+        removed = False
+        with path.open(encoding='utf-8') as source, temporary.open('w', encoding='utf-8') as target:
+            for line in source:
+                row = json.loads(line)
+                if not removed and row == selected:
+                    removed = True
+                    continue
+                target.write(line)
+                order = digest(f'{config.training.seed}:'.encode() + row['text'].encode())
+                if next_smallest is None or order < next_smallest[0]:
+                    next_smallest = (order, row)
+        temporary.replace(path)
+        (folder / (name + '.jsonl')).write_text(json.dumps(selected) + '\n', encoding='utf-8')
+        sizes[donor] -= 1
+        sizes[name] = 1
+        smallest[donor] = next_smallest
+    return {name: JsonlRows(folder / (name + '.jsonl'), sizes[name]) for name in names}, {
+        'counts': dict(counts), 'split_documents': {name: sizes[name] for name in names},
+        'split_policy': 'split_group-disjoint' if grouped else 'document-hash',
+        'decontamination': 'configured' if benchmark else 'not_configured',
+        'storage': 'streaming/jsonl', 'ordering': 'input order within each split',
+        'limitations': 'Deduplication disabled. Regex PII and n-gram decontamination are heuristics.'}
+
+
 def process_disk(records, config, root):
     c = config.processing
     benchmark = set()
     for path in c.benchmark_files:
         benchmark |= ngrams((root / path).read_text(encoding='utf-8'),
                             c.decontamination_ngram_words)
+    if not c.exact_dedup and not c.near_dedup:
+        return _process_streaming(records, config, root, benchmark)
     folder = root / 'data/cache/processed' / uuid.uuid4().hex
     folder.mkdir(parents=True)
     counts = Counter()
     grouped = False
     connection = sqlite3.connect(folder / 'dedup.sqlite')
     try:
+        # SQLite's default ~2 MiB cache thrashes on corpus-scale indexes.
+        # Keep a bounded 64 MiB page cache without weakening journaling.
+        connection.execute('PRAGMA cache_size=-65536')
         connection.executescript('''
             CREATE TABLE documents (id INTEGER PRIMARY KEY, fingerprint TEXT, text TEXT,
                                     source_index INTEGER, split TEXT, ordering TEXT, split_group TEXT);
             CREATE INDEX fingerprints ON documents(fingerprint);
             CREATE TABLE bands (band INTEGER, signature BLOB, document INTEGER);
-            CREATE INDEX bucket ON bands(band, signature);
+            CREATE INDEX bucket ON bands(band, signature, document);
         ''')
         for cleaned in cleaned_records(records, config, benchmark, counts):
             if cleaned is None:
@@ -124,8 +247,8 @@ def process_disk(records, config, root):
                 clauses = ' OR '.join('(b.band=? AND b.signature=?)' for _ in bands)
                 params = [value for i, signature in enumerate(bands) for value in (i, signature)]
                 candidates = connection.execute(
-                    'SELECT DISTINCT d.text FROM documents d JOIN bands b ON d.id=b.document WHERE ' +
-                    clauses, params)
+                    'SELECT text FROM documents WHERE id IN '
+                    '(SELECT DISTINCT b.document FROM bands b WHERE ' + clauses + ')', params)
                 for (previous,) in candidates:
                     other = ngrams(previous, c.dedup_ngram_words)
                     if len(shingles & other) / len(shingles | other) >= c.near_dedup_jaccard:

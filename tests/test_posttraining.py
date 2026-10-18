@@ -72,6 +72,18 @@ def test_structured_token_budget_counts_the_actual_sequence_once():
         pack_structured([row], tokenizer, config, size - 1)
 
 
+def test_structured_bos_is_context_and_not_a_response_target():
+    from tokenizers import Tokenizer, models, pre_tokenizers
+
+    from modelchef.objectives import response_pair
+    tokenizer = Tokenizer(models.WordLevel({'<unk>': 0, '<bos>': 1, '<pad>': 2,
+        '<eos>': 3, 'User': 4, ':': 5, 'Assistant': 6, 'Hello': 7, 'Hi': 8}, unk_token='<unk>'))
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    x, y = response_pair('Hello', 'Hi', tokenizer, 16, add_bos=True)
+    assert x[0] == 1 and y[0] == -100
+    assert [value for value in y if value != -100] == [8, 3]
+
+
 def test_dpo_accuracy_uses_reference_adjusted_rewards(monkeypatch):
     from contextlib import nullcontext
 

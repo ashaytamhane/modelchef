@@ -16,7 +16,7 @@ from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
 from modelchef.benchmarks import acquire_benchmark, evaluate_choices, select_benchmark
 from modelchef.corpus import acquire, digest, file_digest, process
-from modelchef.disk_data import JsonlRows, load_blocks, pack_disk
+from modelchef.disk_data import JsonlRows, load_blocks, pack_disk, snapshot_rows
 from modelchef.engines import create_model, load_parent, load_tokenizer
 from modelchef.execution import check_custom_kernel, configure_execution, plugin_fingerprint
 from modelchef.hardware import detect_hardware, resolve_runtime
@@ -237,9 +237,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             raise ValueError('Run snapshot checksum changed')
     else:
         records, source = acquire(c, root, lambda message: n.say(message, detail=True))
-        with snapshot.open('w', encoding='utf-8', newline='\n') as output:
-            for row in records:
-                output.write(json.dumps(row, ensure_ascii=False) + '\n')
+        snapshot_rows(records, snapshot)
     if not (resume or prepared):
         (folder / "source-manifest.json").write_text(json.dumps(source, indent=2), encoding="utf-8")
 
@@ -288,9 +286,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                               process(records, processing_config, root))
     if not (resume or prepared):
         for name, rows in splits.items():
-            with (folder / f"{name}.jsonl").open("w", encoding="utf-8") as output:
-                for row in rows:
-                    output.write(json.dumps(row) + "\n")
+            snapshot_rows(rows, folder / f"{name}.jsonl", ensure_ascii=True)
         (folder / "processing.json").write_text(json.dumps(processing, indent=2), encoding="utf-8")
     n.say(f"Filter counts: {processing['counts']}; document splits: {processing['split_documents']}.")
     n.say(f"Benchmark decontamination: {processing['decontamination']}. "
@@ -309,7 +305,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         if c.model.peft.method == 'qlora':
             execution_fields |= {'pretrained_path', 'pretrained_config_sha256'}
         if c.model.model_dump(exclude=execution_fields) != parent_config.model.model_dump(
-                exclude=execution_fields) or c.tokenizer != parent_config.tokenizer:
+                exclude=execution_fields) or c.tokenizer.model_dump(exclude={'packing'}) != parent_config.tokenizer.model_dump(exclude={'packing'}):
             raise ValueError('Parent architecture/tokenizer settings must match; copy the parent recipe')
         tokenizer = load_tokenizer(parent_folder)
         parent_path = checkpoint_for(parent_folder)
@@ -435,6 +431,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     n.say(f"Parameters={parameters:,}; layers={c.model.layers}; width={c.model.hidden_size}; "
           f"attention heads={c.model.attention_heads}; KV heads={c.model.kv_heads}.")
     t = c.training
+    evaluation_batch_size = c.evaluation.batch_size or t.micro_batch_size
     report['execution'] = configure_execution(model, t, device)
     groups = [{"params": [p for p in model.parameters() if p.requires_grad and p.ndim >= 2],
                "weight_decay": t.weight_decay},
@@ -463,8 +460,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
 
     def save_checkpoint(index):
         path = checkpoints / f"step-{index:06d}.pt"
-        temp = path.with_suffix(".tmp")
-        torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
+        from modelchef.checkpointing import atomic_save
+        atomic_save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
                     "scaler": scaler.state_dict(), "step": index, "tokens_seen": consumed,
                     "skipped_optimizer_updates": skipped_updates,
                     "config_sha256": fingerprint, "data_sha256": data_hash,
@@ -472,8 +469,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                     "tokens_file_sha256": token_hash,
                     "sampler_rng": generator.get_state(),
                     "torch_rng": torch.get_rng_state(), "python_rng": random.getstate(),
-                    "cuda_rng": torch.cuda.get_rng_state_all() if device == "cuda" else []}, temp)
-        temp.replace(path)
+                    "cuda_rng": torch.cuda.get_rng_state_all() if device == "cuda" else []}, path)
         report['checkpoint'] = str(path)
         n.say(f"Checkpoint saved at step {index}: {path.name}", detail=True)
         from modelchef.recovery import checkpoint_to_s3
@@ -493,6 +489,10 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         report.update(status='prepared', checkpoint=str(Path(resume).resolve() if resume else save_checkpoint(step)),
                       parameters=parameters, stage=c.stage.kind, token_counts=token_counts)
         (folder / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+        # In-backward hooks retain optimizer/parameter references beyond this
+        # preparation call unless detached before returning to its controller.
+        for handle in getattr(optimizer, 'handles', []):
+            handle.remove()
         return report
 
     if (os.environ.get('MODELCHEF_RECOVERY_S3_URI') or t.checkpoint_at_start) and not resume:
@@ -513,7 +513,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             'A short test validates execution; it does not establish model quality.')
     evaluation_blocks = {name: parts[:2] for name, parts in blocks.items()}
     baseline = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
-                        t.micro_batch_size, device, amp)
+                        evaluation_batch_size, device, amp)
     n.say(f"Initial validation loss={baseline['loss']:.4f}; perplexity={baseline['perplexity']:.2f}.")
     if device == 'cuda':
         torch.cuda.synchronize()
@@ -544,7 +544,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         for _ in range(t.gradient_accumulation):
             indices = torch.randint(len(blocks["train"][0]), (t.micro_batch_size,), generator=generator)
             parts = tuple(part[indices].to(device) for part in blocks["train"])
-            if c.tokenizer.packing == 'document':
+            if c.tokenizer.packing == 'document' or c.stage.kind in {'sft', 'distill'}:
                 parts = trim_padded_pair(*parts)
             with amp():
                 loss, objective_metrics = objective(model, parts, c, reference, tokenizer)
@@ -587,7 +587,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         metrics.update(auxiliary)
         if step % t.evaluate_every == 0 or step == t.steps:
             metrics["validation"] = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
-                                              t.micro_batch_size, device, amp)
+                                              evaluation_batch_size, device, amp)
         with (folder / "metrics.jsonl").open("a", encoding="utf-8") as output:
             output.write(json.dumps(metrics) + "\n")
         if gate and step - initial_step == gate.probe_steps:
@@ -638,13 +638,17 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         'peak_cuda_reserved_bytes': torch.cuda.max_memory_reserved() if device == 'cuda' else None,
         'scope': 'Training loop, including loop compilation, evaluations and checkpoints; excludes setup/initial validation.'}
     validation = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
-                          t.micro_batch_size, device, amp)
-    test = evaluate(model, evaluation_blocks["test"], c.evaluation.batches, t.micro_batch_size, device, amp)
+                          evaluation_batch_size, device, amp)
+    test = (evaluate(model, evaluation_blocks["test"], c.evaluation.batches,
+                     evaluation_batch_size, device, amp) if c.evaluation.evaluate_test else None)
     report['stage_evaluation'] = {
-        'validation': evaluate_stage(model, reference, blocks['validation'], tokenizer, c, device, amp),
-        'test': evaluate_stage(model, reference, blocks['test'], tokenizer, c, device, amp)}
+        'validation': evaluate_stage(model, reference, blocks['validation'], tokenizer, c, device, amp)}
+    if c.evaluation.evaluate_test:
+        report['stage_evaluation']['test'] = evaluate_stage(
+            model, reference, blocks['test'], tokenizer, c, device, amp)
+    report['test_evaluation'] = 'evaluated' if c.evaluation.evaluate_test else 'withheld'
     model.eval()
-    probe = blocks["test"][0][:1].to(device)
+    probe = blocks["validation"][0][:1].to(device)
     tolerance = 0.03 if dtype == torch.bfloat16 else 0.003 if dtype == torch.float16 else 1e-5
     with torch.no_grad(), amp():
         expected = model(probe).detach()
@@ -671,8 +675,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         if not torch.allclose(expected, model(probe), rtol=tolerance, atol=tolerance):
             raise RuntimeError("Reloaded checkpoint logits differ")
     del expected
-    n.say(f"Validation loss={validation['loss']:.4f}, test loss={test['loss']:.4f}; "
-          "checkpoint reload verified.")
+    test_message = f"test loss={test['loss']:.4f}" if test is not None else "test evaluation withheld"
+    n.say(f"Validation loss={validation['loss']:.4f}, {test_message}; checkpoint reload verified.")
     benchmark_scores = (evaluate_choices(model, tokenizer, examples, device,
                                         c.model.context_length, amp) if examples else None)
     if benchmark_scores:

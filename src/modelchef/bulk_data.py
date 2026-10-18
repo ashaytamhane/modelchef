@@ -123,7 +123,7 @@ def _download_ranges(url, path, size, timeout, headers, explain):
     return saved
 
 
-def acquire_parquet(config, cache, explain):
+def acquire_parquet(config, cache, explain, row_sink=None):
     import pyarrow.parquet as pq
 
     headers = viewer_headers()
@@ -142,7 +142,7 @@ def acquire_parquet(config, cache, explain):
         raise ValueError('No Parquet files available for the selected subset/split; conversion may be pending')
     cache.mkdir(parents=True, exist_ok=True)
     records, manifests = [], []
-    used, index = len(payload), 0
+    used, index, selected = len(payload), 0, 0
     for item in files:
         url, size = item['url'], item['size']
         parsed = urlparse(url)
@@ -166,16 +166,21 @@ def acquire_parquet(config, cache, explain):
                             raise ValueError('Parquet text_field must contain strings')
                         if len(text.encode()) > config.max_record_bytes:
                             raise ValueError('Parquet text record exceeds max_record_bytes')
-                        records.append({'text': text, 'source_index': index})
+                        record = {'text': text, 'source_index': index}
+                        if row_sink is None:
+                            records.append(record)
+                        else:
+                            row_sink(record)
+                        selected += 1
                     index += 1
-                    if len(records) >= config.max_documents:
+                    if selected >= config.max_documents:
                         break
-                if len(records) >= config.max_documents:
+                if selected >= config.max_documents:
                     break
-        explain(f'Selected {len(records)} rows from bulk files; {used:,} / {config.max_download_bytes:,} source bytes.')
-        if len(records) >= config.max_documents:
+        explain(f'Selected {selected} rows from bulk files; {used:,} / {config.max_download_bytes:,} source bytes.')
+        if selected >= config.max_documents:
             break
-    return records, used, {'provider': 'hf_parquet', 'dataset': config.dataset,
+    return records if row_sink is None else selected, used, {'provider': 'hf_parquet', 'dataset': config.dataset,
                           'subset': config.subset, 'split': config.split, 'offset': config.offset,
                           'files': manifests, 'partial_conversion': metadata.get('partial', False),
                           'dataset_card': f'https://huggingface.co/datasets/{config.dataset}',

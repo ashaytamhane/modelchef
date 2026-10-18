@@ -148,6 +148,8 @@ class Training(Section):
 
 
 class Evaluation(Section):
+    batch_size: int | None = Field(default=None, gt=0)
+    evaluate_test: bool = True
     benchmark: Literal["auto", "none", "hellaswag", "financial_phrasebank"] = "auto"
     benchmark_examples: int = Field(default=8, ge=1, le=100)
     benchmark_max_download_bytes: int = Field(default=2000000, gt=0)
@@ -244,8 +246,8 @@ class RunConfig(Section):
             raise ValueError('Document packing requires disk-based next-token training')
         if self.data.storage == 'disk' and self.stage.kind not in {'pretrain', 'midtrain'}:
             raise ValueError('Disk-backed storage currently supports pretrain and midtrain')
-        if self.data.storage == 'disk' and self.data.provider != 'local_jsonl':
-            raise ValueError('Disk-backed acquisition requires local JSONL shards')
+        if self.data.storage == 'disk' and self.data.provider not in {'local_jsonl', 'hf_parquet'}:
+            raise ValueError('Disk-backed acquisition requires local JSONL or bulk Parquet')
         if self.data.local_path and self.data.local_paths:
             raise ValueError('Choose local_path or local_paths, not both')
         if self.data.domain != "general" and not self.data.domain_keywords:

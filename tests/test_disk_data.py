@@ -83,3 +83,63 @@ def test_disk_pipeline_exact_resume_and_token_tamper(tmp_path):
         stream.write(b'xxxx')
     with pytest.raises(ValueError, match='checksum'):
         load_blocks(folder)
+
+
+def test_near_candidate_ids_match_legacy_text_query():
+    """Multiple matching bands fetch each candidate once without changing matches."""
+    import sqlite3
+    connection = sqlite3.connect(':memory:')
+    connection.executescript('CREATE TABLE documents(id INTEGER PRIMARY KEY,text TEXT);'
+        'CREATE TABLE bands(band INTEGER,signature BLOB,document INTEGER);'
+        'CREATE INDEX bucket ON bands(band,signature,document);')
+    connection.executemany('INSERT INTO documents VALUES(?,?)', [(1,'alpha'),(2,'beta'),(3,'gamma')])
+    connection.executemany('INSERT INTO bands VALUES(?,?,?)',
+        [(0,b'a',1),(1,b'b',1),(0,b'a',2),(1,b'other',3)])
+    clauses='(b.band=? AND b.signature=?) OR (b.band=? AND b.signature=?)'
+    params=(0,b'a',1,b'b')
+    original={row[0] for row in connection.execute(
+        'SELECT DISTINCT d.text FROM documents d JOIN bands b ON d.id=b.document WHERE '+clauses,params)}
+    optimized=list(connection.execute('SELECT text FROM documents WHERE id IN '
+        '(SELECT DISTINCT b.document FROM bands b WHERE '+clauses+')',params))
+    assert {row[0] for row in optimized} == original == {'alpha','beta'}
+    assert len(optimized)==2
+    connection.close()
+
+
+def test_disabled_dedup_streams_without_sql_and_retains_duplicates(tmp_path, monkeypatch):
+    import modelchef.disk_data as disk
+    config = recipe(shards(tmp_path))
+    config.processing.exact_dedup = False
+    config.processing.near_dedup = False
+    records = [{'text': 'Topic reading and learning facts. ' * 4,
+                'source_index': i, 'split_group': f'group-{i}'} for i in range(120)]
+    records.append(dict(records[0], source_index=120))
+    monkeypatch.setattr(disk.sqlite3, 'connect', lambda *a, **k: pytest.fail('SQL used with dedup disabled'))
+    first, report = process(records, config, tmp_path)
+    second, _ = process(records, config, tmp_path)
+    assert report['storage'] == 'streaming/jsonl'
+    assert report['counts']['accepted'] == 121
+    assert {k: list(v) for k, v in first.items()} == {k: list(v) for k, v in second.items()}
+    from modelchef.corpus import group_split
+    for name, rows in first.items():
+        assert all(group_split(row['split_group'], config) == name for row in rows)
+    assert not list(tmp_path.rglob('dedup.sqlite'))
+
+
+def test_streaming_tiny_ungrouped_keeps_all_splits(tmp_path):
+    config = recipe(shards(tmp_path))
+    config.processing.exact_dedup = False
+    config.processing.near_dedup = False
+    rows = [{'text': 'Students learn reading skills. ' * 4, 'source_index': i} for i in range(3)]
+    splits, report = process(rows, config, tmp_path)
+    assert all(len(part) == 1 for part in splits.values())
+    assert report['counts']['accepted'] == 3
+
+
+def test_disk_snapshot_is_byte_identical(tmp_path):
+    from modelchef.disk_data import JsonlRows, snapshot_rows
+    original = tmp_path / 'original.jsonl'
+    original.write_bytes(b'{"text":"hello", "source_index":0}\n')
+    output = tmp_path / 'snapshot.jsonl'
+    snapshot_rows(JsonlRows(original, 1), output)
+    assert output.read_bytes() == original.read_bytes()

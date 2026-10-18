@@ -1305,6 +1305,8 @@ training:  # OPTIONAL: defaults are supplied when omitted.
   log_every: 5  # OPTIONAL: defaults are supplied when omitted.
   max_runtime_seconds: 600  # OPTIONAL: Checked between optimization steps; not an acquisition/evaluation deadline.
 evaluation:  # OPTIONAL: defaults are supplied when omitted.
+  batch_size: null  # OPTIONAL: Evaluation microbatch; null uses training size. Fix this for comparable tuning metrics.
+  evaluate_test: true  # OPTIONAL: Set false during recipe tuning; reserve test scoring for final assessment.
   benchmark: auto  # CONDITIONAL: auto | none | hellaswag | financial_phrasebank.
   benchmark_examples: 8  # OPTIONAL: 1..100; bounded custom protocol, not a full standard suite.
   benchmark_max_download_bytes: 2000000  # OPTIONAL: Separate benchmark payload-byte cap.
@@ -1470,6 +1472,22 @@ python -m modelchef.cli evaluate-standard PATH_TO_EXPORT --tasks hellaswag piqa 
 # Explicit execution can download benchmark datasets.
 python -m modelchef.cli evaluate-standard PATH_TO_EXPORT --tasks hellaswag piqa arc_easy --limit 100 --run
 ```
+
+You can also preview evaluation of an explicitly selected checkpoint from an unfinished
+or completed ModelChef run, without first changing its existing export:
+
+```bash
+python -m modelchef.cli evaluate-standard PATH_TO_RUN --checkpoint step-000010.pt --device cpu --cpu-threads 4 --batch-size 1 --tasks arc_easy piqa --limit 20 --output artifacts/evaluation-checkpoint-10
+# Add --run to export a separate inference copy under OUTPUT/model and execute the harness.
+```
+
+The preview creates no export and downloads no task data. Execution requires the optional
+evaluation dependencies and a fresh output/model directory; it never updates checkpoint
+weights or optimizer state. CPU thread limits apply to the export and evaluation subprocesses.
+`--limit` is per task. Small subsets are development diagnostics, not official CORE scores;
+CORE requires a pinned complete task suite and matching scoring protocol. Keep evaluation
+data separate from training and tokenizer inputs. Results used for tuning are development
+evidence, not an untouched final test. No model upload or external judge is needed.
 
 The default command only prints a plan. `--limit` caps scored examples, **not dataset download bytes**; obtain approval for large datasets before executing. The harness is an optional external integration: full suite execution and real GPT-2/Pythia/SmolLM2 comparisons have not been run in the bounded local validation. Finance selection in the built-in pipeline uses FinancialPhraseBank; choose additional harness tasks explicitly when needed.
 
