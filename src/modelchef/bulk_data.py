@@ -1,5 +1,6 @@
 """Capped, cached Parquet-file acquisition for larger public corpus samples."""
 import json
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -143,45 +144,63 @@ def acquire_parquet(config, cache, explain, row_sink=None):
     cache.mkdir(parents=True, exist_ok=True)
     records, manifests = [], []
     used, index, selected = len(payload), 0, 0
-    for item in files:
-        url, size = item['url'], item['size']
-        parsed = urlparse(url)
-        prefix = '/datasets/' + quote(config.dataset, safe='/') + '/resolve/'
-        if parsed.scheme != 'https' or parsed.hostname != 'huggingface.co' or not parsed.path.startswith(prefix):
-            raise ValueError('Unexpected Parquet download URL; only selected Hugging Face dataset files are allowed')
-        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
-            raise ValueError('Parquet metadata requires a positive file size')
-        if used + size > config.max_download_bytes:
-            raise ValueError('Next full Parquet file exceeds max_download_bytes; increase the approved cap or use a smaller local shard')
-        path = cache / (digest(url.encode()) + '.parquet')
-        manifests.append(download_file(url, path, size, config.timeout_seconds, headers, explain))
-        used += size
-        with pq.ParquetFile(path) as parquet:
-            if config.text_field not in parquet.schema_arrow.names:
-                raise ValueError('Parquet file is missing the configured text_field')
-            for batch in parquet.iter_batches(batch_size=128, columns=[config.text_field]):
-                for text in batch.column(0).to_pylist():
-                    if index >= config.offset:
-                        if not isinstance(text, str):
-                            raise ValueError('Parquet text_field must contain strings')
-                        if len(text.encode()) > config.max_record_bytes:
-                            raise ValueError('Parquet text record exceeds max_record_bytes')
-                        record = {'text': text, 'source_index': index}
-                        if row_sink is None:
-                            records.append(record)
-                        else:
-                            row_sink(record)
-                        selected += 1
-                    index += 1
+    # Only the next required file is prefetched. Parsing and transfer overlap;
+    # row order, approved byte accounting and the existing verified cache remain unchanged.
+    pending = None
+    with ThreadPoolExecutor(max_workers=1) as downloads:
+        for position, item in enumerate(files):
+            path, saved, size = (pending.result() if pending is not None else
+                _selected_parquet(item, config, cache, used, headers, explain))
+            pending = None
+            manifests.append(saved)
+            used += size
+            with pq.ParquetFile(path) as parquet:
+                if config.text_field not in parquet.schema_arrow.names:
+                    raise ValueError('Parquet file is missing the configured text_field')
+                # Metadata proves that the row cap cannot be met in this file.
+                # Do not download unneeded files merely because they are listed.
+                if (position + 1 < len(files) and
+                        index + parquet.metadata.num_rows < config.offset + config.max_documents):
+                    pending = downloads.submit(_selected_parquet, files[position + 1], config,
+                                               cache, used, headers, explain)
+                for batch in parquet.iter_batches(batch_size=128, columns=[config.text_field]):
+                    for text in batch.column(0).to_pylist():
+                        if index >= config.offset:
+                            if not isinstance(text, str):
+                                raise ValueError('Parquet text_field must contain strings')
+                            if len(text.encode()) > config.max_record_bytes:
+                                raise ValueError('Parquet text record exceeds max_record_bytes')
+                            record = {'text': text, 'source_index': index}
+                            if row_sink is None:
+                                records.append(record)
+                            else:
+                                row_sink(record)
+                            selected += 1
+                        index += 1
+                        if selected >= config.max_documents:
+                            break
                     if selected >= config.max_documents:
                         break
-                if selected >= config.max_documents:
-                    break
-        explain(f'Selected {selected} rows from bulk files; {used:,} / {config.max_download_bytes:,} source bytes.')
-        if selected >= config.max_documents:
-            break
+            explain(f'Selected {selected} rows from bulk files; {used:,} / {config.max_download_bytes:,} source bytes.')
+            if selected >= config.max_documents:
+                break
     return records if row_sink is None else selected, used, {'provider': 'hf_parquet', 'dataset': config.dataset,
                           'subset': config.subset, 'split': config.split, 'offset': config.offset,
                           'files': manifests, 'partial_conversion': metadata.get('partial', False),
                           'dataset_card': f'https://huggingface.co/datasets/{config.dataset}',
                           'revision': None, 'revision_note': 'Replay pins cached file and raw snapshot SHA256; conversion metadata is mutable.'}
+
+
+def _selected_parquet(item, config, cache, used, headers, explain):
+    url, size = item['url'], item['size']
+    parsed = urlparse(url)
+    prefix = '/datasets/' + quote(config.dataset, safe='/') + '/resolve/'
+    if parsed.scheme != 'https' or parsed.hostname != 'huggingface.co' or not parsed.path.startswith(prefix):
+        raise ValueError('Unexpected Parquet download URL; only selected Hugging Face dataset files are allowed')
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        raise ValueError('Parquet metadata requires a positive file size')
+    if used + size > config.max_download_bytes:
+        raise ValueError('Next full Parquet file exceeds max_download_bytes; increase the approved cap or use a smaller local shard')
+    path = cache / (digest(url.encode()) + '.parquet')
+    saved = download_file(url, path, size, config.timeout_seconds, headers, explain)
+    return path, saved, size

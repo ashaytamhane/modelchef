@@ -57,6 +57,17 @@ completion; persistent API hosting follows its explicit lifecycle instead.
 
 ## Boundaries
 
+### Bulk acquisition overlap
+
+Bulk Parquet acquisition overlaps the next required file's transfer with reading
+the current file. At most one next file is prefetched, and only when the current
+file's row count proves another file is needed to satisfy the offset/document cap.
+Rows and source manifests retain file order. URL checks, metadata-inclusive source
+byte caps, verified-cache reuse, and transfer retries still apply. Transfer failures
+propagate when the required file is consumed; an earlier parsing failure can leave
+the next verified file cached. This removes a serial transfer/reading barrier;
+it does not guarantee full CPU utilization or a corpus-scale throughput gain.
+
 ### Consecutive sentence cleanup
 
 Raw-text pretraining/midtraining preparation supports optional document-local cleanup:
