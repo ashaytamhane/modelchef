@@ -69,6 +69,10 @@ class RunpodHTTPError(RuntimeError):
         super().__init__(f'Runpod API {method} returned HTTP {status}')
 
 
+class RunpodSSHUnavailable(ValueError):
+    """Temporary control-plane absence of an owned Pod's SSH endpoint."""
+
+
 class RunpodAPI:
     """No embedded keys, no secret-bearing URLs, and no automatic POST retries."""
     def __init__(self, settings):
@@ -226,8 +230,22 @@ class RunpodRunner:
 
     def transport(self, pod, directory):
         endpoint = pod.get('ssh', {}).get('direct')
+        # Running Pods can briefly omit SSH metadata. Refresh this same identity;
+        # never interpret missing connection details as proof the worker failed.
+        if not endpoint and self.api is not None and pod.get('id'):
+            for _ in range(3):
+                if time.monotonic() >= getattr(self, 'deadline', float('inf')):
+                    break
+                time.sleep(2)
+                refreshed = self.api.request('GET', '/pods/'+quote(pod['id'], safe=''))
+                if refreshed.get('id') != pod['id'] or (pod.get('name') is not None
+                        and refreshed.get('name') != pod['name']):
+                    raise ValueError('Refreshed Pod identity differs from the owned Pod')
+                endpoint = refreshed.get('ssh', {}).get('direct')
+                if endpoint:
+                    break
         if not endpoint:
-            raise ValueError('Pod has no direct SSH connection yet')
+            raise RunpodSSHUnavailable('Pod has no direct SSH connection yet')
         host = str(ipaddress.ip_address(endpoint['host']))
         port = int(endpoint['port'])
         if not 1 <= port <= 65535:
@@ -245,7 +263,8 @@ class RunpodRunner:
         timeout = min(timeout, max(1, getattr(self, 'deadline', time.monotonic()+timeout)-time.monotonic()))
         host, port, user, options = self.transport(pod, directory)
         return subprocess.run(['ssh', *options, '-p', str(port), user+'@'+host, command],
-                              capture_output=True, text=True, timeout=timeout, check=True).stdout
+                              capture_output=True, text=True, encoding='utf-8', errors='replace',
+                              timeout=timeout, check=True).stdout
 
     def copy(self, pod, directory, local, remote, *, download=False, timeout=30):
         timeout = min(timeout, max(1, getattr(self, 'deadline', time.monotonic()+timeout)-time.monotonic()))
@@ -367,7 +386,7 @@ class RunpodRunner:
                     raise TimeoutError('Per-run spending allowance reached')
                 try:
                     status = json.loads(self.ssh(pod, directory, 'cat '+shlex.quote(remote+'/status.json')))
-                except (subprocess.SubprocessError, json.JSONDecodeError):
+                except (subprocess.SubprocessError, json.JSONDecodeError, RunpodSSHUnavailable):
                     status = {'state': 'starting'}
                 if status['state'] in {'completed', 'failed'}:
                     report['guest'] = status

@@ -11,6 +11,7 @@ from modelchef.runpod_runner import (
     RunpodAPI,
     RunpodConfig,
     RunpodRunner,
+    RunpodSSHUnavailable,
     extract_results,
     find_owned_pods,
 )
@@ -149,7 +150,7 @@ def test_result_extraction_rejects_traversal_and_links(tmp_path):
     assert not (tmp_path/'results').exists()
 
 
-@pytest.mark.parametrize('failure', [None, 'download', 'guest', 'ambiguous', 'cleanup', 'no-download'])
+@pytest.mark.parametrize('failure', [None, 'download', 'guest', 'ambiguous', 'cleanup', 'no-download', 'ssh-gap'])
 def test_lifecycle_always_attempts_cleanup_and_preserves_recovery(tmp_path, monkeypatch, failure):
     private, public = tmp_path/'key', tmp_path/'key.pub'
     private.write_text('private-not-uploaded')
@@ -183,10 +184,14 @@ def test_lifecycle_always_attempts_cleanup_and_preserves_recovery(tmp_path, monk
     ssh_commands = []
     def ssh(*args, **kw):
         ssh_commands.append(args[2])
+        if failure == 'ssh-gap' and args[2].startswith('cat ') and sum(
+                command.startswith('cat ') for command in ssh_commands) == 1:
+            raise RunpodSSHUnavailable('temporary missing metadata')
         return (
         json.dumps({'state': 'failed' if failure == 'guest' else 'completed'})
         if args[2].startswith('cat ') else '')
     monkeypatch.setattr(runner, 'ssh', ssh)
+    monkeypatch.setattr('modelchef.runpod_runner.time.sleep', lambda _: None)
     monkeypatch.setattr(runner, 'copy', lambda *args, **kw: None)
 
     def fetch(*args):
@@ -204,6 +209,68 @@ def test_lifecycle_always_attempts_cleanup_and_preserves_recovery(tmp_path, monk
     assert report['network_volume_id'] == 'volume'
     assert 'private-not-uploaded' not in json.dumps(report)
     assert len([call for call in calls if call[0] == 'POST']) == 1
+    if failure == 'ssh-gap':
+        assert sum(command.startswith('cat ') for command in ssh_commands) == 2
+
+
+def test_transport_refreshes_only_same_owned_pod(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr('modelchef.runpod_runner.time.sleep', lambda _: None)
+
+    class API:
+        def request(self, method, path):
+            calls.append((method, path))
+            return {'id': 'owned', 'name': 'job', 'ssh': {'direct': {
+                'host': '127.0.0.1', 'port': 22, 'username': 'root'}}}
+
+    runner = RunpodRunner(settings(), tmp_path, tmp_path/'recipe.yaml', api=API())
+    assert runner.transport({'id': 'owned', 'name': 'job'}, tmp_path)[:3] == (
+        '127.0.0.1', 22, 'root')
+    assert calls == [('GET', '/pods/owned')]
+
+
+def test_transport_missing_metadata_is_bounded_and_not_worker_failure(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr('modelchef.runpod_runner.time.sleep', lambda _: None)
+
+    class API:
+        def request(self, method, path):
+            calls.append((method, path))
+            return {'id': 'owned', 'name': 'job'}
+
+    runner = RunpodRunner(settings(), tmp_path, tmp_path/'recipe.yaml', api=API())
+    with pytest.raises(RunpodSSHUnavailable):
+        runner.transport({'id': 'owned', 'name': 'job'}, tmp_path)
+    assert calls == [('GET', '/pods/owned')]*3
+
+
+def test_transport_rejects_changed_pod_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr('modelchef.runpod_runner.time.sleep', lambda _: None)
+
+    class API:
+        def request(self, method, path):
+            return {'id': 'someone-else', 'name': 'job'}
+
+    runner = RunpodRunner(settings(), tmp_path, tmp_path/'recipe.yaml', api=API())
+    with pytest.raises(ValueError, match='identity differs'):
+        runner.transport({'id': 'owned', 'name': 'job'}, tmp_path)
+
+
+def test_ssh_handles_log_tail_starting_inside_utf8_character(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    original = subprocess.run
+    runner = RunpodRunner(settings(), tmp_path, tmp_path/'recipe.yaml')
+    monkeypatch.setattr(runner, 'transport', lambda *a: ('127.0.0.1', 22, 'root', []))
+
+    def execute(command, **kwargs):
+        # A byte-oriented tail may begin with a UTF-8 continuation byte.
+        return original([sys.executable, '-c',
+                         "import sys; sys.stdout.buffer.write(b'\\x94progress')"], **kwargs)
+
+    monkeypatch.setattr('modelchef.runpod_runner.subprocess.run', execute)
+    assert runner.ssh({}, tmp_path, 'tail -c 100 guest.log') == '\ufffdprogress'
 
 
 def test_network_volume_deletion_requires_explicit_action_and_run():
