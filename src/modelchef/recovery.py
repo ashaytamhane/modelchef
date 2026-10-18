@@ -97,6 +97,11 @@ class RecoveryStore:
                      p.suffix not in {'.tmp', '.sqlite', '.db'} and
                      p.name not in {'events.jsonl', 'resume-environments.jsonl'}]
             paths.extend(sharded_files(selected) if selected.is_dir() else [selected])
+            tensorboard = run / 'tensorboard'
+            if tensorboard.is_symlink():
+                raise ValueError('Recovery refuses symlinked TensorBoard directories')
+            if tensorboard.is_dir():
+                paths.extend(p for p in tensorboard.rglob('events.out.tfevents.*') if p.is_file())
             export = run / 'export'
             if export.is_dir():
                 paths.extend(p for p in export.iterdir() if p.is_file() and

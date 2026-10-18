@@ -7,6 +7,22 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.request import urlopen
+
+
+def wait_tensorboard(server, seconds):
+    deadline = time.monotonic() + max(0, seconds)
+    while time.monotonic() < deadline:
+        if server.poll() is not None:
+            raise RuntimeError('TensorBoard stopped during startup; inspect tensorboard.log')
+        try:
+            with urlopen('http://127.0.0.1:6006/', timeout=1) as response:
+                if response.status == 200:
+                    return
+        except OSError:
+            pass
+        time.sleep(.2)
+    raise TimeoutError('TensorBoard startup timed out; inspect tensorboard.log')
 
 
 def runtime_commands(directory):
@@ -30,6 +46,7 @@ def execute(seconds):
     def status(state, **fields):
         temporary = path.with_suffix('.tmp')
         temporary.write_text(json.dumps({'state': state, 'elapsed_seconds': time.monotonic()-started,
+                                         'tensorboard_url': os.environ.get('MODELCHEF_TENSORBOARD_URL'),
                                          **fields}), encoding='utf-8')
         temporary.replace(path)
 
@@ -38,10 +55,17 @@ def execute(seconds):
     # Never carry AWS recovery settings into a different provider's guest.
     os.environ.pop('MODELCHEF_RECOVERY_S3_URI', None)
     initialization, python = runtime_commands(Path('.runtime'))
-    setup = [python, '-m', 'pip', 'install', 'pyyaml>=6,<7', 'pydantic>=2.10,<3']
+    setup = [python, '-m', 'pip', 'install', 'pyyaml>=6,<7', 'pydantic>=2.10,<3', 'tensorboard>=2.19,<3']
     train = [python, '-m', 'modelchef.aws_guest', 'configs/job.yaml', '--cloud-extra', 'none']
+    server = None
     try:
         for command in [*initialization, setup, train]:
+            if command is train:
+                with Path('tensorboard.log').open('a') as server_log:
+                    server = subprocess.Popen([python, '-m', 'tensorboard.main', '--logdir', 'artifacts',
+                        '--host', '0.0.0.0', '--port', '6006', '--reload_interval', '5'],
+                        stdout=server_log, stderr=server_log)
+                wait_tensorboard(server, min(20, seconds-(time.monotonic()-started)))
             remaining = seconds-(time.monotonic()-started)
             if remaining <= 0:
                 raise TimeoutError('Guest runtime limit reached')
@@ -62,6 +86,14 @@ def execute(seconds):
     except Exception as error:
         status('failed', error=str(error))
         raise
+    finally:
+        if server is not None and server.poll() is None:
+            server.terminate()
+            try:
+                server.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait(timeout=10)
 
 
 def main():

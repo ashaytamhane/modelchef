@@ -618,7 +618,16 @@ The pipeline explains each stage on screen: configuration/hardware, acquisition,
 
 Each invocation creates its own directory under `artifacts/training/`. Inspect `report.json`, `processing.json`, source/benchmark manifests, `metrics.jsonl`, `environment.json`, tokenizer and checkpoints there. Data snapshots are cached under `data/cache/`. All run outputs and data caches stay excluded from Git.
 
-For a live browser dashboard, install the optional monitoring extra and point it at
+All training backends automatically write TensorBoard events alongside `metrics.jsonl`.
+The `train` extra includes TensorBoard. Text, DDP/FSDP (rank zero only), and multimodal
+runs record `loss/train` and measured `loss/validation` at optimizer-step coordinates.
+Multiple validation views use `loss/validation/VIEW`. Validation points appear only
+after evaluation, and test losses are excluded from these training curves. Events
+are flushed after each metric record and retained under `RUN_DIR/tensorboard/training`.
+Resume preserves event files; a rollback resume resets superseded points in the view.
+Reports include a `tensorboard` section, and `tensorboard.json` records access details.
+
+For a live browser dashboard, point the monitoring command at
 the actual run directory printed by training:
 
 ```bash
@@ -641,8 +650,9 @@ pipeline overview, not an interactive architecture diagram.
 
 Use `--port 6007` for another port, `--no-browser` on a remote machine, or `--once`
 to export existing metrics without starting a server. The server binds to
-localhost; access a remote dashboard through an SSH tunnel rather than exposing
-the unauthenticated TensorBoard server publicly. This command monitors one stage
+localhost; use an SSH tunnel for local/AWS remote dashboards. The Runpod target
+also starts a port-6006 proxy dashboard and prints its URL; anyone with access to
+that URL can view the dashboard while the Pod runs. This command monitors one stage
 run directory at a time; point it at the next stage directory for a multi-stage
 workflow.
 

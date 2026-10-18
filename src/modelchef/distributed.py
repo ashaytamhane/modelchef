@@ -17,6 +17,7 @@ from modelchef.hardware import detect_hardware, resolve_runtime
 from modelchef.objectives import evaluate_stage, objective
 from modelchef.phase_metrics import PhaseMetrics
 from modelchef.progress import report
+from modelchef.training_metrics import close_metrics, record_metrics, tensorboard_info
 
 
 def run_distributed(config, root, resume=None):
@@ -120,6 +121,7 @@ def run_distributed(config, root, resume=None):
         started = time.monotonic()
         initial_step = step
         result = preparation[0]['report']
+        result['tensorboard'] = tensorboard_info(folder)
         result.update(status='running', distributed={'backend': dist.get_backend(), 'world_size': world},
                       trainable_parameters=sum(p.numel() for p in model.parameters() if p.requires_grad))
 
@@ -214,8 +216,7 @@ def run_distributed(config, root, resume=None):
                     with phases.measure('validation'):
                         row['validation'] = evaluate(model, blocks['validation'][:2], c.evaluation.batches,
                                                      c.evaluation.batch_size or t.micro_batch_size, device, amp)
-                with (folder / 'metrics.jsonl').open('a') as stream:
-                    stream.write(json.dumps(row) + '\n')
+                record_metrics(folder, row)
                 if step % t.log_every == 0 or step == 1 or step == t.steps:
                     report(f'DDP step {step}/{t.steps}: global mean loss={row["training_loss"]:.4f}')
             if step % t.checkpoint_every == 0 or step == t.steps:
@@ -302,4 +303,6 @@ def run_distributed(config, root, resume=None):
             (folder / 'report.json').write_text(json.dumps(failure, indent=2))
         raise
     finally:
+        if rank == 0 and 'folder' in locals():
+            close_metrics(folder)
         dist.destroy_process_group()

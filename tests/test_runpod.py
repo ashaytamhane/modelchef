@@ -108,7 +108,7 @@ def test_pod_payload_does_not_include_control_plane_key(tmp_path, monkeypatch):
     runner = RunpodRunner(settings(), tmp_path, tmp_path/'stage.yaml')
     payload = runner.payload('modelchef-test', 'ssh-ed25519 AAAA')
     assert 'sentinel-private-key' not in json.dumps(payload)
-    assert payload['ports'] == ['22/tcp']
+    assert payload['ports'] == ['22/tcp', '6006/http']
     assert payload['mounts']['network'][0]['volumeId'] == 'volume'
     assert payload['gpu']['minCudaVersion'] == '13.0'
     bootstrap = payload['cmd'][0]
@@ -355,6 +355,36 @@ def test_guest_system_python_creates_venv_before_package_install(tmp_path, monke
     assert python != runpod_guest.sys.executable
     monkeypatch.setattr(runpod_guest.sys, 'prefix', '/isolated-venv')
     assert runpod_guest.runtime_commands(tmp_path) == ([], runpod_guest.sys.executable)
+
+
+def test_guest_starts_dashboard_and_cleans_it_up(tmp_path, monkeypatch):
+    from modelchef import runpod_guest
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('MODELCHEF_TENSORBOARD_URL', 'https://owned-6006.proxy.runpod.net/')
+    monkeypatch.setattr(runpod_guest, 'runtime_commands', lambda path: ([], 'python'))
+    commands, terminated, ready = [], [], []
+
+    class Process:
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            terminated.append(True)
+
+    def launch(command, **kwargs):
+        commands.append(command)
+        return Process()
+
+    monkeypatch.setattr(runpod_guest.subprocess, 'Popen', launch)
+    monkeypatch.setattr(runpod_guest, 'wait_tensorboard', lambda process, seconds: ready.append(True))
+    runpod_guest.execute(30)
+    assert 'tensorboard.main' in commands[1]
+    assert commands[1][-3:] == ['6006', '--reload_interval', '5']
+    assert ready and terminated == [True]
+    assert json.loads((tmp_path / 'status.json').read_text())['tensorboard_url'].startswith('https://owned-')
 
 
 def test_result_transfer_contains_training_data_and_tokenizer(tmp_path, monkeypatch):

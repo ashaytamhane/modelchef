@@ -49,10 +49,14 @@ def sharded_run(root, step=1):
 def test_sharded_snapshot_atomic_restore_and_reuse(tmp_path):
     root = tmp_path / 'guest'
     run, checkpoint = sharded_run(root)
+    events = run / 'tensorboard/training/events.out.tfevents.synthetic'
+    events.parent.mkdir(parents=True)
+    events.write_bytes(b'flushed tensorboard events')
     client = S3()
     store = RecoveryStore(client, 's3://bucket/fsdp/recovery')
     first = store.snapshot(root, run, checkpoint)
     assert first['checkpoint_format'] == 'fsdp2'
+    assert events.relative_to(root).as_posix() in first['files']
     store.snapshot(root, run, checkpoint)
     assert len(client.uploads) == len(set(client.uploads))
     destination = tmp_path / 'restored'

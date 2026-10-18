@@ -8,7 +8,7 @@ def archive_metadata(root, output):
     root = Path(root).resolve()
     names = {'report.json', 'config.json', 'workflow.json', 'environment.json',
              'source-manifest.json', 'benchmark-manifest.json', 'data-attribution.json',
-             'events.jsonl', 'performance-gate.json'}
+             'events.jsonl', 'metrics.jsonl', 'tensorboard.json', 'performance-gate.json'}
     with tarfile.open(output, 'w:gz') as archive:
         for path in sorted((root / 'artifacts').rglob('*')):
             if path.is_file() and not path.is_symlink() and path.name in names:

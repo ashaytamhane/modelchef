@@ -230,7 +230,7 @@ class RunpodRunner:
                 'exec /usr/sbin/sshd -D -e')
         return {'name': name, 'cloud': s.cloud, 'image': s.image,
                 'gpu': {'id': s.gpu_type_id, 'count': s.gpu_count, 'minCudaVersion': s.min_cuda_version},
-                'disk': s.container_disk_gb, 'ports': ['22/tcp'],
+                'disk': s.container_disk_gb, 'ports': ['22/tcp', '6006/http'],
                 'mounts': {'network': [{'volumeId': s.network_volume_id, 'path': '/workspace'}]},
                 'dataCenterIds': s.data_center_ids,
                 'env': {'PUBLIC_KEY': public_key}, 'entrypoint': ['/bin/bash', '-lc'], 'cmd': [boot]}
@@ -357,6 +357,7 @@ class RunpodRunner:
                 else:
                     raise RuntimeError('Launch outcome uncertain; reconcile saved run before retrying') from None
             report['pod_id'] = pod['id']
+            report['tensorboard_url'] = f'https://{pod["id"]}-6006.proxy.runpod.net/'
             save()
             while time.monotonic() < deadline:
                 pod = api.request('GET', '/pods/'+quote(pod['id'], safe=''))
@@ -380,12 +381,14 @@ class RunpodRunner:
             seconds = max(1, int(deadline-time.monotonic()))
             start = (f'cd {shlex.quote(remote)} && echo {report["bundle_sha256"]} " bundle.tar.gz" '
                      '| sha256sum -c - && tar -xzf bundle.tar.gz && '
-                     f'(nohup env PYTHONPATH=src python -u -m modelchef.runpod_guest --seconds {seconds} '
+                     f'(nohup env PYTHONPATH=src MODELCHEF_TENSORBOARD_URL={shlex.quote(report["tensorboard_url"])} '
+                     f'python -u -m modelchef.runpod_guest --seconds {seconds} '
                      '>guest.log 2>&1 </dev/null &)')
             self.ssh(pod, directory, start)
             report['state'] = 'running'
             save()
             progress(f'Runpod guest started; pod={pod["id"]}; recovery={remote}.')
+            progress('TensorBoard: ' + report['tensorboard_url'] + ' (available after guest setup).')
             while time.monotonic() < deadline:
                 cost_bound = ((time.monotonic()-started)/3600*(s.max_compute_hourly_usd+s.storage_hourly_usd)
                               +s.safety_reserve_usd)

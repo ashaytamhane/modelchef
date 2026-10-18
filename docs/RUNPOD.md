@@ -4,6 +4,16 @@ Runpod is an execution target for text training stages (`pipeline`) and linked w
 
 Keep task-specific recipes, datasets and run outputs in your experiment project, such as `recipe-lab`. Install ModelChef from an editable checkout; its allowlisted source bundle is packaged separately from the experiment's declared inputs. This target currently manages temporary training Pods, not persistent vLLM API hosting.
 
+Each training Pod exposes TensorBoard on HTTP port 6006. After guest setup it serves
+the run's artifact tree; the controller prints and saves `tensorboard_url` in the
+run report. The proxy URL is accessible to people who have access to the link;
+avoid sharing it publicly for private runs. Training loss and actual validation loss
+are recorded automatically. Before the first evaluation, validation has no points.
+The URL lasts only while the Pod runs; event files remain on the retained volume.
+S3 recovery also retains event files for managed AWS runs. Local/AWS run reports
+provide the event directory and a launch command; use your existing secure tunnel
+to access a remote server. No AWS firewall or public dashboard is provisioned.
+
 ## 1. Configure credentials once
 
 ModelChef first reads `RUNPOD_API_KEY`, then reuses the key saved by the Runpod CLI in `~/.runpod/config.toml` (or its legacy `~/.runpod.yaml`). If your CLI is already configured, no separate login is required. A custom `api_key_env` uses only that environment variable, for explicit account selection.

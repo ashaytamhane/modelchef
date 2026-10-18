@@ -21,6 +21,7 @@ from modelchef.sharded_checkpoint import (
     read_manifest,
     save_sharded,
 )
+from modelchef.training_metrics import close_metrics, record_metrics, tensorboard_info
 
 
 def require_fsdp(config):
@@ -185,6 +186,7 @@ def run_fsdp(config, root, resume=None):
                 prune_sharded(checkpoints, keep, protected=(latest, resume))
             return latest
 
+        result['tensorboard'] = tensorboard_info(folder)
         result['initial_validation'] = validation('validation')
         if os.environ.get('MODELCHEF_RECOVERY_S3_URI') or (t.checkpoint_at_start and not resume):
             checkpoint()
@@ -238,8 +240,7 @@ def run_fsdp(config, root, resume=None):
             if step % t.evaluate_every == 0 or step == t.steps:
                 row['validation'] = validation('validation')
             if rank == 0:
-                with (folder / 'metrics.jsonl').open('a', encoding='utf-8') as stream:
-                    stream.write(json.dumps(row) + '\n')
+                record_metrics(folder, row)
                 if step % t.log_every == 0 or step == 1 or step == t.steps:
                     from modelchef.progress import report
                     report(f'FSDP2 step {step}/{t.steps}: loss={row["training_loss"]:.4f}')
@@ -317,4 +318,6 @@ def run_fsdp(config, root, resume=None):
             (folder / 'report.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
         raise
     finally:
+        if rank == 0 and folder is not None:
+            close_metrics(folder)
         dist.destroy_process_group()

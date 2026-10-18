@@ -13,6 +13,7 @@ from modelchef.corpus import file_digest
 from modelchef.hardware import detect_hardware, resolve_runtime
 from modelchef.multimodal_data import inspect_media, read_audio, read_manifest, split_records
 from modelchef.progress import report
+from modelchef.training_metrics import close_metrics, record_metrics, tensorboard_info
 
 
 def model_manifest(path, cap):
@@ -286,10 +287,9 @@ def train(config, root, resume=None):
             scaler.update()
             step += 1
             row = {'step': step, 'loss': loss_total, 'learning_rate': optimizer.param_groups[0]['lr']}
-            if step % config.training.evaluate_every == 0:
+            if step % config.training.evaluate_every == 0 or step == config.training.steps:
                 row['validation'] = evaluate(model, processor, splits['validation'], config, device, amp)
-            with (folder / 'metrics.jsonl').open('a') as output:
-                output.write(json.dumps(row) + '\n')
+            record_metrics(folder, row)
             if step == 1 or step % config.training.log_every == 0 or step == config.training.steps:
                 report(f'Multimodal step {step}/{config.training.steps}: loss={loss_total:.4f}')
             if step % config.training.checkpoint_every == 0:
@@ -309,6 +309,8 @@ def train(config, root, resume=None):
         result.update(status='failed', error=f'{type(error).__name__}: {error}')
         raise
     finally:
+        close_metrics(folder)
+        result['tensorboard'] = tensorboard_info(folder)
         (folder / 'report.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
     return result
 

@@ -203,6 +203,11 @@ def test_profiled_pipeline_preserves_test_isolation(tmp_path, monkeypatch):
     result = run_pipeline(config, tmp_path)
     assert result['status'] == 'completed'
     assert result['test'] is None and result['test_evaluation'] == 'withheld'
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+    events = EventAccumulator(result['tensorboard']['logdir']).Reload()
+    assert len(events.Scalars('loss/train')) == 2
+    assert events.Scalars('loss/validation')[-1].step == 2
+    assert not any('test' in tag for tag in events.Tags()['scalars'])
     phases = result['phase_metrics']
     assert {'model_initialization', 'optimizer_initialization', 'forward', 'backward',
             'optimizer_update', 'checkpoint', 'initial_validation', 'final_evaluation',

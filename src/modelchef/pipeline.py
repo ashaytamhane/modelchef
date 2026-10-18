@@ -22,6 +22,7 @@ from modelchef.execution import check_custom_kernel, configure_execution, plugin
 from modelchef.hardware import detect_hardware, resolve_runtime
 from modelchef.objectives import evaluate_stage, objective, pack_structured, prepare_structured
 from modelchef.phase_metrics import PhaseMetrics
+from modelchef.training_metrics import close_metrics, record_metrics, tensorboard_info
 
 
 class Narrator:
@@ -146,7 +147,8 @@ def run_pipeline(config, root, resume=None, prepare_only=False):
         from modelchef.prepared_data import reuse_prepared_data
         reuse_prepared_data(config, root, folder)
     narrate = Narrator(folder, config.explain == "detailed")
-    report = {"status": "running", "run_dir": str(folder), "config_sha256": fingerprint}
+    report = {"status": "running", "run_dir": str(folder), "config_sha256": fingerprint,
+              "tensorboard": tensorboard_info(folder)}
     (folder / "config.json").write_text(json.dumps(recipe, indent=2), encoding="utf-8")
     attribution = os.environ.get('MODELCHEF_DATA_ATTRIBUTION')
     if attribution and not resume:
@@ -158,6 +160,8 @@ def run_pipeline(config, root, resume=None, prepare_only=False):
         (folder / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         narrate.say(f"Pipeline stopped: {error}. Evidence remains in {folder}.")
         raise
+    finally:
+        close_metrics(folder)
 
 
 def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False):
@@ -609,8 +613,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             with phases.measure('validation'):
                 metrics["validation"] = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
                                                   evaluation_batch_size, device, amp)
-        with (folder / "metrics.jsonl").open("a", encoding="utf-8") as output:
-            output.write(json.dumps(metrics) + "\n")
+        record_metrics(folder, metrics)
         if gate and step - initial_step == gate.probe_steps:
             if device == 'cuda':
                 torch.cuda.synchronize()
