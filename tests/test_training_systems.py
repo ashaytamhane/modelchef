@@ -283,8 +283,17 @@ def test_fsdp_two_cuda_training_and_resume(tmp_path):
 
 
 def test_shared_preview_reports_unknown_and_unsupported_without_allocation(tmp_path, monkeypatch):
+    import builtins
+
     from modelchef.planning import memory_preview
-    monkeypatch.setattr('modelchef.engines.create_model', lambda *a, **kw: pytest.fail('Allocated a model'))
+    original_import = builtins.__import__
+
+    def forbid_training_import(name, *args, **kwargs):
+        if name == 'torch' or name.startswith('torch.') or name == 'modelchef.engines':
+            pytest.fail('Allocation-free preview imported the training runtime')
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, '__import__', forbid_training_import)
     result = memory_preview({}, tmp_path)
     assert result['status'] == 'estimated' and not result['gpu_count_verified']
     assert any('illustrative' in item for item in result['limitations'])

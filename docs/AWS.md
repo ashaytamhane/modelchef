@@ -242,10 +242,6 @@ hosting and remote chat remain separate validation steps; a recovered export doe
 not prove that the API is ready. Before deploying, check the regional On-Demand
 GPU vCPU quota and permissions to provision/read the serving secret.
 
-The next experiment replaces the authored fixtures with a versioned FineWeb-Edu
-snapshot and public conversation data, and increases model size and steps only after
-the small AWS run proves data, checkpoint, export, vLLM startup and local chat.
-
 AWS training execution shows the current Spot price, maximum runtime, conservative reservation and overall budget, then requires you to type `yes` before launch. To automate a reviewed plan, explicitly add `--yes`; configured limits still apply. A non-interactive run without that flag fails instead of launching. The budget review stays visible with `--quiet`. The same confirmation applies to `aws-test` and the lower-level `aws-train` command.
 
 Use the same `pipeline` or `cook` command with an explicit AWS target. Local is the default; hardware auto-detection selects a device on the chosen machine, never a cloud launch.

@@ -2,6 +2,10 @@
 import json
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip('torch')
+
 from modelchef import pipeline
 from modelchef.run_config import RunConfig
 

@@ -1,7 +1,8 @@
 from collections import namedtuple
 
 import pytest
-import torch
+
+torch = pytest.importorskip('torch')
 
 from modelchef.checkpointing import atomic_save, storage_bytes
 
