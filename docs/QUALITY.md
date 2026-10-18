@@ -37,6 +37,17 @@ cloud contracts. CUDA tests exercise real training when a compatible GPU is visi
 CPU runners skip those tests. Native NVFP4 prerequisite checks and simulations do not
 establish numerical quality or performance on Blackwell. A simulator cannot establish
 real CUDA compilation compatibility, NCCL performance, MPS behavior or AWS cleanup.
+
+The opt-in FSDP2 path has real two-rank CPU/Gloo checks for averaged-gradient AdamW
+updates, tied weights and sharded checkpoint recovery. The separate two-CUDA-GPU
+training/resume check requires that hardware and skips otherwise. CPU evidence does
+not establish multi-GPU CUDA/BF16 reliability or performance. Memory planning is
+analytical/scenario-based; synchronized phase profiling is opt-in and changes timing.
+See [memory planning and sharded training](DISTRIBUTED.md) for supported combinations,
+checkpoint/export restrictions and the remaining host-memory initialization cost.
+Sharded AWS recovery is tested with real CPU/Gloo DCP state and mocked S3 transfers,
+including interrupted upload/download and exact next-update recovery. This establishes
+the software contract, not live multi-GPU AWS interruption/throughput behavior.
 Multimodal integrations use tiny real PaliGemma/Whisper models and synthetic media;
 Hub publishing uses mocked API calls, so CI cannot establish live upload permissions.
 

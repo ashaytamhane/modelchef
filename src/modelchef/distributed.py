@@ -15,12 +15,14 @@ from torch.nn.parallel import DistributedDataParallel
 from modelchef.engines import create_model, load_parent, load_tokenizer
 from modelchef.hardware import detect_hardware, resolve_runtime
 from modelchef.objectives import evaluate_stage, objective
+from modelchef.phase_metrics import PhaseMetrics
 from modelchef.progress import report
 
 
 def run_distributed(config, root, resume=None):
     from modelchef.pipeline import evaluate, run_pipeline
     from modelchef.run_config import RunConfig
+    from modelchef.sharded_checkpoint import checkpoint_io_group
     if int(os.environ.get('WORLD_SIZE', '1')) < 2:
         raise ValueError('DDP requires torchrun --standalone --nproc_per_node=2 (or more)')
     os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
@@ -36,17 +38,19 @@ def run_distributed(config, root, resume=None):
     rank, world = dist.get_rank(), dist.get_world_size()
     try:
         preparation = [None]
-        if rank == 0:
-            try:
-                preparation[0] = {'report': run_pipeline(config, root, resume, prepare_only=True)}
-            except Exception as error:  # noqa: BLE001 - broadcast every preparation failure to waiting ranks
-                preparation[0] = {'error': f'{type(error).__name__}: {error}'}
-        dist.broadcast_object_list(preparation, src=0)
+        with checkpoint_io_group() as group:
+            if rank == 0:
+                try:
+                    preparation[0] = {'report': run_pipeline(config, root, resume, prepare_only=True)}
+                except Exception as error:  # noqa: BLE001 - broadcast preparation failure to waiting ranks
+                    preparation[0] = {'error': f'{type(error).__name__}: {error}'}
+            dist.broadcast_object_list(preparation, src=0, group=group)
         if 'error' in preparation[0]:
             raise RuntimeError('Distributed preparation failed: ' + preparation[0]['error'])
         folder = Path(preparation[0]['report']['run_dir'])
         config = RunConfig.model_validate_json((folder / 'config.json').read_text())
         c, t = config, config.training
+        phases = PhaseMetrics(device, t.profile_phases)
         torch.backends.cuda.matmul.allow_tf32 = t.allow_tf32
         random.seed(t.seed + rank)
         torch.manual_seed(t.seed + rank)
@@ -58,8 +62,9 @@ def run_distributed(config, root, resume=None):
                            map_location='cpu', weights_only=True)
         if resume and saved.get('world_size') != world:
             raise ValueError('DDP resume requires the same world size')
-        model = create_model(c.model, tokenizer.get_vocab_size()).to(device)
-        model.load_state_dict(saved['model'])
+        with phases.measure('model_initialization'):
+            model = create_model(c.model, tokenizer.get_vocab_size()).to(device)
+            model.load_state_dict(saved['model'])
         reference = None
         if c.stage.kind in {'dpo', 'distill'}:
             from modelchef.chat import checkpoint_for
@@ -88,8 +93,9 @@ def run_distributed(config, root, resume=None):
                    'weight_decay': 0}]
         options = {'fused': True} if t.optimizer_kernel == 'fused' else (
             {'foreach': True} if t.optimizer_kernel == 'foreach' else {})
-        optimizer = torch.optim.AdamW(groups, lr=t.learning_rate, betas=t.betas,
-                                     eps=t.optimizer_eps, **options)
+        with phases.measure('optimizer_initialization'):
+            optimizer = torch.optim.AdamW(groups, lr=t.learning_rate, betas=t.betas,
+                                         eps=t.optimizer_eps, **options)
         scaler = torch.amp.GradScaler('cuda', enabled=runtime['requires_grad_scaler'])
         sampler = torch.Generator().manual_seed(t.seed + rank)
         if resume:
@@ -118,22 +124,30 @@ def run_distributed(config, root, resume=None):
                       trainable_parameters=sum(p.numel() for p in model.parameters() if p.requires_grad))
 
         def checkpoint():
-            state = {'sampler_rng': sampler.get_state(), 'torch_rng': torch.get_rng_state(),
-                     'python_rng': random.getstate(),
-                     'cuda_rng': torch.cuda.get_rng_state(local_rank) if device == 'cuda' else []}
-            states = [None] * world
-            dist.all_gather_object(states, state)
-            path = folder / 'checkpoints' / f'step-{step:06d}.pt'
-            if rank == 0:
-                payload = {**saved, **states[0], 'model': model.state_dict(),
-                           'optimizer': optimizer.state_dict(), 'scaler': scaler.state_dict(),
-                           'rank_states': states, 'world_size': world, 'step': step,
-                           'tokens_seen': consumed, 'skipped_optimizer_updates': skipped_updates,
-                           'cuda_rng': [states[0]['cuda_rng']] if device == 'cuda' else []}
-                temporary = path.with_suffix('.tmp')
-                torch.save(payload, temporary)
-                temporary.replace(path)
-            dist.barrier()
+            with checkpoint_io_group() as group:
+                state = {'sampler_rng': sampler.get_state(), 'torch_rng': torch.get_rng_state(),
+                         'python_rng': random.getstate(),
+                         'cuda_rng': torch.cuda.get_rng_state(local_rank) if device == 'cuda' else []}
+                states = [None] * world
+                dist.all_gather_object(states, state, group=group)
+                path = folder / 'checkpoints' / f'step-{step:06d}.pt'
+                error = [None]
+                if rank == 0:
+                    payload = {**saved, **states[0], 'model': model.state_dict(),
+                               'optimizer': optimizer.state_dict(), 'scaler': scaler.state_dict(),
+                               'rank_states': states, 'world_size': world, 'step': step,
+                               'tokens_seen': consumed, 'skipped_optimizer_updates': skipped_updates,
+                               'cuda_rng': [states[0]['cuda_rng']] if device == 'cuda' else []}
+                    try:
+                        with phases.measure('checkpoint'):
+                            from modelchef.checkpointing import atomic_save
+                            atomic_save(payload, path)
+                    except OSError as exc:
+                        error[0] = str(exc)
+                dist.broadcast_object_list(error, src=0, group=group)
+                if error[0]:
+                    raise OSError(error[0])
+                dist.barrier(group=group)
             return path
 
         while step < t.steps:
@@ -153,7 +167,7 @@ def run_distributed(config, root, resume=None):
             for _ in range(t.gradient_accumulation):
                 indices = torch.randint(len(blocks['train'][0]), (t.micro_batch_size,), generator=sampler)
                 parts = tuple(part[indices].to(device) for part in blocks['train'])
-                with amp():
+                with phases.measure('forward'), amp():
                     loss, _ = objective(wrapped, parts, c, reference, tokenizer)
                     if getattr(model, 'auxiliary_loss', None) is not None:
                         loss = loss + model.auxiliary_loss
@@ -161,11 +175,12 @@ def run_distributed(config, root, resume=None):
                 dist.all_reduce(invalid, op=dist.ReduceOp.MAX)
                 if invalid.item():
                     raise FloatingPointError('Non-finite DDP loss on at least one rank')
-                scaler.scale(loss / t.gradient_accumulation).backward()
+                with phases.measure('backward'):
+                    scaler.scale(loss / t.gradient_accumulation).backward()
                 loss_total += loss.item() / t.gradient_accumulation
                 tokens += sum((part != -100).sum().item() for part in parts[1::2])
             scaler.unscale_(optimizer)
-            norm = torch.nn.utils.clip_grad_norm_(model.parameters(), t.gradient_clip_norm,
+            norm = torch.nn.utils.clip_grad_norm_(model.parameters(), t.gradient_clip_norm or float('inf'),
                                                  error_if_nonfinite=False)
             invalid = torch.tensor(int(not torch.isfinite(norm)), device=device)
             dist.all_reduce(invalid, op=dist.ReduceOp.MAX)
@@ -178,19 +193,22 @@ def run_distributed(config, root, resume=None):
                     report(f'FP16 gradient overflow: all ranks skipped the update; '
                            f'loss scale={scaler.get_scale():g}, retrying step {step + 1}.')
                 continue
-            scaler.step(optimizer)
-            scaler.update()
+            with phases.measure('optimizer_update'):
+                scaler.step(optimizer)
+                scaler.update()
             metrics = torch.tensor([loss_total, tokens], dtype=torch.float64, device=device)
             dist.all_reduce(metrics)
             consumed += int(metrics[1].item())
             step += 1
             if rank == 0:
                 row = {'step': step, 'training_loss': metrics[0].item() / world,
+                       'gradient_norm': norm.item(),
                        'tokens_seen': consumed, 'skipped_optimizer_updates': skipped_updates,
                        'learning_rate': optimizer.param_groups[0]['lr']}
                 if step % t.evaluate_every == 0 or step == t.steps:
-                    row['validation'] = evaluate(model, blocks['validation'][:2], c.evaluation.batches,
-                                                 t.micro_batch_size, device, amp)
+                    with phases.measure('validation'):
+                        row['validation'] = evaluate(model, blocks['validation'][:2], c.evaluation.batches,
+                                                     c.evaluation.batch_size or t.micro_batch_size, device, amp)
                 with (folder / 'metrics.jsonl').open('a') as stream:
                     stream.write(json.dumps(row) + '\n')
                 if step % t.log_every == 0 or step == 1 or step == t.steps:
@@ -201,7 +219,8 @@ def run_distributed(config, root, resume=None):
         if device == 'cuda':
             torch.cuda.synchronize()
         elapsed_loop = time.monotonic() - started
-        peaks = torch.tensor([torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved()]
+        peaks = torch.tensor([max(torch.cuda.max_memory_allocated(), phases.cuda_peaks()['peak_allocated_bytes']),
+                              max(torch.cuda.max_memory_reserved(), phases.cuda_peaks()['peak_reserved_bytes'])]
                               if device == 'cuda' else [0, 0], device=device, dtype=torch.int64)
         dist.all_reduce(peaks, op=dist.ReduceOp.MAX)
         if rank == 0:
@@ -218,18 +237,25 @@ def run_distributed(config, root, resume=None):
                           tokens_per_second=(step - initial_step) * t.micro_batch_size *
                               t.gradient_accumulation * c.model.context_length * world / (time.monotonic() - started))
             result['stage_evaluation'] = {}
-            for split in ['validation', 'test']:
-                result[split] = evaluate(model, blocks[split][:2], c.evaluation.batches,
-                                         t.micro_batch_size, device, amp)
+            result['test'] = None
+            result['test_evaluation'] = 'evaluated' if c.evaluation.evaluate_test else 'withheld'
+            for split in ['validation', 'test'] if c.evaluation.evaluate_test else ['validation']:
+                with phases.measure('final_evaluation'):
+                    result[split] = evaluate(model, blocks[split][:2], c.evaluation.batches,
+                                             c.evaluation.batch_size or t.micro_batch_size, device, amp)
                 result['stage_evaluation'][split] = evaluate_stage(model, reference, blocks[split],
                                                                   tokenizer, c, device, amp)
-            restored = create_model(c.model, tokenizer.get_vocab_size()).to(device).eval()
-            restored.load_state_dict(torch.load(path, map_location=device, weights_only=True)['model'])
             model.eval()
-            probe = blocks['test'][0][:1].to(device)
+            probe = blocks['validation'][0][:1].to(device)
             tolerance = 0.03 if dtype == torch.bfloat16 else 0.003 if dtype == torch.float16 else 1e-5
             with torch.no_grad(), amp():
-                if not torch.allclose(model(probe), restored(probe), atol=tolerance, rtol=tolerance):
+                expected = model(probe).detach()
+            with phases.measure('checkpoint_reload'):
+                loaded = torch.load(path, map_location='cpu', mmap=True, weights_only=True)
+                model.load_state_dict(loaded['model'])
+                del loaded
+            with torch.no_grad(), amp():
+                if not torch.allclose(expected, model(probe), atol=tolerance, rtol=tolerance):
                     raise RuntimeError('DDP checkpoint reload differs')
             from modelchef.benchmarks import evaluate_choices
             examples = json.loads((folder / 'benchmark-examples.json').read_text())
@@ -251,8 +277,14 @@ def run_distributed(config, root, resume=None):
                         break
             result['sample'] = tokenizer.decode(generated[0].tolist())
             (folder / 'report.json').write_text(json.dumps(result, indent=2))
-        final_report = [result if rank == 0 else None]
-        dist.broadcast_object_list(final_report, src=0)
+        with checkpoint_io_group() as group:
+            phase_reports = [None] * world
+            dist.all_gather_object(phase_reports, phases.rows, group=group)
+            if rank == 0:
+                result['phase_metrics_by_rank'] = phase_reports
+                (folder / 'report.json').write_text(json.dumps(result, indent=2))
+            final_report = [result if rank == 0 else None]
+            dist.broadcast_object_list(final_report, src=0, group=group)
         return final_report[0]
     except Exception as error:
         if rank == 0 and 'folder' in locals():

@@ -135,6 +135,8 @@ def test_two_cpu_rank_ddp_and_resume(tmp_path, model_type):
     import yaml
     config = recipe(tmp_path, model_type)
     config.training.distributed = 'ddp'
+    config.evaluation.evaluate_test = False
+    config.training.profile_phases = True
     if model_type == 'decoder_rope':
         config.data.storage = 'disk'
     path = tmp_path / 'recipe.yaml'
@@ -150,6 +152,8 @@ def test_two_cpu_rank_ddp_and_resume(tmp_path, model_type):
     report = json.loads((folder / 'report.json').read_text())
     assert report['distributed']['world_size'] == 2
     assert report['checkpoint_reload_verified']
+    assert report['test'] is None and report['test_evaluation'] == 'withheld'
+    assert len(report['phase_metrics_by_rank']) == 2
     final = torch.load(report['checkpoint'], weights_only=True)['model']
     executed = subprocess.run(command + ['--resume', str(folder / 'checkpoints/step-000001.pt')],
                               cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120, check=False)

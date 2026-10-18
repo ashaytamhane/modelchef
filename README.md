@@ -1274,7 +1274,8 @@ model:  # OPTIONAL: defaults are supplied when omitted.
   gradient_checkpointing: false  # OPTIONAL: Recompute activations during backward to trade compute for memory.
 training:  # OPTIONAL: defaults are supplied when omitted.
   performance_gate: null  # OPTIONAL: measured throughput/memory gate; choose acceptance thresholds from your own measurements.
-  distributed: none  # OPTIONAL: none | ddp; DDP launches with torchrun.
+  distributed: none  # OPTIONAL: none | ddp | fsdp2; distributed modes launch with torchrun.
+  profile_phases: false  # OPTIONAL: synchronized phase timing/memory; adds overhead.
   distributed_timeout_seconds: 300  # OPTIONAL: process-group timeout.
   compile: false  # OPTIONAL: Opt in to torch.compile; default leaves execution eager.
   compile_backend: inductor  # OPTIONAL: inductor | aot_eager | eager.
@@ -1460,6 +1461,21 @@ torchrun --standalone --nproc_per_node=2 -m -- modelchef.cli pipeline configs/dd
 
 Each rank samples training blocks; the global sequence batch is `micro_batch_size × gradient_accumulation × world_size`. Rank zero prepares shared artifacts and writes reports/checkpoints; recovery preserves per-rank random state and requires the same world size. Dense and MoE two-rank CPU execution and resume have been tested. GPU DDP uses NCCL and needs its own throughput and device validation; MPS DDP is unavailable. DDP currently excludes QLoRA, NVFP4, compilation and RLVR. See [PyTorch DDP](https://docs.pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html) and [torchrun](https://docs.pytorch.org/docs/stable/elastic/run.html).
 
+
+FSDP2 adds opt-in block-level weight, gradient and optimizer sharding for native dense
+CUDA FP32/BF16 pretraining and midtraining. Set `training.distributed: fsdp2` and launch
+with torchrun. Checkpoints use committed sharded DCP directories; exact resume requires
+the same world size and PyTorch version. GPU/cloud performance remains unverified;
+real two-process CPU/Gloo tests cover numerical updates and sharded AdamW recovery.
+Managed AWS incremental S3 recovery supports complete DCP directories with commit-last
+publication and verified staged restore. Direct chat/export of DCP is not yet supported.
+See [memory planning and sharded training](docs/DISTRIBUTED.md) for scope and limitations.
+
+Use `modelchef plan-memory configs/pretrain-demo.yaml --gpu-count 2 --memory-gib 24`
+for allocation-free native AdamW accounting. `--topology` optionally reads local GPU
+connectivity. Estimates include explicit unmeasured terms and never certify fit.
+Set `training.profile_phases: true` to measure execution-phase time and memory;
+synchronization introduces overhead, so it is disabled by default.
 
 ### Evaluation: run standard suites
 
@@ -1655,6 +1671,8 @@ flowchart TD
 | `publishing.py` | Offline export/card preview and explicit authenticated Hugging Face publication |
 | `workflow.py` | Ordered `cook` stages, parent/teacher links, reports and final export |
 | `distributed.py` | CPU/GPU DDP synchronization and per-rank checkpoint recovery |
+| `fsdp_training.py`, `sharded_checkpoint.py` | Opt-in native dense FSDP2 and committed distributed checkpoints |
+| `training_memory.py`, `phase_metrics.py` | Allocation-free memory scenarios and opt-in execution phase measurements |
 | `adapters.py`, `low_precision.py` | Native LoRA and optional CUDA QLoRA/NVFP4 integration |
 | `pipeline.py` | Stage explanations, BPE/packing, optimizer loop, checkpoints, recovery and run reports |
 | `model.py` | Custom decoder implementation used for from-scratch experiments |

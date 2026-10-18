@@ -226,10 +226,16 @@
           "default": "none",
           "enum": [
             "none",
-            "ddp"
+            "ddp",
+            "fsdp2"
           ],
           "title": "Distributed",
           "type": "string"
+        },
+        "profile_phases": {
+          "default": false,
+          "title": "Profile Phases",
+          "type": "boolean"
         },
         "distributed_timeout_seconds": {
           "default": 300,

@@ -8,6 +8,22 @@ import sys
 from modelchef.resources import preparation_plan
 
 
+def gpu_topology():
+    """Read local NVIDIA topology without inferring bandwidth from product names."""
+    if not shutil.which('nvidia-smi'):
+        return {'status': 'unavailable', 'reason': 'nvidia-smi not installed'}
+    try:
+        result = subprocess.run(['nvidia-smi', 'topo', '-m'], capture_output=True,
+                                text=True, encoding='utf-8', errors='replace', timeout=10,
+                                check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {'status': 'unavailable', 'reason': str(error)}
+    return {'status': 'available' if result.returncode == 0 else 'unavailable',
+            'matrix': result.stdout.strip() if result.returncode == 0 else None,
+            'reason': None if result.returncode == 0 else 'Driver did not provide topology',
+            'scope': 'Connectivity labels, not measured bandwidth; respects driver visibility.'}
+
+
 def detect_hardware(progress=None):
     def announce(message):
         if progress:

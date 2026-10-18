@@ -117,7 +117,8 @@ class PerformanceGate(Section):
 
 class Training(Section):
     performance_gate: PerformanceGate | None = None
-    distributed: Literal['none', 'ddp'] = 'none'
+    distributed: Literal['none', 'ddp', 'fsdp2'] = 'none'
+    profile_phases: bool = False
     distributed_timeout_seconds: int = Field(default=300, gt=0)
     compile: bool = False
     compile_backend: Literal['inductor', 'aot_eager', 'eager'] = 'inductor'
@@ -291,6 +292,15 @@ class RunConfig(Section):
         if t.distributed == 'ddp' and (t.compile or m.peft.method == 'qlora' or
                                       m.quantization == 'nvfp4' or self.stage.kind == 'rlvr'):
             raise ValueError('DDP currently excludes compile, QLoRA, NVFP4 and RLVR')
+        if t.distributed != 'none' and t.optimizer != 'adamw':
+            raise ValueError('Distributed training currently requires standard AdamW')
+        if t.distributed == 'fsdp2' and (
+                m.backend != 'native' or m.type != 'decoder_rope' or m.peft.method != 'none' or
+                m.quantization != 'none' or m.custom_swiglu_path or t.compile or
+                t.precision == 'fp16' or t.accelerator not in {'auto', 'cuda'} or
+                self.stage.kind not in {'pretrain', 'midtrain'} or self.stage.uses_distillation):
+            raise ValueError('FSDP2 requires native dense unquantized pretrain/midtrain, standard AdamW, '
+                             'CUDA FP32/BF16, no PEFT, teacher, compile or custom kernels')
         return self
 
     def validate_execution(self):

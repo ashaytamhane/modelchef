@@ -21,6 +21,7 @@ from modelchef.engines import create_model, load_parent, load_tokenizer
 from modelchef.execution import check_custom_kernel, configure_execution, plugin_fingerprint
 from modelchef.hardware import detect_hardware, resolve_runtime
 from modelchef.objectives import evaluate_stage, objective, pack_structured, prepare_structured
+from modelchef.phase_metrics import PhaseMetrics
 
 
 class Narrator:
@@ -111,6 +112,9 @@ def run_pipeline(config, root, resume=None, prepare_only=False):
     config, model_references = resolve_references(config, root, resume)
     config.validate_execution()
     root = Path(root).resolve()
+    if config.training.distributed == 'fsdp2' and not prepare_only:
+        from modelchef.fsdp_training import run_fsdp
+        return run_fsdp(config, root, resume)
     if config.training.distributed == 'ddp' and not prepare_only:
         from modelchef.distributed import run_distributed
         return run_distributed(config, root, resume)
@@ -192,15 +196,20 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     torch.manual_seed(c.training.seed)
     torch.use_deterministic_algorithms(c.training.deterministic)
     torch.backends.cuda.matmul.allow_tf32 = c.training.allow_tf32
-    runtime = resolve_runtime(c.training.model_dump(), detect_hardware())
+    settings = c.training.model_dump()
+    preparing_shards = prepare_only and c.training.distributed == 'fsdp2'
+    if preparing_shards:
+        settings = {**settings, 'accelerator': 'cpu', 'precision': 'fp32'}
+    runtime = resolve_runtime(settings, detect_hardware())
     device = runtime["device"]
+    phases = PhaseMetrics(device, c.training.profile_phases)
     if c.model.quantization == 'nvfp4' and device != 'cuda':
         raise ValueError('NVFP4 requires a CUDA runtime')
     if c.model.peft.method == 'qlora' and device != 'cuda':
         raise ValueError('QLoRA requires a CUDA runtime')
-    if c.model.attention_kernel not in {'auto', 'math'} and device != 'cuda':
+    if c.model.attention_kernel not in {'auto', 'math'} and device != 'cuda' and not preparing_shards:
         raise ValueError('Selected optimized attention kernel requires CUDA/ROCm')
-    if c.training.optimizer_kernel == 'fused' and device != 'cuda':
+    if c.training.optimizer_kernel == 'fused' and device != 'cuda' and not preparing_shards:
         raise ValueError('Fused optimizer selection currently requires CUDA/ROCm')
     if c.model.custom_swiglu_path:
         kernel_hash = plugin_fingerprint(root / c.model.custom_swiglu_path)
@@ -380,7 +389,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     n.stage("6. Construct the training model", "The native decoder uses causal attention, RoPE, GQA, "
             "RMSNorm and SwiGLU. Pretraining starts from random weights; later stages restore a parent. "
             "The HF adapter loads local pretrained models without remote code or implicit downloads.")
-    model = create_model(c.model, tokenizer.get_vocab_size()).to(device)
+    with phases.measure('model_initialization'):
+        model = create_model(c.model, tokenizer.get_vocab_size()).to(device)
     if parent is not None:
         load_parent(model, parent, parent_config.model)
     if c.model.quantization == 'fp4_fake':
@@ -432,12 +442,15 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
           f"attention heads={c.model.attention_heads}; KV heads={c.model.kv_heads}.")
     t = c.training
     evaluation_batch_size = c.evaluation.batch_size or t.micro_batch_size
-    report['execution'] = configure_execution(model, t, device)
+    report['execution'] = ({'preparation_only': True, 'note': 'GPU kernels are not executed during CPU preparation.'}
+                           if preparing_shards else configure_execution(model, t, device))
     groups = [{"params": [p for p in model.parameters() if p.requires_grad and p.ndim >= 2],
                "weight_decay": t.weight_decay},
               {"params": [p for p in model.parameters() if p.requires_grad and p.ndim < 2], "weight_decay": 0}]
     from modelchef.optimizers import InBackwardAdamW, create_optimizer
-    optimizer = create_optimizer(groups, t, device)
+    with phases.measure('optimizer_initialization'):
+        optimizer = create_optimizer(groups, t.model_copy(update={'optimizer_kernel': 'default'})
+                                     if preparing_shards else t, device)
     if isinstance(optimizer, InBackwardAdamW) and runtime['requires_grad_scaler']:
         raise ValueError('In-backward AdamW does not support FP16 gradient scaling')
     scaler = torch.amp.GradScaler("cuda", enabled=runtime["requires_grad_scaler"])
@@ -461,7 +474,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     def save_checkpoint(index):
         path = checkpoints / f"step-{index:06d}.pt"
         from modelchef.checkpointing import atomic_save
-        atomic_save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
+        with phases.measure('checkpoint'):
+            atomic_save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
                     "scaler": scaler.state_dict(), "step": index, "tokens_seen": consumed,
                     "skipped_optimizer_updates": skipped_updates,
                     "config_sha256": fingerprint, "data_sha256": data_hash,
@@ -473,7 +487,9 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         report['checkpoint'] = str(path)
         n.say(f"Checkpoint saved at step {index}: {path.name}", detail=True)
         from modelchef.recovery import checkpoint_to_s3
-        uploaded = checkpoint_to_s3(root, folder, path)
+        # FSDP acknowledges a distributed checkpoint after training shards exist,
+        # not this temporary CPU initialization checkpoint.
+        uploaded = checkpoint_to_s3(root, folder, path) if not preparing_shards else None
         if uploaded is not None:
             n.say(f'S3 recovery committed at step {index}: weights, optimizer, RNG, tokenizer and data snapshots.')
         if uploaded is not None or 'MODELCHEF_LOCAL_CHECKPOINT_KEEP' in os.environ:
@@ -512,8 +528,9 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             ' Use AdamW, gradient accumulation/clipping and the configured schedule. '
             'A short test validates execution; it does not establish model quality.')
     evaluation_blocks = {name: parts[:2] for name, parts in blocks.items()}
-    baseline = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
-                        evaluation_batch_size, device, amp)
+    with phases.measure('initial_validation'):
+        baseline = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
+                            evaluation_batch_size, device, amp)
     n.say(f"Initial validation loss={baseline['loss']:.4f}; perplexity={baseline['perplexity']:.2f}.")
     if device == 'cuda':
         torch.cuda.synchronize()
@@ -546,7 +563,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             parts = tuple(part[indices].to(device) for part in blocks["train"])
             if c.tokenizer.packing == 'document' or c.stage.kind in {'sft', 'distill'}:
                 parts = trim_padded_pair(*parts)
-            with amp():
+            with phases.measure('forward'), amp():
                 loss, objective_metrics = objective(model, parts, c, reference, tokenizer)
                 if getattr(model, 'auxiliary_loss', None) is not None:
                     loss = loss + model.auxiliary_loss
@@ -555,7 +572,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                     t.gradient_accumulation if key in {'reward_mean', 'teacher_kl'} else 1)
             if not torch.isfinite(loss):
                 raise FloatingPointError("Non-finite training loss")
-            scaler.scale(loss / t.gradient_accumulation).backward()
+            with phases.measure('backward'):
+                scaler.scale(loss / t.gradient_accumulation).backward()
             train_loss += loss.item() / t.gradient_accumulation
             step_tokens += sum((part != -100).sum().item() for part in parts[1::2])
         scaler.unscale_(optimizer)
@@ -572,8 +590,9 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             n.say(f'FP16 gradient overflow: skipped update and reduced loss scale to '
                   f'{scaler.get_scale():g}; retrying optimizer step {step + 1}.')
             continue
-        scaler.step(optimizer)
-        scaler.update()
+        with phases.measure('optimizer_update'):
+            scaler.step(optimizer)
+            scaler.update()
         step += 1
         consumed += step_tokens
         metrics = {"step": step, "training_loss": train_loss, "learning_rate": lr,
@@ -586,8 +605,9 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             time.monotonic() - started, 1e-9)
         metrics.update(auxiliary)
         if step % t.evaluate_every == 0 or step == t.steps:
-            metrics["validation"] = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
-                                              evaluation_batch_size, device, amp)
+            with phases.measure('validation'):
+                metrics["validation"] = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
+                                                  evaluation_batch_size, device, amp)
         with (folder / "metrics.jsonl").open("a", encoding="utf-8") as output:
             output.write(json.dumps(metrics) + "\n")
         if gate and step - initial_step == gate.probe_steps:
@@ -604,7 +624,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                     float(os.environ.get('MODELCHEF_DEADLINE_EPOCH',
                           str(time.time() + t.max_runtime_seconds))) - time.time())),
                 safety_multiplier=gate.safety_multiplier, overhead_seconds=gate.overhead_seconds,
-                peak_allocated_bytes=torch.cuda.max_memory_allocated() if device == 'cuda' else 0,
+                peak_allocated_bytes=max(torch.cuda.max_memory_allocated(),
+                    phases.cuda_peaks()['peak_allocated_bytes']) if device == 'cuda' else 0,
                 total_memory_bytes=torch.cuda.get_device_properties(0).total_memory if device == 'cuda' else 0,
                 max_allocated_memory_fraction=gate.max_allocated_memory_fraction)
             (folder / 'performance-gate.json').write_text(json.dumps(gate_result, indent=2))
@@ -634,13 +655,16 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     report['performance'] = {
         'training_loop_seconds': elapsed_loop,
         'tokens_per_second': (consumed - saved.get('tokens_seen', 0) if resume else consumed) / elapsed_loop,
-        'peak_cuda_allocated_bytes': torch.cuda.max_memory_allocated() if device == 'cuda' else None,
-        'peak_cuda_reserved_bytes': torch.cuda.max_memory_reserved() if device == 'cuda' else None,
+        'peak_cuda_allocated_bytes': max(torch.cuda.max_memory_allocated(),
+            phases.cuda_peaks()['peak_allocated_bytes']) if device == 'cuda' else None,
+        'peak_cuda_reserved_bytes': max(torch.cuda.max_memory_reserved(),
+            phases.cuda_peaks()['peak_reserved_bytes']) if device == 'cuda' else None,
         'scope': 'Training loop, including loop compilation, evaluations and checkpoints; excludes setup/initial validation.'}
-    validation = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
-                          evaluation_batch_size, device, amp)
-    test = (evaluate(model, evaluation_blocks["test"], c.evaluation.batches,
-                     evaluation_batch_size, device, amp) if c.evaluation.evaluate_test else None)
+    with phases.measure('final_evaluation'):
+        validation = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
+                              evaluation_batch_size, device, amp)
+        test = (evaluate(model, evaluation_blocks["test"], c.evaluation.batches,
+                         evaluation_batch_size, device, amp) if c.evaluation.evaluate_test else None)
     report['stage_evaluation'] = {
         'validation': evaluate_stage(model, reference, blocks['validation'], tokenizer, c, device, amp)}
     if c.evaluation.evaluate_test:
@@ -666,10 +690,11 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     gc.collect()
     if device == 'cuda':
         torch.cuda.empty_cache()
-    model = create_model(c.model, tokenizer.get_vocab_size()).to(device)
-    restored_state = torch.load(checkpoint_path, map_location='cpu', weights_only=True, mmap=True)
-    model.load_state_dict(restored_state["model"])
-    del restored_state
+    with phases.measure('checkpoint_reload'):
+        model = create_model(c.model, tokenizer.get_vocab_size()).to(device)
+        restored_state = torch.load(checkpoint_path, map_location='cpu', weights_only=True, mmap=True)
+        model.load_state_dict(restored_state["model"])
+        del restored_state
     model.eval()
     with torch.no_grad(), amp():
         if not torch.allclose(expected, model(probe), rtol=tolerance, atol=tolerance):
@@ -721,6 +746,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                   source=source, processing=processing, tokenizer_sha256=tokenizer_hash,
                   data_sha256=data_hash, tokens_file_sha256=token_hash, generation=sample)
     report.update(benchmark_source=benchmark_source, benchmark_scores=benchmark_scores)
+    report['phase_metrics'] = phases.rows
     (folder / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     from modelchef.recovery import checkpoint_to_s3
     checkpoint_to_s3(root, folder, checkpoint_path)

@@ -33,7 +33,7 @@ def guest_plan(config, related_models=(), cloud_extra='aws'):
     if any(model.custom_swiglu_path for model in models):
         extras += ['cuda-kernels', 'cuda13-toolchain']
     command = [sys.executable, '-m', 'modelchef.cli', 'pipeline', 'configs/job.yaml', '--run']
-    if config.training.distributed == 'ddp':
+    if config.training.distributed != 'none':
         command = [sys.executable, '-m', 'torch.distributed.run', '--standalone',
                    '--nproc-per-node=gpu', '--module', '--', *command[2:]]
     return {'extras': extras, 'command': command,
@@ -76,8 +76,8 @@ def prepare_and_run(path, cloud_extra='aws'):
     import torch
     if not torch.cuda.is_available():
         raise RuntimeError('Managed GPU training requires a CUDA-compatible host driver and environment')
-    if any(config.training.distributed == 'ddp' for config in configs) and torch.cuda.device_count() < 2:
-        raise ValueError('DDP recipe requires an instance with at least two visible GPUs')
+    if any(config.training.distributed != 'none' for config in configs) and torch.cuda.device_count() < 2:
+        raise ValueError('Distributed recipe requires an instance with at least two visible GPUs')
     models = [config.model for config in configs] + related
     if any(getattr(model, 'quantization', None) == 'nvfp4' for model in models):
         from modelchef.low_precision import require_nvfp4

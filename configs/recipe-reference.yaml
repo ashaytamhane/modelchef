@@ -90,7 +90,8 @@ model:  # OPTIONAL: defaults are supplied when omitted.
   gradient_checkpointing: false  # OPTIONAL: Recompute activations during backward to trade compute for memory.
 training:  # OPTIONAL: defaults are supplied when omitted.
   performance_gate: null  # OPTIONAL: measured throughput/memory gate; see the research tutorial.
-  distributed: none  # OPTIONAL: none | ddp; DDP launches with torchrun.
+  distributed: none  # OPTIONAL: none | ddp | fsdp2; distributed modes launch with torchrun.
+  profile_phases: false  # OPTIONAL: synchronized phase timing/memory; adds overhead.
   distributed_timeout_seconds: 300  # OPTIONAL: process-group timeout.
   compile: false  # OPTIONAL: Opt in to torch.compile; default leaves execution eager.
   compile_backend: inductor  # OPTIONAL: inductor | aot_eager | eager.

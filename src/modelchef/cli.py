@@ -124,6 +124,14 @@ def _main() -> None:
     media_predict.add_argument('--prompt', default='Describe this image.')
     media_predict.add_argument('--model-path', type=Path, help='Override with a trained export directory')
     command.add_parser("doctor", help="Inspect Python, PyTorch and CUDA")
+    memory_parser = command.add_parser('plan-memory', help='Estimate native AdamW state and memory scenarios; no launch')
+    memory_parser.add_argument('path', type=Path)
+    memory_parser.add_argument('--gpu-count', type=int, default=1)
+    memory_parser.add_argument('--memory-gib', type=float, help='Capacity of EACH GPU in GiB')
+    memory_parser.add_argument('--hourly-usd', type=float, help='Combined hourly compute price of ALL GPUs')
+    memory_parser.add_argument('--measured-tokens-per-second', type=float, help='Measured GLOBAL throughput of this exact configuration')
+    memory_parser.add_argument('--remaining-tokens', type=int)
+    memory_parser.add_argument('--topology', action='store_true', help='Read this machine with nvidia-smi topo -m')
     config_parser = command.add_parser("check-config", help="Validate a runtime config, training recipe or workflow")
     config_parser.add_argument("path", type=Path)
     runtime_parser = command.add_parser("resolve-runtime", help="Resolve auto device and precision")
@@ -289,7 +297,19 @@ def _main() -> None:
                                help="Hide CLI progress on stderr")
     args = parser.parse_args()
     with operation(args.command, args.quiet):
-        if args.command == 'neuron':
+        if args.command == 'plan-memory':
+            from modelchef.run_config import RunConfig
+            from modelchef.training_memory import memory_plan
+            config = RunConfig.model_validate(yaml.safe_load(args.path.read_text(encoding='utf-8')))
+            result = memory_plan(config, gpu_count=args.gpu_count,
+                memory_bytes=args.memory_gib * 1024**3 if args.memory_gib is not None else None,
+                hourly_usd=args.hourly_usd, measured_tokens_per_second=args.measured_tokens_per_second,
+                remaining_tokens=args.remaining_tokens)
+            if args.topology:
+                from modelchef.hardware import gpu_topology
+                result['local_gpu_topology'] = gpu_topology()
+            print(json.dumps(result, indent=2))
+        elif args.command == 'neuron':
             from modelchef.neuron import NeuronRecipe, compile_model, plan, train
             config = NeuronRecipe.model_validate(yaml.safe_load(args.path.read_text(encoding='utf-8')))
             if args.action == 'compile' and args.resume:

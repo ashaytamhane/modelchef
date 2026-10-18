@@ -357,12 +357,12 @@ def training_source(tmp_path):
     return tmp_path, config
 
 
-@pytest.mark.parametrize('feature', ['ddp', 'nvfp4'])
+@pytest.mark.parametrize('feature', ['ddp', 'fsdp2', 'nvfp4'])
 def test_managed_training_preserves_gpu_optimization_policy(training_source, feature):
     from modelchef.aws_training import build_bundle
     root, config = training_source
-    if feature == 'ddp':
-        config.training.distributed = 'ddp'
+    if feature in {'ddp', 'fsdp2'}:
+        config.training.distributed = feature
     else:
         config.model.quantization = 'nvfp4'
     (root / 'job.yaml').write_text(yaml.safe_dump(config.model_dump(mode='json')))
@@ -375,7 +375,7 @@ def test_managed_training_preserves_gpu_optimization_policy(training_source, fea
     assert loaded['model']['quantization'] == config.model.quantization
     assert loaded['training']['distributed'] == config.training.distributed
     plan = guest_plan(config)
-    if feature == 'ddp':
+    if feature in {'ddp', 'fsdp2'}:
         assert '--nproc-per-node=gpu' in plan['command']
         assert '--' in plan['command']
     else:
