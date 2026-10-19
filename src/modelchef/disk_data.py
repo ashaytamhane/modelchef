@@ -26,11 +26,11 @@ class JsonlRows:
 
 
 def acquire_disk(config, root, explain):
-    c = config.data
-    if c.provider == 'hf_parquet':
+    data_config = config.data
+    if data_config.provider == 'hf_parquet':
         return _acquire_parquet_disk(config, root, explain)
-    paths = [(root / name).resolve() for name in (c.local_paths or [c.local_path])]
-    identity = digest(json.dumps(c.model_dump(), sort_keys=True).encode())
+    paths = [(root / name).resolve() for name in (data_config.local_paths or [data_config.local_path])]
+    identity = digest(json.dumps(data_config.model_dump(), sort_keys=True).encode())
     folder = root / 'data/cache' / identity
     folder.mkdir(parents=True, exist_ok=True)
     temporary = folder / ('raw-' + uuid.uuid4().hex + '.tmp')
@@ -40,20 +40,20 @@ def acquire_disk(config, root, explain):
         with temporary.open('wb') as target:
             for path in paths:
                 with path.open('rb') as source:
-                    while line := source.readline(min(c.max_record_bytes,
-                                                      c.max_download_bytes - downloaded) + 1):
-                        if len(line) > c.max_record_bytes:
+                    while line := source.readline(min(data_config.max_record_bytes,
+                                                      data_config.max_download_bytes - downloaded) + 1):
+                        if len(line) > data_config.max_record_bytes:
                             raise ValueError('JSONL record exceeds max_record_bytes')
                         downloaded += len(line)
-                        if downloaded > c.max_download_bytes:
+                        if downloaded > data_config.max_download_bytes:
                             raise ValueError('Local shards exceed the configured byte budget')
                         if not line.strip():
                             continue
                         row = json.loads(line)
                         current, index = index, index + 1
-                        if current < c.offset:
+                        if current < data_config.offset:
                             continue
-                        record = {'text': row[c.text_field], 'source_index': current}
+                        record = {'text': row[data_config.text_field], 'source_index': current}
                         if 'split_group' in row:
                             if not isinstance(row['split_group'], str) or not row['split_group']:
                                 raise ValueError('split_group must be a nonempty string')
@@ -62,9 +62,9 @@ def acquire_disk(config, root, explain):
                         target.write(payload)
                         checksum.update(payload)
                         count += 1
-                        if count >= c.max_documents:
+                        if count >= data_config.max_documents:
                             break
-                if count >= c.max_documents:
+                if count >= data_config.max_documents:
                     break
         # Content-addressed snapshots do not collide between concurrent readers/runs.
         raw = folder / (checksum.hexdigest() + '.jsonl')
@@ -72,7 +72,7 @@ def acquire_disk(config, root, explain):
     finally:
         temporary.unlink(missing_ok=True)
     info = {'schema_version': 1, 'provider': 'local_jsonl', 'storage': 'disk',
-            'paths': [str(p) for p in paths], 'documents': count,
+            'paths': [str(input_path) for input_path in paths], 'documents': count,
             'response_bytes': downloaded, 'raw_sha256': checksum.hexdigest()}
     explain(f'Snapshotted {count} records from {len(paths)} local shards; bounded RAM processing.')
     return JsonlRows(raw, count), info
@@ -81,8 +81,8 @@ def acquire_disk(config, root, explain):
 def _acquire_parquet_disk(config, root, explain):
     """Stream bulk rows to an immutable snapshot without retaining corpus text in RAM."""
     from modelchef.bulk_data import acquire_parquet
-    c = config.data
-    identity = digest(json.dumps(c.model_dump(), sort_keys=True).encode())
+    data_config = config.data
+    identity = digest(json.dumps(data_config.model_dump(), sort_keys=True).encode())
     folder = root / 'data/cache' / identity
     folder.mkdir(parents=True, exist_ok=True)
     manifest = folder / 'source.json'
@@ -100,7 +100,7 @@ def _acquire_parquet_disk(config, root, explain):
                 payload = (json.dumps(row, ensure_ascii=False) + '\n').encode()
                 target.write(payload)
                 checksum.update(payload)
-            count, downloaded, origin = acquire_parquet(c, folder, explain, row_sink=sink)
+            count, downloaded, origin = acquire_parquet(data_config, folder, explain, row_sink=sink)
         raw = folder / (checksum.hexdigest() + '.jsonl')
         temporary.replace(raw)
         info = {'schema_version': 1, **origin, 'storage': 'disk', 'documents': count,
@@ -145,7 +145,7 @@ def snapshot_rows(rows, destination, ensure_ascii=False):
 def _process_streaming(records, config, root, benchmark):
     """Filter and split in bounded memory when no duplicate index is requested."""
     from contextlib import ExitStack
-    c = config.processing
+    processing = config.processing
     folder = root / 'data/cache/processed' / uuid.uuid4().hex
     folder.mkdir(parents=True)
     counts, sizes, smallest = Counter(), Counter(), {}
@@ -159,8 +159,8 @@ def _process_streaming(records, config, root, benchmark):
                 continue
             ordering = digest(f'{config.training.seed}:'.encode() + cleaned['text'].encode())
             fraction = int(ordering[:16], 16) / 2**64
-            name = ('validation' if fraction < c.validation_fraction else
-                    'test' if fraction < c.validation_fraction + c.test_fraction else 'train')
+            name = ('validation' if fraction < processing.validation_fraction else
+                    'test' if fraction < processing.validation_fraction + processing.test_fraction else 'train')
             if 'split_group' in cleaned:
                 grouped = True
                 name = group_split(cleaned['split_group'], config)
@@ -209,12 +209,12 @@ def _process_streaming(records, config, root, benchmark):
 
 
 def process_disk(records, config, root):
-    c = config.processing
+    processing = config.processing
     benchmark = set()
-    for path in c.benchmark_files:
+    for path in processing.benchmark_files:
         benchmark |= ngrams((root / path).read_text(encoding='utf-8'),
-                            c.decontamination_ngram_words)
-    if not c.exact_dedup and not c.near_dedup:
+                            processing.decontamination_ngram_words)
+    if not processing.exact_dedup and not processing.near_dedup:
         return _process_streaming(records, config, root, benchmark)
     folder = root / 'data/cache/processed' / uuid.uuid4().hex
     folder.mkdir(parents=True)
@@ -237,11 +237,11 @@ def process_disk(records, config, root):
                 continue
             text = cleaned['text']
             fingerprint = digest(text.casefold().encode())
-            if c.exact_dedup and connection.execute(
+            if processing.exact_dedup and connection.execute(
                     'SELECT 1 FROM documents WHERE fingerprint=? LIMIT 1', (fingerprint,)).fetchone():
                 counts['exact_duplicates'] += 1
                 continue
-            shingles, bands = _sketch(text, c.dedup_ngram_words) if c.near_dedup else (set(), [])
+            shingles, bands = _sketch(text, processing.dedup_ngram_words) if processing.near_dedup else (set(), [])
             duplicate = False
             if bands:
                 clauses = ' OR '.join('(b.band=? AND b.signature=?)' for _ in bands)
@@ -250,8 +250,8 @@ def process_disk(records, config, root):
                     'SELECT text FROM documents WHERE id IN '
                     '(SELECT DISTINCT b.document FROM bands b WHERE ' + clauses + ')', params)
                 for (previous,) in candidates:
-                    other = ngrams(previous, c.dedup_ngram_words)
-                    if len(shingles & other) / len(shingles | other) >= c.near_dedup_jaccard:
+                    other = ngrams(previous, processing.dedup_ngram_words)
+                    if len(shingles & other) / len(shingles | other) >= processing.near_dedup_jaccard:
                         duplicate = True
                         break
                 candidates.close()
@@ -260,8 +260,8 @@ def process_disk(records, config, root):
                 continue
             ordering = digest(f'{config.training.seed}:'.encode() + text.encode())
             fraction = int(ordering[:16], 16) / 2**64
-            split = ('validation' if fraction < c.validation_fraction else
-                     'test' if fraction < c.validation_fraction + c.test_fraction else 'train')
+            split = ('validation' if fraction < processing.validation_fraction else
+                     'test' if fraction < processing.validation_fraction + processing.test_fraction else 'train')
             grouping = cleaned.get('split_group')
             if grouping is not None:
                 grouped = True

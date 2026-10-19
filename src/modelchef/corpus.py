@@ -89,14 +89,14 @@ def viewer_page(request, timeout, limit, explain):
 
 
 def acquire(config, root, explain):
-    c = config.data
-    if c.storage == 'disk':
+    data_config = config.data
+    if data_config.storage == 'disk':
         from modelchef.disk_data import acquire_disk
         return acquire_disk(config, root, explain)
-    identity = digest(json.dumps(c.model_dump(), sort_keys=True).encode())
+    identity = digest(json.dumps(data_config.model_dump(), sort_keys=True).encode())
     cache = root / "data/cache" / identity
     raw, manifest = cache / "raw.jsonl", cache / "source.json"
-    if c.provider != "local_jsonl" and raw.exists() and manifest.exists():
+    if data_config.provider != "local_jsonl" and raw.exists() and manifest.exists():
         info = json.loads(manifest.read_text())
         content = raw.read_bytes()
         if digest(content) != info["raw_sha256"]:
@@ -104,26 +104,26 @@ def acquire(config, root, explain):
         explain(f"Reusing verified local snapshot: {info['documents']} documents; no download.")
         return [json.loads(line) for line in content.splitlines()], info
     records, downloaded = [], 0
-    if c.provider == "local_jsonl":
-        paths = [(root / name).resolve() for name in (c.local_paths or [c.local_path])]
+    if data_config.provider == "local_jsonl":
+        paths = [(root / name).resolve() for name in (data_config.local_paths or [data_config.local_path])]
         path = paths[0]
         from contextlib import ExitStack
         from itertools import chain
         with ExitStack() as stack:
-            handles = [stack.enter_context(p.open('rb')) for p in paths]
+            handles = [stack.enter_context(input_path.open('rb')) for input_path in paths]
             handle = iter(chain.from_iterable(iter(lambda h=h: h.readline(
-                min(c.max_record_bytes, max(0, c.max_download_bytes - downloaded)) + 1), b'')
+                min(data_config.max_record_bytes, max(0, data_config.max_download_bytes - downloaded)) + 1), b'')
                 for h in handles))
             index = 0
             for line in handle:
                 downloaded += len(line)
-                if downloaded > c.max_download_bytes:
+                if downloaded > data_config.max_download_bytes:
                     raise ValueError("Local input exceeds configured byte budget")
-                if len(line) > c.max_record_bytes:
+                if len(line) > data_config.max_record_bytes:
                     raise ValueError('JSONL record exceeds max_record_bytes')
                 if not line.strip():
                     continue
-                if index < c.offset:
+                if index < data_config.offset:
                     index += 1
                     continue
                 row = json.loads(line)
@@ -141,47 +141,47 @@ def acquire(config, root, explain):
                     grouping = row.get('split_group')
                     if grouping is not None and (not isinstance(grouping, str) or not grouping):
                         raise ValueError('split_group must be a nonempty string')
-                    records.append({"text": row[c.text_field], "source_index": index,
+                    records.append({"text": row[data_config.text_field], "source_index": index,
                                     **({'split_group': grouping} if grouping else {})})
-                if len(records) >= c.max_documents:
+                if len(records) >= data_config.max_documents:
                     break
                 index += 1
-        origin = {"provider": "local_jsonl", "path": str(path), "paths": [str(p) for p in paths]}
-    elif c.provider == 'hf_parquet':
+        origin = {"provider": "local_jsonl", "path": str(path), "paths": [str(input_path) for input_path in paths]}
+    elif data_config.provider == 'hf_parquet':
         from modelchef.bulk_data import acquire_parquet
-        records, downloaded, origin = acquire_parquet(c, cache, explain)
+        records, downloaded, origin = acquire_parquet(data_config, cache, explain)
     else:
         headers = viewer_headers()
         explain('Using authenticated dataset viewer requests.' if 'Authorization' in headers
                 else 'Using anonymous dataset viewer requests; optional HF_TOKEN or hf auth login enables authentication.')
         explain("Downloading only viewer row pages, not the multi-GB Parquet corpus. "
                 "This is an ordered smoke-test slice, not a representative random sample.")
-        for offset in range(c.offset, c.offset + c.max_documents, c.page_size):
-            if offset != c.offset:
+        for offset in range(data_config.offset, data_config.offset + data_config.max_documents, data_config.page_size):
+            if offset != data_config.offset:
                 time.sleep(2)  # Pace viewer requests instead of bursting through the API.
-            query = urlencode({"dataset": c.dataset, "config": c.subset, "split": c.split,
+            query = urlencode({"dataset": data_config.dataset, "config": data_config.subset, "split": data_config.split,
                                "offset": offset,
-                               "length": min(c.page_size, c.offset + c.max_documents - offset)})
+                               "length": min(data_config.page_size, data_config.offset + data_config.max_documents - offset)})
             request = Request("https://datasets-server.huggingface.co/rows?" + query,
                               headers=headers)
-            payload = viewer_page(request, c.timeout_seconds,
-                                  c.max_download_bytes - downloaded + 1, explain)
+            payload = viewer_page(request, data_config.timeout_seconds,
+                                  data_config.max_download_bytes - downloaded + 1, explain)
             downloaded += len(payload)
-            if downloaded > c.max_download_bytes:
+            if downloaded > data_config.max_download_bytes:
                 raise ValueError("Download exceeded byte cap; no complete snapshot cached")
             page = json.loads(payload)
             if not page["rows"]:
                 break
             for entry in page["rows"]:
-                if c.text_field in entry.get("truncated_cells", []):
+                if data_config.text_field in entry.get("truncated_cells", []):
                     raise ValueError("Viewer text was truncated; use a complete local snapshot")
-                records.append({"text": entry["row"][c.text_field],
+                records.append({"text": entry["row"][data_config.text_field],
                                 "source_index": entry["row_idx"]})
             explain(f"Acquired {len(records)} rows; {downloaded:,} response bytes / "
-                    f"{c.max_download_bytes:,} byte cap.")
-        origin = {"provider": "hf_rows", "dataset": c.dataset, "subset": c.subset,
-                  "split": c.split, "offset": c.offset,
-                  "dataset_card": f"https://huggingface.co/datasets/{c.dataset}",
+                    f"{data_config.max_download_bytes:,} byte cap.")
+        origin = {"provider": "hf_rows", "dataset": data_config.dataset, "subset": data_config.subset,
+                  "split": data_config.split, "offset": data_config.offset,
+                  "dataset_card": f"https://huggingface.co/datasets/{data_config.dataset}",
                   "revision": None,
                   "revision_note": "Viewer API is mutable; reproducibility pins the saved raw SHA256, "
                   "not an upstream Git revision. Preserve snapshot for exact replay."}
@@ -208,45 +208,45 @@ PII = re.compile(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}|"
 
 def clean_record(row, config, benchmark, counts):
     """Normalize/filter one record; deduplication and splitting are separate policies."""
-    c = config.processing
+    processing = config.processing
     counts["input"] += 1
     text = row["text"]
     if not isinstance(text, str):
         counts["invalid_text"] += 1
         return None
-    text = unicodedata.normalize(c.unicode_normalization, html.unescape(text))
-    if c.strip_html:
+    text = unicodedata.normalize(processing.unicode_normalization, html.unescape(text))
+    if processing.strip_html:
         text = re.sub(r"<[^>]+>", " ", text)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     repetition = 1 - len(set(lines)) / max(len(lines), 1)
     text = " ".join(" ".join(lines).split())
-    if c.collapse_consecutive_duplicate_sentences:
+    if processing.collapse_consecutive_duplicate_sentences:
         from modelchef.text_cleaning import collapse_duplicate_sentences
-        text, removed, chars = collapse_duplicate_sentences(text, c.minimum_sentence_words)
+        text, removed, chars = collapse_duplicate_sentences(text, processing.minimum_sentence_words)
         if removed:
             counts['sentence_cleanup_documents'] += 1
             counts['duplicate_sentences_removed'] += removed
             counts['duplicate_sentence_chars_removed'] += chars
-    if not c.min_chars <= len(text) <= c.max_chars:
+    if not processing.min_chars <= len(text) <= processing.max_chars:
         counts["length"] += 1
         return None
-    if sum(char.isalnum() for char in text) / len(text) < c.min_alnum_fraction:
+    if sum(char.isalnum() for char in text) / len(text) < processing.min_alnum_fraction:
         counts["quality"] += 1
         return None
-    if repetition > c.max_repeated_line_fraction:
+    if repetition > processing.max_repeated_line_fraction:
         counts["repetition"] += 1
         return None
     if config.data.domain_keywords and not any(
             word.casefold() in text.casefold() for word in config.data.domain_keywords):
         counts["domain"] += 1
         return None
-    if c.pii != "off" and PII.search(text):
-        if c.pii == "drop":
+    if processing.pii != "off" and PII.search(text):
+        if processing.pii == "drop":
             counts["pii_dropped"] += 1
             return None
         text, matches = PII.subn("[REDACTED]", text)
         counts["pii_redactions"] += matches
-    if benchmark and benchmark & ngrams(text, c.decontamination_ngram_words):
+    if benchmark and benchmark & ngrams(text, processing.decontamination_ngram_words):
         counts["benchmark_overlap"] += 1
         return None
     return {"text": text, "sha256": digest(text.encode()), "source_index": row["source_index"],
@@ -255,20 +255,20 @@ def clean_record(row, config, benchmark, counts):
 
 def group_split(key, config):
     fraction = int(digest(f'{config.training.seed}:{key}'.encode())[:16], 16) / 2**64
-    c = config.processing
-    return ('validation' if fraction < c.validation_fraction else
-            'test' if fraction < c.validation_fraction + c.test_fraction else 'train')
+    processing = config.processing
+    return ('validation' if fraction < processing.validation_fraction else
+            'test' if fraction < processing.validation_fraction + processing.test_fraction else 'train')
 
 
 def process(records, config, root):
-    c = config.processing
+    processing = config.processing
     if config.data.storage == 'disk':
         from modelchef.disk_data import process_disk
         return process_disk(records, config, root)
     benchmark = set()
-    for path in c.benchmark_files:
+    for path in processing.benchmark_files:
         benchmark |= ngrams((root / path).read_text(encoding="utf-8"),
-                            c.decontamination_ngram_words)
+                            processing.decontamination_ngram_words)
     counts, accepted, exact, near = Counter(), [], set(), []
     for row in records:
         cleaned = clean_record(row, config, benchmark, counts)
@@ -276,17 +276,17 @@ def process(records, config, root):
             continue
         text = cleaned['text']
         fingerprint = digest(text.casefold().encode())
-        if c.exact_dedup and fingerprint in exact:
+        if processing.exact_dedup and fingerprint in exact:
             counts["exact_duplicates"] += 1
             continue
-        shingles = ngrams(text, c.dedup_ngram_words)
-        if c.near_dedup and shingles and any(
-                len(shingles & previous) / len(shingles | previous) >= c.near_dedup_jaccard
+        shingles = ngrams(text, processing.dedup_ngram_words)
+        if processing.near_dedup and shingles and any(
+                len(shingles & previous) / len(shingles | previous) >= processing.near_dedup_jaccard
                 for previous in near):
             counts["near_duplicates"] += 1
             continue
         exact.add(fingerprint)
-        if c.near_dedup and shingles:
+        if processing.near_dedup and shingles:
             near.append(shingles)
         accepted.append(cleaned)
     counts["accepted"] = len(accepted)
@@ -296,9 +296,9 @@ def process(records, config, root):
     random.Random(config.training.seed).shuffle(accepted)
     # Rounding two held-out fractions must leave at least one training document,
     # including the smallest supported three-document dataset.
-    validation_count = min(len(accepted) - 2, max(1, int(len(accepted) * c.validation_fraction)))
+    validation_count = min(len(accepted) - 2, max(1, int(len(accepted) * processing.validation_fraction)))
     test_count = min(len(accepted) - validation_count - 1,
-                     max(1, int(len(accepted) * c.test_fraction)))
+                     max(1, int(len(accepted) * processing.test_fraction)))
     splits = {"validation": accepted[:validation_count],
               "test": accepted[validation_count:validation_count + test_count],
               "train": accepted[validation_count + test_count:]}
@@ -312,7 +312,7 @@ def process(records, config, root):
             raise ValueError('Grouped data has an empty split; acquire more independent groups')
     return splits, {"counts": dict(counts),
                     "split_policy": 'split_group-disjoint' if grouped else 'document-shuffle',
-                    "decontamination": "configured" if c.benchmark_files else "not_configured",
+                    "decontamination": "configured" if processing.benchmark_files else "not_configured",
                     "limitations": "Regex PII and lexical near-dedup are heuristics; "
                     "no guarantee of complete PII removal or benchmark decontamination.",
                     "split_documents": {key: len(value) for key, value in splits.items()}}

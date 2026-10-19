@@ -18,18 +18,18 @@ from modelchef.training_metrics import close_metrics, record_metrics, tensorboar
 
 def model_manifest(path, cap):
     path = Path(path).resolve()
-    files = sorted(p for p in path.iterdir() if p.is_file() and
-                   p.suffix in {'.json', '.safetensors', '.txt', '.model', '.jinja'})
-    if not (path / 'config.json').is_file() or not any(p.suffix == '.safetensors' for p in files):
+    files = sorted(model_file for model_file in path.iterdir() if model_file.is_file() and
+                   model_file.suffix in {'.json', '.safetensors', '.txt', '.model', '.jinja'})
+    if not (path / 'config.json').is_file() or not any(model_file.suffix == '.safetensors' for model_file in files):
         raise ValueError('Multimodal model requires a local config and safetensors weights')
-    if sum(p.stat().st_size for p in files) > cap:
+    if sum(model_file.stat().st_size for model_file in files) > cap:
         raise ValueError('Local model exceeds max_model_bytes')
-    names = {p.name for p in files}
+    names = {model_file.name for model_file in files}
     for index in path.glob('*.index.json'):
         for name in json.loads(index.read_text())['weight_map'].values():
             if name not in names:
                 raise ValueError('Model index references a missing or unsafe weight shard')
-    return {p.name: file_digest(p) for p in files}
+    return {model_file.name: file_digest(model_file) for model_file in files}
 
 
 def plan(config, root):

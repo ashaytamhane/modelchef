@@ -43,15 +43,15 @@ def bundle(root, settings):
     cap = int(settings.get('max_bundle_bytes', 1_000_000_000))
     if cap <= 0:
         raise ValueError('max_bundle_bytes must be positive')
-    files = {p.relative_to(root).as_posix(): p for p in (root / 'src/modelchef').glob('*.py')}
+    files = {file_path.relative_to(root).as_posix(): file_path for file_path in (root / 'src/modelchef').glob('*.py')}
     files['pyproject.toml'] = root / 'pyproject.toml'
     if (root / 'README.md').is_file():
         files['README.md'] = root / 'README.md'
-    for p in model.iterdir():
-        if p.is_file() and (p.suffix in {'.json', '.safetensors', '.model', '.bin'} or
-                            p.name in {'merges.txt', 'vocab.txt', 'chat_template.jinja'}):
-            files['model/' + p.name] = p
-    if sum(p.stat().st_size for p in files.values()) > cap:
+    for file_path in model.iterdir():
+        if file_path.is_file() and (file_path.suffix in {'.json', '.safetensors', '.model', '.bin'} or
+                            file_path.name in {'merges.txt', 'vocab.txt', 'chat_template.jinja'}):
+            files['model/' + file_path.name] = file_path
+    if sum(file_path.stat().st_size for file_path in files.values()) > cap:
         raise ValueError('Serving source/model exceeds bundle cap')
     inference['model_path'] = '/opt/modelchef-serving/model'
     inference['host'] = '0.0.0.0'
@@ -145,9 +145,9 @@ class ServingRunner:
         validate(settings)
         self.settings, self.root = settings, Path(root).resolve()
         session = session or boto3.Session(profile_name=settings['profile'], region_name=settings['region'])
-        cfg = Config(connect_timeout=5, read_timeout=10,
+        client_config = Config(connect_timeout=5, read_timeout=10,
                      retries={'total_max_attempts': 3, 'mode': 'standard'})
-        self.ec2, self.s3, self.ssm = (session.client(n, config=cfg) for n in ['ec2', 's3', 'ssm'])
+        self.ec2, self.s3, self.ssm = (session.client(service_name, config=client_config) for service_name in ['ec2', 's3', 'ssm'])
 
     def plan(self):
         payload = bundle(self.root, self.settings)
@@ -172,7 +172,7 @@ class ServingRunner:
         root_device = self.settings.get('root_device', image['RootDeviceName'])
         if root_device != image['RootDeviceName']:
             raise ValueError('root_device must match the selected AMI')
-        volume = next(m['Ebs'] for m in image['BlockDeviceMappings'] if m['DeviceName'] == root_device)
+        volume = next(device_mapping['Ebs'] for device_mapping in image['BlockDeviceMappings'] if device_mapping['DeviceName'] == root_device)
         if int(self.settings.get('storage_gb', 100)) < volume['VolumeSize']:
             raise ValueError('storage_gb is smaller than the AMI root volume')
         deployment = 'hosting-' + uuid.uuid4().hex
@@ -214,7 +214,7 @@ class ServingRunner:
         if len(found) != 1:
             raise ValueError('Expected one journaled hosting instance; inspect AWS before retrying deploy')
         instance = found[0]
-        tags = {t['Key']: t['Value'] for t in instance.get('Tags', [])}
+        tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
         if tags.get('Project') != 'ModelChef' or tags.get('Lifecycle') != 'persistent-serving' or tags.get('DeploymentId') != deployment:
             raise ValueError('Instance ownership tags do not match deployment')
         return instance

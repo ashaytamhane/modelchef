@@ -147,8 +147,8 @@ def cook(path, root, execute=False):
                 recipe['stage']['teacher_run'] = result['stages'][stage.teacher_stage]['run_dir']
             report(f'Cooking stage {stage.name}: {kind}.')
             os.environ['MODELCHEF_REMAINING_STAGE_TOKENS'] = str(sum(
-                p.training.steps * p.training.micro_batch_size * p.training.gradient_accumulation *
-                p.model.context_length for p in
+                stage_recipe.training.steps * stage_recipe.training.micro_batch_size * stage_recipe.training.gradient_accumulation *
+                stage_recipe.model.context_length for stage_recipe in
                 [previews[s.name] for s in config.stages[stage_index + 1:]]))
             recipe['name'] = config.name + '-' + stage.name
             result['stages'][stage.name] = run_pipeline(RunConfig.model_validate(recipe), root)

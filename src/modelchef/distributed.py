@@ -50,12 +50,12 @@ def run_distributed(config, root, resume=None):
             raise RuntimeError('Distributed preparation failed: ' + preparation[0]['error'])
         folder = Path(preparation[0]['report']['run_dir'])
         config = RunConfig.model_validate_json((folder / 'config.json').read_text())
-        c, t = config, config.training
-        phases = PhaseMetrics(device, t.profile_phases)
-        torch.backends.cuda.matmul.allow_tf32 = t.allow_tf32
-        random.seed(t.seed + rank)
-        torch.manual_seed(t.seed + rank)
-        torch.use_deterministic_algorithms(t.deterministic)
+        recipe, training = config, config.training
+        phases = PhaseMetrics(device, training.profile_phases)
+        torch.backends.cuda.matmul.allow_tf32 = training.allow_tf32
+        random.seed(training.seed + rank)
+        torch.manual_seed(training.seed + rank)
+        torch.use_deterministic_algorithms(training.deterministic)
         tokenizer = load_tokenizer(folder)
         from modelchef.disk_data import load_blocks
         blocks = load_blocks(folder)
@@ -64,41 +64,41 @@ def run_distributed(config, root, resume=None):
         if resume and saved.get('world_size') != world:
             raise ValueError('DDP resume requires the same world size')
         with phases.measure('model_initialization'):
-            model = create_model(c.model, tokenizer.get_vocab_size()).to(device)
+            model = create_model(recipe.model, tokenizer.get_vocab_size()).to(device)
             model.load_state_dict(saved['model'])
         reference = None
-        if c.stage.kind in {'dpo', 'distill'}:
+        if recipe.stage.kind in {'dpo', 'distill'}:
             from modelchef.chat import checkpoint_for
-            source = (root / (c.stage.teacher_run if c.stage.kind == 'distill' else c.stage.parent_run)).resolve()
+            source = (root / (recipe.stage.teacher_run if recipe.stage.kind == 'distill' else recipe.stage.parent_run)).resolve()
             source_config = RunConfig.model_validate_json((source / 'config.json').read_text())
-            architecture = source_config.model if c.stage.kind == 'distill' else c.model
+            architecture = source_config.model if recipe.stage.kind == 'distill' else recipe.model
             reference = create_model(architecture, tokenizer.get_vocab_size()).to(device)
             state = torch.load(checkpoint_for(source), map_location='cpu', weights_only=True)['model']
             load_parent(reference, state, source_config.model)
             reference.requires_grad_(False).eval()
-        if c.stage.kind == 'dpo':
+        if recipe.stage.kind == 'dpo':
             for network in [model, reference]:
                 for layer in network.modules():
                     if isinstance(layer, torch.nn.Dropout):
                         layer.p = 0
                     if hasattr(layer, 'attention_dropout'):
                         layer.attention_dropout = 0.0
-                    if hasattr(layer, 'c'):
-                        layer.c = layer.c.model_copy(update={'attention_dropout': 0})
+                    if hasattr(layer, 'attention_config'):
+                        layer.attention_config = layer.attention_config.model_copy(update={'attention_dropout': 0})
         wrapped = DistributedDataParallel(model,
             device_ids=[local_rank] if device == 'cuda' else None,
-            find_unused_parameters=c.model.type == 'decoder_moe', broadcast_buffers=False)
+            find_unused_parameters=recipe.model.type == 'decoder_moe', broadcast_buffers=False)
         groups = [{'params': [p for p in model.parameters() if p.requires_grad and p.ndim >= 2],
-                   'weight_decay': t.weight_decay},
+                   'weight_decay': training.weight_decay},
                   {'params': [p for p in model.parameters() if p.requires_grad and p.ndim < 2],
                    'weight_decay': 0}]
-        options = {'fused': True} if t.optimizer_kernel == 'fused' else (
-            {'foreach': True} if t.optimizer_kernel == 'foreach' else {})
+        options = {'fused': True} if training.optimizer_kernel == 'fused' else (
+            {'foreach': True} if training.optimizer_kernel == 'foreach' else {})
         with phases.measure('optimizer_initialization'):
-            optimizer = torch.optim.AdamW(groups, lr=t.learning_rate, betas=t.betas,
-                                         eps=t.optimizer_eps, **options)
+            optimizer = torch.optim.AdamW(groups, lr=training.learning_rate, betas=training.betas,
+                                         eps=training.optimizer_eps, **options)
         scaler = torch.amp.GradScaler('cuda', enabled=runtime['requires_grad_scaler'])
-        sampler = torch.Generator().manual_seed(t.seed + rank)
+        sampler = torch.Generator().manual_seed(training.seed + rank)
         if resume:
             optimizer.load_state_dict(saved['optimizer'])
             scaler.load_state_dict(saved['scaler'])
@@ -155,27 +155,27 @@ def run_distributed(config, root, resume=None):
 
         if os.environ.get('MODELCHEF_RECOVERY_S3_URI') and resume:
             publish_checkpoint_to_s3(root, folder, Path(resume))
-        elif os.environ.get('MODELCHEF_RECOVERY_S3_URI') or (t.checkpoint_at_start and not resume):
+        elif os.environ.get('MODELCHEF_RECOVERY_S3_URI') or (training.checkpoint_at_start and not resume):
             checkpoint()
-        while step < t.steps:
-            expired = torch.tensor(int(time.monotonic() - started > t.max_runtime_seconds), device=device)
+        while step < training.steps:
+            expired = torch.tensor(int(time.monotonic() - started > training.max_runtime_seconds), device=device)
             dist.all_reduce(expired, op=dist.ReduceOp.MAX)
             if expired.item():
                 path = checkpoint()
                 raise TimeoutError(f'DDP runtime cap reached; resume from {path}')
-            factor = min(1.0, (step + 1) / max(1, t.warmup_steps))
-            if step >= t.warmup_steps and t.schedule == 'cosine':
-                fraction = (step - t.warmup_steps) / max(1, t.steps - t.warmup_steps - 1)
-                factor = t.min_learning_rate_ratio + (1 - t.min_learning_rate_ratio) * (1 + math.cos(math.pi * fraction)) / 2
+            factor = min(1.0, (step + 1) / max(1, training.warmup_steps))
+            if step >= training.warmup_steps and training.schedule == 'cosine':
+                fraction = (step - training.warmup_steps) / max(1, training.steps - training.warmup_steps - 1)
+                factor = training.min_learning_rate_ratio + (1 - training.min_learning_rate_ratio) * (1 + math.cos(math.pi * fraction)) / 2
             for group in optimizer.param_groups:
-                group['lr'] = t.learning_rate * factor
+                group['lr'] = training.learning_rate * factor
             optimizer.zero_grad(set_to_none=True)
             loss_total, tokens = 0.0, 0
-            for _ in range(t.gradient_accumulation):
-                indices = torch.randint(len(blocks['train'][0]), (t.micro_batch_size,), generator=sampler)
+            for _ in range(training.gradient_accumulation):
+                indices = torch.randint(len(blocks['train'][0]), (training.micro_batch_size,), generator=sampler)
                 parts = tuple(part[indices].to(device) for part in blocks['train'])
                 with phases.measure('forward'), amp():
-                    loss, _ = objective(wrapped, parts, c, reference, tokenizer)
+                    loss, _ = objective(wrapped, parts, recipe, reference, tokenizer)
                     if getattr(model, 'auxiliary_loss', None) is not None:
                         loss = loss + model.auxiliary_loss
                 invalid = torch.tensor(int(not torch.isfinite(loss)), device=device)
@@ -183,11 +183,11 @@ def run_distributed(config, root, resume=None):
                 if invalid.item():
                     raise FloatingPointError('Non-finite DDP loss on at least one rank')
                 with phases.measure('backward'):
-                    scaler.scale(loss / t.gradient_accumulation).backward()
-                loss_total += loss.item() / t.gradient_accumulation
+                    scaler.scale(loss / training.gradient_accumulation).backward()
+                loss_total += loss.item() / training.gradient_accumulation
                 tokens += sum((part != -100).sum().item() for part in parts[1::2])
             scaler.unscale_(optimizer)
-            norm = torch.nn.utils.clip_grad_norm_(model.parameters(), t.gradient_clip_norm or float('inf'),
+            norm = torch.nn.utils.clip_grad_norm_(model.parameters(), training.gradient_clip_norm or float('inf'),
                                                  error_if_nonfinite=False)
             invalid = torch.tensor(int(not torch.isfinite(norm)), device=device)
             dist.all_reduce(invalid, op=dist.ReduceOp.MAX)
@@ -212,14 +212,14 @@ def run_distributed(config, root, resume=None):
                        'gradient_norm': norm.item(),
                        'tokens_seen': consumed, 'skipped_optimizer_updates': skipped_updates,
                        'learning_rate': optimizer.param_groups[0]['lr']}
-                if step % t.evaluate_every == 0 or step == t.steps:
+                if step % training.evaluate_every == 0 or step == training.steps:
                     with phases.measure('validation'):
-                        row['validation'] = evaluate(model, blocks['validation'][:2], c.evaluation.batches,
-                                                     c.evaluation.batch_size or t.micro_batch_size, device, amp)
+                        row['validation'] = evaluate(model, blocks['validation'][:2], recipe.evaluation.batches,
+                                                     recipe.evaluation.batch_size or training.micro_batch_size, device, amp)
                 record_metrics(folder, row)
-                if step % t.log_every == 0 or step == 1 or step == t.steps:
-                    report(f'DDP step {step}/{t.steps}: global mean loss={row["training_loss"]:.4f}')
-            if step % t.checkpoint_every == 0 or step == t.steps:
+                if step % training.log_every == 0 or step == 1 or step == training.steps:
+                    report(f'DDP step {step}/{training.steps}: global mean loss={row["training_loss"]:.4f}')
+            if step % training.checkpoint_every == 0 or step == training.steps:
                 checkpoint()
         path = checkpoint()
         if device == 'cuda':
@@ -239,18 +239,18 @@ def run_distributed(config, root, resume=None):
             result.update(status='completed', checkpoint=str(path), optimizer_steps=step,
                           tokens_seen=consumed, checkpoint_reload_verified=True,
                           skipped_optimizer_updates=skipped_updates,
-                          global_batch_size=t.micro_batch_size * t.gradient_accumulation * world,
-                          tokens_per_second=(step - initial_step) * t.micro_batch_size *
-                              t.gradient_accumulation * c.model.context_length * world / (time.monotonic() - started))
+                          global_batch_size=training.micro_batch_size * training.gradient_accumulation * world,
+                          tokens_per_second=(step - initial_step) * training.micro_batch_size *
+                              training.gradient_accumulation * recipe.model.context_length * world / (time.monotonic() - started))
             result['stage_evaluation'] = {}
             result['test'] = None
-            result['test_evaluation'] = 'evaluated' if c.evaluation.evaluate_test else 'withheld'
-            for split in ['validation', 'test'] if c.evaluation.evaluate_test else ['validation']:
+            result['test_evaluation'] = 'evaluated' if recipe.evaluation.evaluate_test else 'withheld'
+            for split in ['validation', 'test'] if recipe.evaluation.evaluate_test else ['validation']:
                 with phases.measure('final_evaluation'):
-                    result[split] = evaluate(model, blocks[split][:2], c.evaluation.batches,
-                                             c.evaluation.batch_size or t.micro_batch_size, device, amp)
+                    result[split] = evaluate(model, blocks[split][:2], recipe.evaluation.batches,
+                                             recipe.evaluation.batch_size or training.micro_batch_size, device, amp)
                 result['stage_evaluation'][split] = evaluate_stage(model, reference, blocks[split],
-                                                                  tokenizer, c, device, amp)
+                                                                  tokenizer, recipe, device, amp)
             model.eval()
             probe = blocks['validation'][0][:1].to(device)
             tolerance = 0.03 if dtype == torch.bfloat16 else 0.003 if dtype == torch.float16 else 1e-5
@@ -266,16 +266,16 @@ def run_distributed(config, root, resume=None):
             from modelchef.benchmarks import evaluate_choices
             examples = json.loads((folder / 'benchmark-examples.json').read_text())
             result['benchmark'] = (evaluate_choices(model, tokenizer, examples, device,
-                                                    c.model.context_length, amp) if examples else None)
-            ids = tokenizer.encode(c.evaluation.prompt).ids or [tokenizer.token_to_id('<bos>')]
+                                                    recipe.model.context_length, amp) if examples else None)
+            ids = tokenizer.encode(recipe.evaluation.prompt).ids or [tokenizer.token_to_id('<bos>')]
             generated = torch.tensor([ids], device=device)
             with torch.no_grad():
-                for _ in range(c.evaluation.generate_tokens):
+                for _ in range(recipe.evaluation.generate_tokens):
                     with amp():
-                        scores = model(generated[:, -c.model.context_length:])[:, -1].float()
-                    scores /= c.evaluation.temperature
-                    if c.evaluation.top_k:
-                        boundary = scores.topk(min(c.evaluation.top_k, scores.shape[-1])).values[:, -1:]
+                        scores = model(generated[:, -recipe.model.context_length:])[:, -1].float()
+                    scores /= recipe.evaluation.temperature
+                    if recipe.evaluation.top_k:
+                        boundary = scores.topk(min(recipe.evaluation.top_k, scores.shape[-1])).values[:, -1:]
                         scores = scores.masked_fill(scores < boundary, -float('inf'))
                     token = torch.multinomial(scores.softmax(-1), 1)
                     generated = torch.cat((generated, token), -1)

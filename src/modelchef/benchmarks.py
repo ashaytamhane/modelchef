@@ -53,7 +53,7 @@ def acquire_benchmark(config, root):
         license_name = "mit"
     else:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-            member = next(m for m in archive.infolist() if m.filename.endswith("Sentences_AllAgree.txt"))
+            member = next(archive_member for archive_member in archive.infolist() if archive_member.filename.endswith("Sentences_AllAgree.txt"))
             if member.file_size > cap * 5:
                 raise ValueError("Benchmark archive expansion exceeds limit")
             lines = archive.read(member).decode("cp1252").splitlines()[:count]

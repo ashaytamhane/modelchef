@@ -28,14 +28,14 @@ class NeuronRecipe(Section):
 
     @model_validator(mode='after')
     def supported(self):
-        c = self.model
-        if (c.backend != 'native' or c.type != 'decoder_rope' or c.peft.method != 'none'
-                or c.quantization != 'none' or c.custom_swiglu_path
-                or c.attention_kernel not in {'auto', 'math'} or c.gradient_checkpointing
-                or c.attention_dropout or c.residual_dropout):
+        model_config = self.model
+        if (model_config.backend != 'native' or model_config.type != 'decoder_rope' or model_config.peft.method != 'none'
+                or model_config.quantization != 'none' or model_config.custom_swiglu_path
+                or model_config.attention_kernel not in {'auto', 'math'} or model_config.gradient_checkpointing
+                or model_config.attention_dropout or model_config.residual_dropout):
             raise ValueError('Neuron prototype supports the native dense decoder without '
                              'PEFT, quantization, custom CUDA, dropout or activation checkpointing')
-        if self.sequence_length > c.context_length:
+        if self.sequence_length > model_config.context_length:
             raise ValueError('sequence_length exceeds model context_length')
         return self
 
@@ -62,17 +62,17 @@ def create_decoder(config):
     from modelchef.model import Decoder
 
     def forward(attention, x):
-        b, s, _ = x.shape
-        c, d = attention.c, attention.dim
-        q = attention.rope(attention.q(x).view(b, s, c.attention_heads, d).transpose(1, 2))
-        k = attention.rope(attention.k(x).view(b, s, c.kv_heads, d).transpose(1, 2))
-        v = attention.v(x).view(b, s, c.kv_heads, d).transpose(1, 2)
-        repeat = c.attention_heads // c.kv_heads
+        batch_size, sequence_length, _ = x.shape
+        model_config, head_dim = attention.attention_config, attention.dim
+        q = attention.rope(attention.q(x).view(batch_size, sequence_length, model_config.attention_heads, head_dim).transpose(1, 2))
+        k = attention.rope(attention.k(x).view(batch_size, sequence_length, model_config.kv_heads, head_dim).transpose(1, 2))
+        v = attention.v(x).view(batch_size, sequence_length, model_config.kv_heads, head_dim).transpose(1, 2)
+        repeat = model_config.attention_heads // model_config.kv_heads
         k, v = k.repeat_interleave(repeat, 1), v.repeat_interleave(repeat, 1)
-        scores = (q @ k.transpose(-2, -1)) * d ** -0.5
-        mask = torch.ones((s, s), device=x.device, dtype=torch.bool).triu(1)
+        scores = (q @ k.transpose(-2, -1)) * head_dim ** -0.5
+        mask = torch.ones((sequence_length, sequence_length), device=x.device, dtype=torch.bool).triu(1)
         weights = scores.masked_fill(mask, float('-inf')).softmax(-1)
-        return attention.out((weights @ v).transpose(1, 2).contiguous().view(b, s, -1))
+        return attention.out((weights @ v).transpose(1, 2).contiguous().view(batch_size, sequence_length, -1))
 
     decoder = Decoder(config.model, config.vocab_size)
     for block in decoder.blocks:

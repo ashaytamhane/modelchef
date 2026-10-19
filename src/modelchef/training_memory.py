@@ -35,29 +35,29 @@ def memory_plan(config, *, gpu_count=1, memory_bytes=None, hourly_usd=None,
     if config.training.optimizer != 'adamw' or config.model.quantization != 'none':
         raise ValueError('Memory accounting currently requires unquantized standard AdamW')
     layout = parameter_layout(config.model, config.tokenizer.vocab_size)
-    p = layout['parameters']
-    m, t = config.model, config.training
-    batch_tokens = t.micro_batch_size * m.context_length
+    parameter_count = layout['parameters']
+    model_config, training = config.model, config.training
+    batch_tokens = training.micro_batch_size * model_config.context_length
     # Expose individual storage terms rather than claiming one activation formula fits every kernel.
-    element_bytes = 4 if t.precision == 'fp32' else 2
+    element_bytes = 4 if training.precision == 'fp32' else 2
     logits = batch_tokens * config.tokenizer.vocab_size * 4  # objective casts logits to FP32
-    residual = batch_tokens * m.hidden_size * element_bytes
-    saved_layers = 1 if m.gradient_checkpointing else m.layers
+    residual = batch_tokens * model_config.hidden_size * element_bytes
+    saved_layers = 1 if model_config.gradient_checkpointing else model_config.layers
     activation_scenario = saved_layers * batch_tokens * (
-        8 * m.hidden_size + 3 * m.intermediate_size) * element_bytes
-    if m.gradient_checkpointing:
-        activation_scenario += m.layers * residual
-    attention_math = t.micro_batch_size * m.attention_heads * m.context_length**2 * element_bytes
+        8 * model_config.hidden_size + 3 * model_config.intermediate_size) * element_bytes
+    if model_config.gradient_checkpointing:
+        activation_scenario += model_config.layers * residual
+    attention_math = training.micro_batch_size * model_config.attention_heads * model_config.context_length**2 * element_bytes
     plans = {}
     for strategy in ['ddp', 'fsdp2']:
-        persistent = math.ceil(p / gpu_count) * 16 if strategy == 'fsdp2' else p * 16
+        persistent = math.ceil(parameter_count / gpu_count) * 16 if strategy == 'fsdp2' else parameter_count * 16
         gathered = (2 * layout['largest_sharding_unit_parameters'] * element_bytes
                     if strategy == 'fsdp2' else 0)
         scenario = persistent + activation_scenario + logits + gathered
         plans[strategy] = {'persistent_state_bytes_per_gpu': persistent,
-            'weights_bytes_per_gpu': math.ceil(p / gpu_count) * 4 if strategy == 'fsdp2' else p * 4,
-            'gradients_bytes_per_gpu': math.ceil(p / gpu_count) * 4 if strategy == 'fsdp2' else p * 4,
-            'adam_moments_bytes_per_gpu': math.ceil(p / gpu_count) * 8 if strategy == 'fsdp2' else p * 8,
+            'weights_bytes_per_gpu': math.ceil(parameter_count / gpu_count) * 4 if strategy == 'fsdp2' else parameter_count * 4,
+            'gradients_bytes_per_gpu': math.ceil(parameter_count / gpu_count) * 4 if strategy == 'fsdp2' else parameter_count * 4,
+            'adam_moments_bytes_per_gpu': math.ceil(parameter_count / gpu_count) * 8 if strategy == 'fsdp2' else parameter_count * 8,
             'two_gathered_units_scenario_bytes': gathered,
             'illustrative_training_bytes_per_gpu': scenario,
             'persistent_state_exceeds_capacity': persistent > memory_bytes if memory_bytes else None,
@@ -74,8 +74,8 @@ def memory_plan(config, *, gpu_count=1, memory_bytes=None, hourly_usd=None,
             cost['remaining_compute_usd'] = cost['remaining_compute_hours'] * hourly_usd
     return {'scope': 'Planning scenarios, not a fit guarantee or measured speedup; no allocation or launch.',
         **layout, 'gpu_count': gpu_count, 'memory_bytes_per_gpu': memory_bytes,
-        'global_batch_sequences': t.micro_batch_size * t.gradient_accumulation * gpu_count,
-        'global_batch_input_tokens': batch_tokens * t.gradient_accumulation * gpu_count,
+        'global_batch_sequences': training.micro_batch_size * training.gradient_accumulation * gpu_count,
+        'global_batch_input_tokens': batch_tokens * training.gradient_accumulation * gpu_count,
         'fp32_master_state_bytes_per_parameter': 16,
         'activation_scenario_bytes': activation_scenario, 'one_residual_tensor_bytes': residual,
         'fp32_logits_tensor_bytes': logits, 'one_math_attention_matrix_bytes': attention_math,

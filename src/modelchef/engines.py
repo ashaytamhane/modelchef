@@ -24,48 +24,48 @@ def load_tokenizer(folder):
 
 
 class HFDecoder(torch.nn.Module):
-    def __init__(self, c, vocab_size):
+    def __init__(self, model_config, vocab_size):
         super().__init__()
         from modelchef.low_precision import prepare_bnb_libraries
         prepare_bnb_libraries()
         from transformers import AutoModelForCausalLM
-        self.config = c
+        self.config = model_config
         options = {'torch_dtype': torch.float32}
-        if c.peft.method == 'qlora':
+        if model_config.peft.method == 'qlora':
             from transformers import BitsAndBytesConfig
             if not torch.cuda.is_available() or torch.version.hip:
                 raise ValueError('The QLoRA integration requires an NVIDIA CUDA GPU')
-            compute = getattr(torch, 'bfloat16' if c.peft.compute_dtype == 'bf16' else 'float16')
+            compute = getattr(torch, 'bfloat16' if model_config.peft.compute_dtype == 'bf16' else 'float16')
             if compute == torch.bfloat16 and not torch.cuda.is_bf16_supported():
                 raise ValueError('Select model.peft.compute_dtype: fp16 on this GPU')
             options = {'torch_dtype': compute, 'device_map': {'': torch.cuda.current_device()},
                        'quantization_config': BitsAndBytesConfig(load_in_4bit=True,
-                           bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=c.peft.double_quant,
+                           bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=model_config.peft.double_quant,
                            bnb_4bit_compute_dtype=compute)}
-        if c.pretrained_config_sha256:
+        if model_config.pretrained_config_sha256:
             from modelchef.corpus import digest
-            if digest((Path(c.pretrained_path) / 'config.json').read_bytes()) != c.pretrained_config_sha256:
+            if digest((Path(model_config.pretrained_path) / 'config.json').read_bytes()) != model_config.pretrained_config_sha256:
                 raise ValueError('Original pretrained model configuration changed')
-        self.model = AutoModelForCausalLM.from_pretrained(c.pretrained_path,
+        self.model = AutoModelForCausalLM.from_pretrained(model_config.pretrained_path,
             local_files_only=True, trust_remote_code=False, attn_implementation='sdpa', **options)
-        if c.custom_swiglu_path:
+        if model_config.custom_swiglu_path:
             raise ValueError('Custom SwiGLU hooks currently target the native decoder only')
         if self.model.get_input_embeddings().num_embeddings != vocab_size:
             raise ValueError('Pretrained vocabulary size does not match tokenizer')
-        if c.gradient_checkpointing:
+        if model_config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
         self.model.config.use_cache = False
-        if c.peft.method in {'lora', 'qlora'}:
+        if model_config.peft.method in {'lora', 'qlora'}:
             from peft import LoraConfig, get_peft_model
-            if c.peft.method == 'qlora':
+            if model_config.peft.method == 'qlora':
                 from peft import prepare_model_for_kbit_training
                 self.model = prepare_model_for_kbit_training(self.model,
-                    use_gradient_checkpointing=c.gradient_checkpointing)
+                    use_gradient_checkpointing=model_config.gradient_checkpointing)
             self.model = get_peft_model(self.model, LoraConfig(task_type='CAUSAL_LM',
-                r=c.peft.rank, lora_alpha=c.peft.alpha, lora_dropout=c.peft.dropout,
-                target_modules=c.peft.target_modules, use_rslora=c.peft.use_rslora,
+                r=model_config.peft.rank, lora_alpha=model_config.peft.alpha, lora_dropout=model_config.peft.dropout,
+                target_modules=model_config.peft.target_modules, use_rslora=model_config.peft.use_rslora,
                 bias='none'))
-            if c.gradient_checkpointing:
+            if model_config.gradient_checkpointing:
                 self.model.enable_input_require_grads()
 
     def forward(self, ids):
@@ -93,16 +93,16 @@ class HFDecoder(torch.nn.Module):
         return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
 
-def create_model(c, vocab_size):
+def create_model(model_config, vocab_size):
     from modelchef.model import Decoder
-    model = HFDecoder(c, vocab_size) if c.backend == 'huggingface' else Decoder(c, vocab_size)
-    if c.backend == 'native' and c.peft.method == 'lora':
+    model = HFDecoder(model_config, vocab_size) if model_config.backend == 'huggingface' else Decoder(model_config, vocab_size)
+    if model_config.backend == 'native' and model_config.peft.method == 'lora':
         from modelchef.adapters import apply_lora
-        apply_lora(model, c.peft)
-    if c.quantization == 'fp4_fake':
+        apply_lora(model, model_config.peft)
+    if model_config.quantization == 'fp4_fake':
         from modelchef.quantization import apply_fake_fp4
         apply_fake_fp4(model)
-    elif c.quantization == 'nvfp4':
+    elif model_config.quantization == 'nvfp4':
         from modelchef.low_precision import apply_nvfp4
         apply_nvfp4(model)
     return model

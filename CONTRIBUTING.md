@@ -23,6 +23,15 @@ Choose the PyTorch wheel using `setup`/`setup --apply`; feature extras do not ch
 
 ## Make a change reviewable
 
+Use names that identify an object's role: `recipe` for a complete training recipe,
+`data_config` and `tokenizer_config` for those sections, `processing` and `training`
+for their settings, `model_config` for architecture settings, and `narrator` for
+pipeline explanations. Prefer descriptive paths, records and counts over single-letter
+aliases. Conventional mathematical names such as attention's `q`, `k`, `v` and tensor
+inputs `x`, `y` are appropriate when their meaning is clear. Renaming must preserve
+recipe fields, serialized checkpoint keys and CLI behavior; update keyword callers
+and attribute-based integrations together, then run the relevant regression checks.
+
 Describe the user-visible problem, the changed behavior and relevant verification. Add a regression test for a bug or new execution path. Prefer small local fixtures over network downloads, and mock cloud operations instead of provisioning resources. Keep recipe fields, generated schemas and the annotated README recipe in agreement; `scripts/check_docs.py` checks that agreement.
 
 Run artifacts, caches, credentials, certificates and personal recipes stay out of Git. Use `configs/*.local.yaml` for personal settings. Include commands and limitations in a PR, not private run logs or account identifiers. Hardware tests skip when their device or optional toolchain is unavailable; spending and model downloads require explicit opt-in. Ordinary tests must not download models or create cloud resources.

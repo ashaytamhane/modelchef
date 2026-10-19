@@ -36,10 +36,10 @@ def configure_execution(model, training, device):
 
 def plugin_fingerprint(path):
     directory = Path(path).resolve()
-    files = sorted(p for p in directory.iterdir() if p.suffix in {'.py', '.cpp', '.cu', '.h', '.cuh'})
+    files = sorted(source_path for source_path in directory.iterdir() if source_path.suffix in {'.py', '.cpp', '.cu', '.h', '.cuh'})
     if not (directory / 'kernel.py').exists():
         raise ValueError('Custom CUDA directory requires kernel.py')
-    return hashlib.sha256(b''.join(p.name.encode() + b'\0' + p.read_bytes() for p in files)).hexdigest()
+    return hashlib.sha256(b''.join(source_path.name.encode() + b'\0' + source_path.read_bytes() for source_path in files)).hexdigest()
 
 
 @lru_cache(maxsize=8)

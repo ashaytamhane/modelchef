@@ -217,15 +217,15 @@ class SpotRunner:
         budget_reservation(settings)
         session = session or boto3.Session(profile_name=settings["profile"],
                                            region_name=settings["region"])
-        cfg = Config(connect_timeout=15, read_timeout=30,
+        client_config = Config(connect_timeout=15, read_timeout=30,
                      retries={"total_max_attempts": 3, "mode": "standard"})
-        self.ec2 = session.client("ec2", config=cfg)
-        self.iam = session.client("iam", config=cfg)
-        self.scheduler = session.client("scheduler", config=cfg)
-        self.ssm = session.client("ssm", config=cfg)
+        self.ec2 = session.client("ec2", config=client_config)
+        self.iam = session.client("iam", config=client_config)
+        self.scheduler = session.client("scheduler", config=client_config)
+        self.ssm = session.client("ssm", config=client_config)
         if settings.get('pipeline_config'):
-            self.s3 = session.client('s3', config=cfg)
-        self.account = session.client("sts", config=cfg).get_caller_identity()["Account"]
+            self.s3 = session.client('s3', config=client_config)
+        self.account = session.client("sts", config=client_config).get_caller_identity()["Account"]
 
     def reconcile(self, run_id):
         """Recover a journaled run after interruption without provisioning anything."""
@@ -321,8 +321,8 @@ class SpotRunner:
         image = self.ec2.describe_images(ImageIds=[ami], Owners=["amazon"])["Images"][0]
         if image["Architecture"] != "x86_64":
             raise ValueError("AMI architecture does not match this x86 GPU recipe")
-        root_mapping = next(m for m in image["BlockDeviceMappings"]
-                            if m["DeviceName"] == image["RootDeviceName"])
+        root_mapping = next(device_mapping for device_mapping in image["BlockDeviceMappings"]
+                            if device_mapping["DeviceName"] == image["RootDeviceName"])
         if root_mapping["Ebs"]["VolumeSize"] > s["storage_gb"]:
             raise ValueError("AMI root volume exceeds configured storage budget")
         script = user_data(self.root, s)

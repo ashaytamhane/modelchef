@@ -41,29 +41,29 @@ class Narrator:
         self.say(explanation, detail=True)
 
 
-def train_tokenizer(documents, c):
-    if c.algorithm != 'byte_bpe':
+def train_tokenizer(documents, tokenizer_config):
+    if tokenizer_config.algorithm != 'byte_bpe':
         raise ValueError('Pretrained tokenizers must be reused from a parent, not retrained')
     tokenizer = Tokenizer(models.BPE(unk_token="<unk>"))
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     tokenizer.decoder = decoders.ByteLevel()
-    trainer = trainers.BpeTrainer(vocab_size=c.vocab_size, min_frequency=c.min_frequency,
-        special_tokens=c.special_tokens, initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+    trainer = trainers.BpeTrainer(vocab_size=tokenizer_config.vocab_size, min_frequency=tokenizer_config.min_frequency,
+        special_tokens=tokenizer_config.special_tokens, initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
         show_progress=False)
     texts = (row['text'] for row in documents)
-    if c.training_max_documents is not None:
-        texts = islice(texts, c.training_max_documents)
+    if tokenizer_config.training_max_documents is not None:
+        texts = islice(texts, tokenizer_config.training_max_documents)
     tokenizer.train_from_iterator(texts, trainer=trainer)
     return tokenizer
 
 
-def pack(documents, tokenizer, c, context, token_limit):
+def pack(documents, tokenizer, tokenizer_config, context, token_limit):
     tokens = []
     for row in documents:
         ids = tokenizer.encode(row["text"], add_special_tokens=False).ids
-        if c.add_bos:
+        if tokenizer_config.add_bos:
             ids.insert(0, tokenizer.token_to_id("<bos>"))
-        if c.append_eos:
+        if tokenizer_config.append_eos:
             ids.append(tokenizer.token_to_id("<eos>"))
         tokens.extend(ids[:max(0, token_limit - len(tokens))])
         if len(tokens) >= token_limit:
@@ -164,10 +164,10 @@ def run_pipeline(config, root, resume=None, prepare_only=False):
         close_metrics(folder)
 
 
-def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False):
-    if c.model.backend == 'huggingface' and c.stage.kind == 'pretrain':
+def _execute(recipe, root, folder, fingerprint, narrator, report, resume, prepare_only=False):
+    if recipe.model.backend == 'huggingface' and recipe.stage.kind == 'pretrain':
         raise ValueError('Import the pretrained model, then choose a continuation/post-training stage')
-    prepared = bool(c.data.prepared_run)
+    prepared = bool(recipe.data.prepared_run)
     saved = None
     if resume:
         saved = torch.load(resume, map_location='cpu', weights_only=True, mmap=True)
@@ -186,48 +186,48 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                 folder / 'tokens.pt'):
             raise ValueError('Saved token file checksum changed')
     processing_sources = {str((root / path).resolve()): file_digest(root / path)
-                          for path in c.processing.benchmark_files}
+                          for path in recipe.processing.benchmark_files}
     processing_manifest = folder / 'processing-sources.json'
     if resume and processing_manifest.exists():
         if json.loads(processing_manifest.read_text()) != processing_sources:
             raise ValueError('Configured benchmark decontamination files changed since this run started')
     elif not resume:
         processing_manifest.write_text(json.dumps(processing_sources, indent=2), encoding='utf-8')
-    n.stage("1. Configuration and hardware", "Validate the complete recipe before data access. "
+    narrator.stage("1. Configuration and hardware", "Validate the complete recipe before data access. "
             "Detect this machine's accelerator; no AWS instance is launched by this command.")
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-    random.seed(c.training.seed)
-    torch.manual_seed(c.training.seed)
-    torch.use_deterministic_algorithms(c.training.deterministic)
-    torch.backends.cuda.matmul.allow_tf32 = c.training.allow_tf32
-    settings = c.training.model_dump()
-    preparing_shards = prepare_only and c.training.distributed == 'fsdp2'
+    random.seed(recipe.training.seed)
+    torch.manual_seed(recipe.training.seed)
+    torch.use_deterministic_algorithms(recipe.training.deterministic)
+    torch.backends.cuda.matmul.allow_tf32 = recipe.training.allow_tf32
+    settings = recipe.training.model_dump()
+    preparing_shards = prepare_only and recipe.training.distributed == 'fsdp2'
     if preparing_shards:
         settings = {**settings, 'accelerator': 'cpu', 'precision': 'fp32'}
     runtime = resolve_runtime(settings, detect_hardware())
     device = runtime["device"]
-    phases = PhaseMetrics(device, c.training.profile_phases)
-    if c.model.quantization == 'nvfp4' and device != 'cuda':
+    phases = PhaseMetrics(device, recipe.training.profile_phases)
+    if recipe.model.quantization == 'nvfp4' and device != 'cuda':
         raise ValueError('NVFP4 requires a CUDA runtime')
-    if c.model.peft.method == 'qlora' and device != 'cuda':
+    if recipe.model.peft.method == 'qlora' and device != 'cuda':
         raise ValueError('QLoRA requires a CUDA runtime')
-    if c.model.attention_kernel not in {'auto', 'math'} and device != 'cuda' and not preparing_shards:
+    if recipe.model.attention_kernel not in {'auto', 'math'} and device != 'cuda' and not preparing_shards:
         raise ValueError('Selected optimized attention kernel requires CUDA/ROCm')
-    if c.training.optimizer_kernel == 'fused' and device != 'cuda' and not preparing_shards:
+    if recipe.training.optimizer_kernel == 'fused' and device != 'cuda' and not preparing_shards:
         raise ValueError('Fused optimizer selection currently requires CUDA/ROCm')
-    if c.model.custom_swiglu_path:
-        kernel_hash = plugin_fingerprint(root / c.model.custom_swiglu_path)
+    if recipe.model.custom_swiglu_path:
+        kernel_hash = plugin_fingerprint(root / recipe.model.custom_swiglu_path)
         saved_kernel = folder / 'custom-kernel.sha256'
         if resume and saved_kernel.read_text() != kernel_hash:
             raise ValueError('Custom CUDA source changed since this run started')
-        report['custom_kernel'] = check_custom_kernel(root / c.model.custom_swiglu_path)
+        report['custom_kernel'] = check_custom_kernel(root / recipe.model.custom_swiglu_path)
         saved_kernel.write_text(kernel_hash, encoding='utf-8')
     dtype = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}[
         runtime["precision"]]
     def amp():
         return (nullcontext() if dtype == torch.float32 else
                 torch.autocast(device_type=device, dtype=dtype,
-                               cache_enabled=not c.training.optimizer.endswith('_in_backward')))
+                               cache_enabled=not recipe.training.optimizer.endswith('_in_backward')))
     from modelchef.provenance import environment_provenance
     environment = {**runtime, **environment_provenance(root)}
     report['environment'] = environment
@@ -236,26 +236,26 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             stream.write(json.dumps({'time': time.time(), **environment}) + '\n')
     else:
         (folder / 'environment.json').write_text(json.dumps(environment, indent=2), encoding='utf-8')
-    n.say(f"Device={device}, precision={runtime['precision']}, seed={c.training.seed}.")
+    narrator.say(f"Device={device}, precision={runtime['precision']}, seed={recipe.training.seed}.")
 
-    n.stage("2. Acquire a bounded corpus snapshot", f"Source={c.data.dataset}, domain={c.data.domain}. "
-            f"Limits: {c.data.max_documents} documents and {c.data.max_download_bytes:,} bytes. "
+    narrator.stage("2. Acquire a bounded corpus snapshot", f"Source={recipe.data.dataset}, domain={recipe.data.domain}. "
+            f"Limits: {recipe.data.max_documents} documents and {recipe.data.max_download_bytes:,} bytes. "
             "The saved SHA256 identifies the exact sample; raw text is never committed to Git.")
     snapshot = folder / 'raw.jsonl'
     if resume or prepared:
         source = json.loads((folder / 'source-manifest.json').read_text())
-        records = (JsonlRows(snapshot, source['documents']) if c.data.storage == 'disk' else
+        records = (JsonlRows(snapshot, source['documents']) if recipe.data.storage == 'disk' else
                    [json.loads(line) for line in snapshot.read_text(encoding='utf-8').splitlines()])
         if file_digest(snapshot) != source['raw_sha256']:
             raise ValueError('Run snapshot checksum changed')
     else:
-        records, source = acquire(c, root, lambda message: n.say(message, detail=True))
+        records, source = acquire(recipe, root, lambda message: narrator.say(message, detail=True))
         snapshot_rows(records, snapshot)
     if not (resume or prepared):
         (folder / "source-manifest.json").write_text(json.dumps(source, indent=2), encoding="utf-8")
 
-    n.stage("2b. Select domain benchmarks", f"Domain '{c.data.domain}' selects "
-            f"'{select_benchmark(c)}'. Download only the configured small evaluation sample. "
+    narrator.stage("2b. Select domain benchmarks", f"Domain '{recipe.data.domain}' selects "
+            f"'{select_benchmark(recipe)}'. Download only the configured small evaluation sample. "
             "These examples are excluded from tokenizer/training inputs and used only for evaluation.")
     benchmark_snapshot = folder / 'benchmark-examples.json'
     if resume or prepared:
@@ -266,12 +266,12 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         if benchmark_source.get('name') == 'none' and examples:
             raise ValueError('Disabled benchmark snapshot must be empty')
     else:
-        examples, benchmark_source = acquire_benchmark(c, root)
+        examples, benchmark_source = acquire_benchmark(recipe, root)
         benchmark_snapshot.write_text(json.dumps(examples), encoding='utf-8')
         benchmark_source['sha256'] = digest(benchmark_snapshot.read_bytes())
         (folder / "benchmark-manifest.json").write_text(
             json.dumps(benchmark_source, indent=2), encoding="utf-8")
-    processing_config = c.model_copy(deep=True)
+    processing_recipe = recipe.model_copy(deep=True)
     if examples:
         benchmark_path = folder / "benchmark-text.txt"
         if not (resume or prepared):
@@ -280,45 +280,45 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         elif not benchmark_path.is_file() or benchmark_path.read_text(encoding='utf-8') != '\n'.join(
                 e['decontamination_text'] for e in examples):
             raise ValueError('Saved benchmark decontamination text changed')
-        processing_config.processing.benchmark_files.append(str(benchmark_path))
+        processing_recipe.processing.benchmark_files.append(str(benchmark_path))
 
-    n.stage("3. Clean, filter, deduplicate and split", "Normalize Unicode/HTML/whitespace, reject "
+    narrator.stage("3. Clean, filter, deduplicate and split", "Normalize Unicode/HTML/whitespace, reject "
             "length/quality/repetition failures, apply domain keywords, regex PII handling and "
             "lexical deduplication before document-level seeded train/validation/test splitting. "
             "Configured benchmark files enable exact n-gram decontamination; otherwise it is unconfigured.")
-    structured = c.stage.kind in {'sft', 'dpo', 'rlvr', 'distill'}
-    if (resume or prepared) and c.data.storage == 'disk':
+    structured = recipe.stage.kind in {'sft', 'dpo', 'rlvr', 'distill'}
+    if (resume or prepared) and recipe.data.storage == 'disk':
         processing = json.loads((folder / 'processing.json').read_text(encoding='utf-8'))
         splits = {name: JsonlRows(folder / f'{name}.jsonl', processing['split_documents'][name])
                   for name in ['train', 'validation', 'test']}
         if any(not rows.path.is_file() for rows in splits.values()):
             raise ValueError('Saved processed split is missing; cannot resume this run')
-        n.say('Reuse saved processed splits; mapped token checksums are verified before training.')
+        narrator.say('Reuse saved processed splits; mapped token checksums are verified before training.')
     else:
-        splits, processing = (prepare_structured(records, processing_config, root) if structured else
-                              process(records, processing_config, root))
+        splits, processing = (prepare_structured(records, processing_recipe, root) if structured else
+                              process(records, processing_recipe, root))
     if not (resume or prepared):
         for name, rows in splits.items():
             snapshot_rows(rows, folder / f"{name}.jsonl", ensure_ascii=True)
         (folder / "processing.json").write_text(json.dumps(processing, indent=2), encoding="utf-8")
-    n.say(f"Filter counts: {processing['counts']}; document splits: {processing['split_documents']}.")
-    n.say(f"Benchmark decontamination: {processing['decontamination']}. "
+    narrator.say(f"Filter counts: {processing['counts']}; document splits: {processing['split_documents']}.")
+    narrator.say(f"Benchmark decontamination: {processing['decontamination']}. "
           "PII/dedup checks are limited heuristics, not complete guarantees.")
 
-    n.stage("4. Prepare the tokenizer", "From-scratch pretraining learns byte-level BPE on training "
+    narrator.stage("4. Prepare the tokenizer", "From-scratch pretraining learns byte-level BPE on training "
             "documents only. Later stages retain the parent's vocabulary and special-token identities.")
     parent = None
-    if c.stage.kind != 'pretrain':
+    if recipe.stage.kind != 'pretrain':
         from modelchef.chat import checkpoint_for
         from modelchef.run_config import RunConfig
-        parent_folder = (root / c.stage.parent_run).resolve()
+        parent_folder = (root / recipe.stage.parent_run).resolve()
         parent_config = RunConfig.model_validate_json((parent_folder / 'config.json').read_text())
         execution_fields = {'quantization', 'attention_kernel', 'custom_swiglu_path', 'peft',
                             'gradient_checkpointing'}
-        if c.model.peft.method == 'qlora':
+        if recipe.model.peft.method == 'qlora':
             execution_fields |= {'pretrained_path', 'pretrained_config_sha256'}
-        if c.model.model_dump(exclude=execution_fields) != parent_config.model.model_dump(
-                exclude=execution_fields) or c.tokenizer.model_dump(exclude={'packing'}) != parent_config.tokenizer.model_dump(exclude={'packing'}):
+        if recipe.model.model_dump(exclude=execution_fields) != parent_config.model.model_dump(
+                exclude=execution_fields) or recipe.tokenizer.model_dump(exclude={'packing'}) != parent_config.tokenizer.model_dump(exclude={'packing'}):
             raise ValueError('Parent architecture/tokenizer settings must match; copy the parent recipe')
         tokenizer = load_tokenizer(parent_folder)
         parent_path = checkpoint_for(parent_folder)
@@ -329,14 +329,14 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         if resume and json.loads(parent_manifest.read_text()) != report['parent']:
             raise ValueError('Parent checkpoint/tokenizer changed since this stage started')
         parent_manifest.write_text(json.dumps(report['parent']), encoding='utf-8')
-        n.say(f'Reuse parent vocabulary and weights for {c.stage.kind}; no vocabulary retraining.')
+        narrator.say(f'Reuse parent vocabulary and weights for {recipe.stage.kind}; no vocabulary retraining.')
     elif resume or prepared:
         tokenizer = load_tokenizer(folder)
-    elif c.stage.uses_distillation:
-        tokenizer = load_tokenizer((root / c.stage.teacher_run).resolve())
-        n.say('Reuse the teacher tokenizer for aligned token distributions; student weights start randomly.')
+    elif recipe.stage.uses_distillation:
+        tokenizer = load_tokenizer((root / recipe.stage.teacher_run).resolve())
+        narrator.say('Reuse the teacher tokenizer for aligned token distributions; student weights start randomly.')
     else:
-        tokenizer = train_tokenizer(splits["train"], c.tokenizer)
+        tokenizer = train_tokenizer(splits["train"], recipe.tokenizer)
     if not (resume or prepared):
         tokenizer.save(str(folder / "tokenizer.json"))
     if not (resume or prepared) and hasattr(tokenizer, 'roles'):
@@ -344,32 +344,32 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     tokenizer_hash = digest((folder / "tokenizer.json").read_bytes())
     roles_path = folder / 'tokenizer-roles.json'
     roles_hash = digest(roles_path.read_bytes()) if roles_path.exists() else None
-    n.say(f"BPE vocabulary={tokenizer.get_vocab_size()} (requested {c.tokenizer.vocab_size}).")
+    narrator.say(f"BPE vocabulary={tokenizer.get_vocab_size()} (requested {recipe.tokenizer.vocab_size}).")
 
     packing_explanation = ('Keep each complete document in one padded context window; skip oversized '
                            'documents and mask padding/cross-document targets.'
-                           if c.tokenizer.packing == 'document' else
+                           if recipe.tokenizer.packing == 'document' else
                            'Concatenate within splits; tail tokens are dropped and cross-document attention is allowed.')
-    n.stage("5. Tokenize and pack next-token examples", "Encode each split separately, insert configured "
+    narrator.stage("5. Tokenize and pack next-token examples", "Encode each split separately, insert configured "
             "BOS/EOS tokens, then form fixed-length input/shifted-target pairs. " + packing_explanation)
     blocks, token_counts = {}, {}
-    fractions = {"validation": c.processing.validation_fraction, "test": c.processing.test_fraction,
-                 "train": 1 - c.processing.validation_fraction - c.processing.test_fraction}
+    fractions = {"validation": recipe.processing.validation_fraction, "test": recipe.processing.test_fraction,
+                 "train": 1 - recipe.processing.validation_fraction - recipe.processing.test_fraction}
     descriptors = {}
-    if c.data.storage == 'disk' and (resume or prepared):
+    if recipe.data.storage == 'disk' and (resume or prepared):
         blocks = load_blocks(folder)
         descriptors = torch.load(folder / 'tokens.pt', weights_only=True)['splits']
         token_counts = {name: item['tokens'] for name, item in descriptors.items()}
     else:
         for name, rows in splits.items():
-            limit = int(c.data.max_tokens * fractions[name])
-            if c.data.storage == 'disk':
-                blocks[name], descriptors[name] = pack_disk(rows, tokenizer, c.tokenizer,
-                    c.model.context_length, limit, folder, name)
+            limit = int(recipe.data.max_tokens * fractions[name])
+            if recipe.data.storage == 'disk':
+                blocks[name], descriptors[name] = pack_disk(rows, tokenizer, recipe.tokenizer,
+                    recipe.model.context_length, limit, folder, name)
                 token_counts[name] = descriptors[name]['tokens']
             else:
-                blocks[name], token_counts[name] = (pack_structured(rows, tokenizer, c, limit, n.say) if structured
-                    else pack(rows, tokenizer, c.tokenizer, c.model.context_length, limit))
+                blocks[name], token_counts[name] = (pack_structured(rows, tokenizer, recipe, limit, narrator.say) if structured
+                    else pack(rows, tokenizer, recipe.tokenizer, recipe.model.context_length, limit))
     # Logical data identity does not depend on torch ZIP container metadata.
     if descriptors:
         data_hash = digest(json.dumps(descriptors, sort_keys=True).encode())
@@ -384,25 +384,25 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         torch.save({'format': 'memmap-v1', 'splits': descriptors} if descriptors else blocks,
                    folder / 'tokens.pt')
     token_hash = file_digest(folder / 'tokens.pt')
-    n.say(f"Token counts: {token_counts}; context={c.model.context_length}. "
+    narrator.say(f"Token counts: {token_counts}; context={recipe.model.context_length}. "
           "This is bounded pretraining data, not a full corpus download.")
-    if c.tokenizer.packing == 'document':
-        n.say('Document packing: ' + json.dumps({name: {key: item[key] for key in
+    if recipe.tokenizer.packing == 'document':
+        narrator.say('Document packing: ' + json.dumps({name: {key: item[key] for key in
               ['nonpadding_tokens', 'skipped_oversized_documents']} for name, item in descriptors.items()}))
 
-    n.stage("6. Construct the training model", "The native decoder uses causal attention, RoPE, GQA, "
+    narrator.stage("6. Construct the training model", "The native decoder uses causal attention, RoPE, GQA, "
             "RMSNorm and SwiGLU. Pretraining starts from random weights; later stages restore a parent. "
             "The HF adapter loads local pretrained models without remote code or implicit downloads.")
     with phases.measure('model_initialization'):
-        model = create_model(c.model, tokenizer.get_vocab_size()).to(device)
+        model = create_model(recipe.model, tokenizer.get_vocab_size()).to(device)
     if parent is not None:
         load_parent(model, parent, parent_config.model)
-    if c.model.quantization == 'fp4_fake':
-        n.say('Experimental software FP4 fake quantization enabled: FP32/BF16 master weights and '
+    if recipe.model.quantization == 'fp4_fake':
+        narrator.say('Experimental software FP4 fake quantization enabled: FP32/BF16 master weights and '
               'straight-through gradients. No packed-weight storage or native FP4 acceleration.')
     reference = None
-    if c.stage.kind in {'dpo', 'rlvr'}:
-        reference = create_model(c.model, tokenizer.get_vocab_size()).to(device)
+    if recipe.stage.kind in {'dpo', 'rlvr'}:
+        reference = create_model(recipe.model, tokenizer.get_vocab_size()).to(device)
         load_parent(reference, parent, parent_config.model)
         reference.requires_grad_(False).eval()
         # Preference/RL likelihoods must not fluctuate because of dropout.
@@ -414,17 +414,17 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                     module.attention_dropout = 0.0
             if hasattr(network, 'blocks'):
                 for block in network.blocks:
-                    block.attention.c = block.attention.c.model_copy(update={'attention_dropout': 0})
-    if c.stage.uses_distillation:
+                    block.attention.attention_config = block.attention.attention_config.model_copy(update={'attention_dropout': 0})
+    if recipe.stage.uses_distillation:
         from modelchef.chat import checkpoint_for
         from modelchef.run_config import RunConfig
-        teacher_folder = (root / c.stage.teacher_run).resolve()
+        teacher_folder = (root / recipe.stage.teacher_run).resolve()
         if digest((teacher_folder / 'tokenizer.json').read_bytes()) != tokenizer_hash:
             raise ValueError('Token distillation requires identical student/teacher tokenizers')
         if load_tokenizer(teacher_folder).roles != getattr(tokenizer, 'roles', {}):
             raise ValueError('Teacher/student special-token identities differ')
         teacher_config = RunConfig.model_validate_json((teacher_folder / 'config.json').read_text())
-        if teacher_config.model.context_length < c.model.context_length:
+        if teacher_config.model.context_length < recipe.model.context_length:
             raise ValueError('Teacher context must cover the student context')
         reference = create_model(teacher_config.model, tokenizer.get_vocab_size()).to(device)
         teacher_path = checkpoint_for(teacher_folder)
@@ -432,8 +432,8 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         reference.requires_grad_(False).eval()
         report['teacher_checkpoint_sha256'] = file_digest(teacher_path)
         report['distillation'] = {'teacher_run': str(teacher_folder),
-                                 'alpha': c.stage.distillation_alpha,
-                                 'temperature': c.stage.distillation_temperature,
+                                 'alpha': recipe.stage.distillation_alpha,
+                                 'temperature': recipe.stage.distillation_temperature,
                                  'mask': 'response-only' if structured else 'all target tokens'}
         teacher_manifest = folder / 'teacher-manifest.json'
         if resume and teacher_manifest.read_text() != report['teacher_checkpoint_sha256']:
@@ -441,24 +441,24 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         teacher_manifest.write_text(report['teacher_checkpoint_sha256'], encoding='utf-8')
     parameters = sum(parameter.numel() for parameter in model.parameters())
     report['trainable_parameters'] = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    n.say(f"Trainable parameters={report['trainable_parameters']:,}; PEFT={c.model.peft.method}.")
-    n.say(f"Parameters={parameters:,}; layers={c.model.layers}; width={c.model.hidden_size}; "
-          f"attention heads={c.model.attention_heads}; KV heads={c.model.kv_heads}.")
-    t = c.training
-    evaluation_batch_size = c.evaluation.batch_size or t.micro_batch_size
+    narrator.say(f"Trainable parameters={report['trainable_parameters']:,}; PEFT={recipe.model.peft.method}.")
+    narrator.say(f"Parameters={parameters:,}; layers={recipe.model.layers}; width={recipe.model.hidden_size}; "
+          f"attention heads={recipe.model.attention_heads}; KV heads={recipe.model.kv_heads}.")
+    training = recipe.training
+    evaluation_batch_size = recipe.evaluation.batch_size or training.micro_batch_size
     report['execution'] = ({'preparation_only': True, 'note': 'GPU kernels are not executed during CPU preparation.'}
-                           if preparing_shards else configure_execution(model, t, device))
+                           if preparing_shards else configure_execution(model, training, device))
     groups = [{"params": [p for p in model.parameters() if p.requires_grad and p.ndim >= 2],
-               "weight_decay": t.weight_decay},
+               "weight_decay": training.weight_decay},
               {"params": [p for p in model.parameters() if p.requires_grad and p.ndim < 2], "weight_decay": 0}]
     from modelchef.optimizers import InBackwardAdamW, create_optimizer
     with phases.measure('optimizer_initialization'):
-        optimizer = create_optimizer(groups, t.model_copy(update={'optimizer_kernel': 'default'})
-                                     if preparing_shards else t, device)
+        optimizer = create_optimizer(groups, training.model_copy(update={'optimizer_kernel': 'default'})
+                                     if preparing_shards else training, device)
     if isinstance(optimizer, InBackwardAdamW) and runtime['requires_grad_scaler']:
         raise ValueError('In-backward AdamW does not support FP16 gradient scaling')
     scaler = torch.amp.GradScaler("cuda", enabled=runtime["requires_grad_scaler"])
-    generator = torch.Generator().manual_seed(t.seed)
+    generator = torch.Generator().manual_seed(training.seed)
     step, consumed, skipped_updates = 0, 0, 0
     checkpoints = folder / "checkpoints"
     checkpoints.mkdir(exist_ok=True)
@@ -473,7 +473,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             torch.cuda.set_rng_state_all(saved["cuda_rng"])
         step, consumed = saved["step"], saved["tokens_seen"]
         skipped_updates = saved.get('skipped_optimizer_updates', 0)
-        n.say(f"Restored model, optimizer, scaler and random states at optimizer step {step}.")
+        narrator.say(f"Restored model, optimizer, scaler and random states at optimizer step {step}.")
 
     def save_checkpoint(index):
         path = checkpoints / f"step-{index:06d}.pt"
@@ -489,14 +489,14 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                     "torch_rng": torch.get_rng_state(), "python_rng": random.getstate(),
                     "cuda_rng": torch.cuda.get_rng_state_all() if device == "cuda" else []}, path)
         report['checkpoint'] = str(path)
-        n.say(f"Checkpoint saved at step {index}: {path.name}", detail=True)
+        narrator.say(f"Checkpoint saved at step {index}: {path.name}", detail=True)
         from modelchef.recovery import checkpoint_to_s3
         # Distributed runners acknowledge recovery only after per-rank state exists,
         # not this temporary CPU initialization checkpoint.
-        preparing_distributed = prepare_only and c.training.distributed != 'none'
+        preparing_distributed = prepare_only and recipe.training.distributed != 'none'
         uploaded = checkpoint_to_s3(root, folder, path) if not preparing_distributed else None
         if uploaded is not None:
-            n.say(f'S3 recovery committed at step {index}: weights, optimizer, RNG, tokenizer and data snapshots.')
+            narrator.say(f'S3 recovery committed at step {index}: weights, optimizer, RNG, tokenizer and data snapshots.')
         if uploaded is not None or 'MODELCHEF_LOCAL_CHECKPOINT_KEEP' in os.environ:
             keep = int(os.environ.get('MODELCHEF_LOCAL_CHECKPOINT_KEEP', '2'))
             if keep < 1:
@@ -508,7 +508,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
 
     if prepare_only:
         report.update(status='prepared', checkpoint=str(Path(resume).resolve() if resume else save_checkpoint(step)),
-                      parameters=parameters, stage=c.stage.kind, token_counts=token_counts)
+                      parameters=parameters, stage=recipe.stage.kind, token_counts=token_counts)
         (folder / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         # In-backward hooks retain optimizer/parameter references beyond this
         # preparation call unless detached before returning to its controller.
@@ -516,7 +516,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             handle.remove()
         return report
 
-    if (os.environ.get('MODELCHEF_RECOVERY_S3_URI') or t.checkpoint_at_start) and not resume:
+    if (os.environ.get('MODELCHEF_RECOVERY_S3_URI') or training.checkpoint_at_start) and not resume:
         save_checkpoint(step)
 
     explanations = {
@@ -527,63 +527,63 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         'rlvr': 'Sample groups of responses, verify answers, normalize rewards and optimize a '
                 'clipped policy objective with reference KL. Equal rewards give zero policy advantage.',
         'distill': 'Mix response cross entropy with temperature-scaled KL from a frozen teacher.'}
-    if c.stage.uses_distillation and c.stage.kind != 'distill':
-        explanations[c.stage.kind] += ' Also match a frozen teacher using temperature-scaled KL; apply the stage target mask.'
-    n.stage(f"7. Train stage: {c.stage.kind}", explanations[c.stage.kind] +
+    if recipe.stage.uses_distillation and recipe.stage.kind != 'distill':
+        explanations[recipe.stage.kind] += ' Also match a frozen teacher using temperature-scaled KL; apply the stage target mask.'
+    narrator.stage(f"7. Train stage: {recipe.stage.kind}", explanations[recipe.stage.kind] +
             ' Use AdamW, gradient accumulation/clipping and the configured schedule. '
             'A short test validates execution; it does not establish model quality.')
     evaluation_blocks = {name: parts[:2] for name, parts in blocks.items()}
     with phases.measure('initial_validation'):
-        baseline = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
+        baseline = evaluate(model, evaluation_blocks["validation"], recipe.evaluation.batches,
                             evaluation_batch_size, device, amp)
-    n.say(f"Initial validation loss={baseline['loss']:.4f}; perplexity={baseline['perplexity']:.2f}.")
+    narrator.say(f"Initial validation loss={baseline['loss']:.4f}; perplexity={baseline['perplexity']:.2f}.")
     if device == 'cuda':
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
     started = time.monotonic()
     initial_step = step
     checkpoint_path = None
-    gate = t.performance_gate
+    gate = training.performance_gate
     gate_started = None
-    while step < t.steps:
+    while step < training.steps:
         if gate and step - initial_step == gate.warmup_steps:
             if device == 'cuda':
                 torch.cuda.synchronize()
             gate_started = time.monotonic()
-        if time.monotonic() - started > t.max_runtime_seconds:
+        if time.monotonic() - started > training.max_runtime_seconds:
             checkpoint_path = save_checkpoint(step)
             raise TimeoutError(f"Training runtime cap reached; resume from {checkpoint_path}")
-        factor = min(1.0, (step + 1) / max(1, t.warmup_steps))
-        if step >= t.warmup_steps and t.schedule == "cosine":
-            progress = (step - t.warmup_steps) / max(1, t.steps - t.warmup_steps - 1)
-            factor = t.min_learning_rate_ratio + (1 - t.min_learning_rate_ratio) * (
+        factor = min(1.0, (step + 1) / max(1, training.warmup_steps))
+        if step >= training.warmup_steps and training.schedule == "cosine":
+            progress = (step - training.warmup_steps) / max(1, training.steps - training.warmup_steps - 1)
+            factor = training.min_learning_rate_ratio + (1 - training.min_learning_rate_ratio) * (
                 1 + math.cos(math.pi * progress)) / 2
-        lr = t.learning_rate * factor
+        lr = training.learning_rate * factor
         for group in optimizer.param_groups:
             group["lr"] = lr
         optimizer.zero_grad(set_to_none=True)
         train_loss, step_tokens, auxiliary = 0, 0, {}
-        for _ in range(t.gradient_accumulation):
-            indices = torch.randint(len(blocks["train"][0]), (t.micro_batch_size,), generator=generator)
+        for _ in range(training.gradient_accumulation):
+            indices = torch.randint(len(blocks["train"][0]), (training.micro_batch_size,), generator=generator)
             parts = tuple(part[indices].to(device) for part in blocks["train"])
-            if c.tokenizer.packing == 'document' or c.stage.kind in {'sft', 'distill'}:
+            if recipe.tokenizer.packing == 'document' or recipe.stage.kind in {'sft', 'distill'}:
                 parts = trim_padded_pair(*parts)
             with phases.measure('forward'), amp():
-                loss, objective_metrics = objective(model, parts, c, reference, tokenizer)
+                loss, objective_metrics = objective(model, parts, recipe, reference, tokenizer)
                 if getattr(model, 'auxiliary_loss', None) is not None:
                     loss = loss + model.auxiliary_loss
             for key, value in objective_metrics.items():
                 auxiliary[key] = auxiliary.get(key, 0) + value / (
-                    t.gradient_accumulation if key in {'reward_mean', 'teacher_kl'} else 1)
+                    training.gradient_accumulation if key in {'reward_mean', 'teacher_kl'} else 1)
             if not torch.isfinite(loss):
                 raise FloatingPointError("Non-finite training loss")
             with phases.measure('backward'):
-                scaler.scale(loss / t.gradient_accumulation).backward()
-            train_loss += loss.item() / t.gradient_accumulation
+                scaler.scale(loss / training.gradient_accumulation).backward()
+            train_loss += loss.item() / training.gradient_accumulation
             step_tokens += sum((part != -100).sum().item() for part in parts[1::2])
         scaler.unscale_(optimizer)
         norm = (optimizer.gradient_norm() if isinstance(optimizer, InBackwardAdamW) else
-                torch.nn.utils.clip_grad_norm_(model.parameters(), t.gradient_clip_norm or float('inf'),
+                torch.nn.utils.clip_grad_norm_(model.parameters(), training.gradient_clip_norm or float('inf'),
                                                error_if_nonfinite=False))
         if not torch.isfinite(norm):
             if not scaler.is_enabled():
@@ -592,7 +592,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             # Skip this update rather than applying corrupted clipped gradients.
             scaler.update(new_scale=scaler.get_scale() * scaler.get_backoff_factor())
             skipped_updates += 1
-            n.say(f'FP16 gradient overflow: skipped update and reduced loss scale to '
+            narrator.say(f'FP16 gradient overflow: skipped update and reduced loss scale to '
                   f'{scaler.get_scale():g}; retrying optimizer step {step + 1}.')
             continue
         with phases.measure('optimizer_update'):
@@ -603,30 +603,30 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
         metrics = {"step": step, "training_loss": train_loss, "learning_rate": lr,
                    "gradient_norm": norm.item(), "tokens_seen": consumed,
                    "skipped_optimizer_updates": skipped_updates,
-                   "tokens_per_second": (step - initial_step) * t.micro_batch_size *
-                   t.gradient_accumulation * c.model.context_length /
+                   "tokens_per_second": (step - initial_step) * training.micro_batch_size *
+                   training.gradient_accumulation * recipe.model.context_length /
                    max(time.monotonic() - started, 1e-9)}
         metrics['target_tokens_per_second'] = (consumed - (saved['tokens_seen'] if resume else 0)) / max(
             time.monotonic() - started, 1e-9)
         metrics.update(auxiliary)
-        if step % t.evaluate_every == 0 or step == t.steps:
+        if step % training.evaluate_every == 0 or step == training.steps:
             with phases.measure('validation'):
-                metrics["validation"] = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
+                metrics["validation"] = evaluate(model, evaluation_blocks["validation"], recipe.evaluation.batches,
                                                   evaluation_batch_size, device, amp)
         record_metrics(folder, metrics)
         if gate and step - initial_step == gate.probe_steps:
             if device == 'cuda':
                 torch.cuda.synchronize()
             from modelchef.performance_gate import project_run
-            per_step = t.micro_batch_size * t.gradient_accumulation * c.model.context_length
+            per_step = training.micro_batch_size * training.gradient_accumulation * recipe.model.context_length
             gate_result = project_run(
                 measured_tokens=(gate.probe_steps - gate.warmup_steps) * per_step,
                 measured_seconds=time.monotonic() - gate_started,
-                remaining_tokens=(t.steps - step) * per_step +
+                remaining_tokens=(training.steps - step) * per_step +
                     int(os.environ.get('MODELCHEF_REMAINING_STAGE_TOKENS', '0')),
-                available_seconds=max(0, min(t.max_runtime_seconds - (time.monotonic() - started),
+                available_seconds=max(0, min(training.max_runtime_seconds - (time.monotonic() - started),
                     float(os.environ.get('MODELCHEF_DEADLINE_EPOCH',
-                          str(time.time() + t.max_runtime_seconds))) - time.time())),
+                          str(time.time() + training.max_runtime_seconds))) - time.time())),
                 safety_multiplier=gate.safety_multiplier, overhead_seconds=gate.overhead_seconds,
                 peak_allocated_bytes=max(torch.cuda.max_memory_allocated(),
                     phases.cuda_peaks()['peak_allocated_bytes']) if device == 'cuda' else 0,
@@ -634,23 +634,23 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
                 max_allocated_memory_fraction=gate.max_allocated_memory_fraction)
             (folder / 'performance-gate.json').write_text(json.dumps(gate_result, indent=2))
             checkpoint_path = save_checkpoint(step)
-            n.say(f"Performance gate: {gate_result['measured_tokens_per_second']:.0f} tokens/s; "
+            narrator.say(f"Performance gate: {gate_result['measured_tokens_per_second']:.0f} tokens/s; "
                   f"projected remaining runtime {gate_result['projected_remaining_seconds'] / 3600:.1f} hours; "
                   f"available {gate_result['available_seconds'] / 3600:.1f} hours; "
                   f"passed={gate_result['passed']}. Recovery checkpoint committed.")
             if not gate_result['passed']:
                 raise RuntimeError('Performance gate rejected projected runtime or memory use; '
                                    'checkpoint saved; later stages will not start')
-        if step % t.log_every == 0 or step == 1 or step == t.steps:
-            n.say(f"Step {step}/{t.steps}: loss={train_loss:.4f}, lr={lr:.2g}, "
+        if step % training.log_every == 0 or step == 1 or step == training.steps:
+            narrator.say(f"Step {step}/{training.steps}: loss={train_loss:.4f}, lr={lr:.2g}, "
                   f"tokens/s={metrics['tokens_per_second']:.0f}; "
                   f"validation={metrics.get('validation', 'not scheduled this step')}.")
-        if step % t.checkpoint_every == 0 or step == t.steps:
+        if step % training.checkpoint_every == 0 or step == training.steps:
             checkpoint_path = save_checkpoint(step)
     if checkpoint_path is None:
         checkpoint_path = save_checkpoint(step)
 
-    n.stage("8. Final held-out evaluation and checkpoint reload", "Evaluate validation and test splits "
+    narrator.stage("8. Final held-out evaluation and checkpoint reload", "Evaluate validation and test splits "
             "without gradient updates. Reload the final weights into a fresh decoder and check matching "
             "logits. Perplexity only applies to this sample/tokenizer; it is not a standard-suite score.")
     if device == 'cuda':
@@ -665,16 +665,16 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             phases.cuda_peaks()['peak_reserved_bytes']) if device == 'cuda' else None,
         'scope': 'Training loop, including loop compilation, evaluations and checkpoints; excludes setup/initial validation.'}
     with phases.measure('final_evaluation'):
-        validation = evaluate(model, evaluation_blocks["validation"], c.evaluation.batches,
+        validation = evaluate(model, evaluation_blocks["validation"], recipe.evaluation.batches,
                               evaluation_batch_size, device, amp)
-        test = (evaluate(model, evaluation_blocks["test"], c.evaluation.batches,
-                         evaluation_batch_size, device, amp) if c.evaluation.evaluate_test else None)
+        test = (evaluate(model, evaluation_blocks["test"], recipe.evaluation.batches,
+                         evaluation_batch_size, device, amp) if recipe.evaluation.evaluate_test else None)
     report['stage_evaluation'] = {
-        'validation': evaluate_stage(model, reference, blocks['validation'], tokenizer, c, device, amp)}
-    if c.evaluation.evaluate_test:
+        'validation': evaluate_stage(model, reference, blocks['validation'], tokenizer, recipe, device, amp)}
+    if recipe.evaluation.evaluate_test:
         report['stage_evaluation']['test'] = evaluate_stage(
-            model, reference, blocks['test'], tokenizer, c, device, amp)
-    report['test_evaluation'] = 'evaluated' if c.evaluation.evaluate_test else 'withheld'
+            model, reference, blocks['test'], tokenizer, recipe, device, amp)
+    report['test_evaluation'] = 'evaluated' if recipe.evaluation.evaluate_test else 'withheld'
     model.eval()
     probe = blocks["validation"][0][:1].to(device)
     tolerance = 0.03 if dtype == torch.bfloat16 else 0.003 if dtype == torch.float16 else 1e-5
@@ -695,7 +695,7 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     if device == 'cuda':
         torch.cuda.empty_cache()
     with phases.measure('checkpoint_reload'):
-        model = create_model(c.model, tokenizer.get_vocab_size()).to(device)
+        model = create_model(recipe.model, tokenizer.get_vocab_size()).to(device)
         restored_state = torch.load(checkpoint_path, map_location='cpu', weights_only=True, mmap=True)
         model.load_state_dict(restored_state["model"])
         del restored_state
@@ -705,43 +705,43 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
             raise RuntimeError("Reloaded checkpoint logits differ")
     del expected
     test_message = f"test loss={test['loss']:.4f}" if test is not None else "test evaluation withheld"
-    n.say(f"Validation loss={validation['loss']:.4f}, {test_message}; checkpoint reload verified.")
+    narrator.say(f"Validation loss={validation['loss']:.4f}, {test_message}; checkpoint reload verified.")
     benchmark_scores = (evaluate_choices(model, tokenizer, examples, device,
-                                        c.model.context_length, amp) if examples else None)
+                                        recipe.model.context_length, amp) if examples else None)
     if benchmark_scores:
-        n.say(f"Domain benchmark {benchmark_source['name']}: "
+        narrator.say(f"Domain benchmark {benchmark_source['name']}: "
               f"accuracy={benchmark_scores['accuracy']:.3f} on {len(examples)} examples; "
               "a protocol check, not a reliable quality estimate.")
 
-    n.stage("9. Generate a sample and save the run report", "Sample from the trained checkpoint using "
+    narrator.stage("9. Generate a sample and save the run report", "Sample from the trained checkpoint using "
             "configured temperature/top-k. Expect mostly incoherent text after a tiny training test. "
             "Save configuration, manifests, tokenizer, metrics, checkpoints and this explanation log.")
-    prompt = c.evaluation.prompt
-    if structured or c.stage.prompt_format == 'chat_transcript':
+    prompt = recipe.evaluation.prompt
+    if structured or recipe.stage.prompt_format == 'chat_transcript':
         from modelchef.objectives import format_prompt
-        if c.stage.prompt_format == 'chat_transcript' and not prompt.startswith(('System:', 'User:')):
+        if recipe.stage.prompt_format == 'chat_transcript' and not prompt.startswith(('System:', 'User:')):
             prompt = 'User: ' + prompt
-        prompt = format_prompt(prompt, c.stage.prompt_format)
+        prompt = format_prompt(prompt, recipe.stage.prompt_format)
     ids = tokenizer.encode(prompt).ids
     if not ids:
         ids = [tokenizer.token_to_id("<bos>")]
-    if c.tokenizer.add_bos and ids[0] != tokenizer.token_to_id('<bos>'):
+    if recipe.tokenizer.add_bos and ids[0] != tokenizer.token_to_id('<bos>'):
         ids.insert(0, tokenizer.token_to_id('<bos>'))
     generated = torch.tensor([ids], device=device)
     with torch.no_grad():
-        for _ in range(c.evaluation.generate_tokens):
+        for _ in range(recipe.evaluation.generate_tokens):
             with amp():
-                scores = model(generated[:, -c.model.context_length:])[:, -1].float()
-            scores /= c.evaluation.temperature
-            if c.evaluation.top_k:
-                boundary = scores.topk(min(c.evaluation.top_k, scores.shape[-1])).values[:, -1:]
+                scores = model(generated[:, -recipe.model.context_length:])[:, -1].float()
+            scores /= recipe.evaluation.temperature
+            if recipe.evaluation.top_k:
+                boundary = scores.topk(min(recipe.evaluation.top_k, scores.shape[-1])).values[:, -1:]
                 scores = scores.masked_fill(scores < boundary, -float("inf"))
             token = torch.multinomial(scores.softmax(-1), 1)
             generated = torch.cat((generated, token), -1)
             if token.item() == tokenizer.token_to_id("<eos>"):
                 break
     sample = tokenizer.decode(generated[0].tolist())
-    report.update(status="completed", stage=c.stage.kind, parameters=parameters, optimizer_steps=step,
+    report.update(status="completed", stage=recipe.stage.kind, parameters=parameters, optimizer_steps=step,
                   skipped_optimizer_updates=skipped_updates,
                   tokens_seen=consumed, token_counts=token_counts,
                   initial_validation=baseline, validation=validation, test=test,
@@ -754,6 +754,6 @@ def _execute(c, root, folder, fingerprint, n, report, resume, prepare_only=False
     (folder / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     from modelchef.recovery import checkpoint_to_s3
     checkpoint_to_s3(root, folder, checkpoint_path)
-    n.say(f"Generated sample: {sample}")
-    n.say(f"Pipeline completed. Report: {folder / 'report.json'}")
+    narrator.say(f"Generated sample: {sample}")
+    narrator.say(f"Pipeline completed. Report: {folder / 'report.json'}")
     return report

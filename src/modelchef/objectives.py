@@ -15,24 +15,24 @@ def format_prompt(text, prompt_format='user_assistant'):
     return f"User: {text}\nAssistant:"
 
 
-def prepare_structured(records, c, root):
+def prepare_structured(records, recipe, root):
     """Filter whole records, preserve field boundaries and isolate prompts across splits."""
-    fields = c.stage.data_fields()
+    fields = recipe.stage.data_fields()
     by_index, inputs, prompts, redactions = {}, [], set(), 0
     for row in records:
         row = dict(row)
         for field in fields:
-            value = html.unescape(unicodedata.normalize(c.processing.unicode_normalization, row[field]))
-            if c.processing.strip_html:
+            value = html.unescape(unicodedata.normalize(recipe.processing.unicode_normalization, row[field]))
+            if recipe.processing.strip_html:
                 value = re.sub(r'<(?!/?(?:think|answer)\b)[^>]+>', ' ', value)
             row[field] = value.strip()
-        if c.processing.pii == 'redact':
+        if recipe.processing.pii == 'redact':
             for field in fields:
                 row[field], count = PII.subn('[REDACTED]', row[field])
                 redactions += count
-        if c.stage.kind == 'dpo' and row['chosen'] == row['rejected']:
+        if recipe.stage.kind == 'dpo' and row['chosen'] == row['rejected']:
             raise ValueError('DPO chosen/rejected responses must differ')
-        if c.stage.kind == 'rlvr' and c.stage.reward == 'integer' and not re.fullmatch(
+        if recipe.stage.kind == 'rlvr' and recipe.stage.reward == 'integer' and not re.fullmatch(
                 r'[+-]?\d+', row['answer'].strip()):
             raise ValueError('Integer verifier requires signed integer answer strings')
         identity = ' '.join(row['prompt'].casefold().split())
@@ -42,13 +42,13 @@ def prepare_structured(records, c, root):
         row['text'] = ' '.join(row[field] for field in fields)
         by_index[row['source_index']] = row
         inputs.append(row)
-    splits, info = process(inputs, c, root)
+    splits, info = process(inputs, recipe, root)
     for name, rows in splits.items():
         splits[name] = [{**row, **{field: by_index[row['source_index']][field] for field in fields},
                          **({'split_group': by_index[row['source_index']]['split_group']}
                             if 'split_group' in by_index[row['source_index']] else {})}
                         for row in rows]
-        if c.stage.reasoning_format == 'think_answer' and c.stage.kind in {'sft', 'distill'}:
+        if recipe.stage.reasoning_format == 'think_answer' and recipe.stage.kind in {'sft', 'distill'}:
             for row in splits[name]:
                 row['response'] = f"<think>{row['reasoning']}</think>\n<answer>{row['answer']}</answer>"
     info['prompt_duplicates'] = len(records) - len(inputs)
@@ -71,17 +71,17 @@ def response_pair(prompt, response, tokenizer, context, prompt_format='user_assi
     return (x + [tokenizer.token_to_id('<pad>')] * padding, y + [-100] * padding)
 
 
-def pack_structured(rows, tokenizer, c, token_limit, progress=None):
-    parts = [[], [], [], []] if c.stage.kind == 'dpo' else [[], []]
+def pack_structured(rows, tokenizer, recipe, token_limit, progress=None):
+    parts = [[], [], [], []] if recipe.stage.kind == 'dpo' else [[], []]
     used, skipped = 0, 0
     for row in rows:
-        fields = ['chosen', 'rejected'] if c.stage.kind == 'dpo' else [
-            'answer' if c.stage.kind == 'rlvr' else 'response']
+        fields = ['chosen', 'rejected'] if recipe.stage.kind == 'dpo' else [
+            'answer' if recipe.stage.kind == 'rlvr' else 'response']
         try:
-            pairs = [response_pair(row['prompt'], row[field], tokenizer, c.model.context_length,
-                                   c.stage.prompt_format, add_bos=c.tokenizer.add_bos) for field in fields]
+            pairs = [response_pair(row['prompt'], row[field], tokenizer, recipe.model.context_length,
+                                   recipe.stage.prompt_format, add_bos=recipe.tokenizer.add_bos) for field in fields]
         except ValueError as error:
-            if c.stage.oversized_policy != 'skip' or not str(error).startswith('Structured example exceeds context'):
+            if recipe.stage.oversized_policy != 'skip' or not str(error).startswith('Structured example exceeds context'):
                 raise
             skipped += 1
             continue
@@ -146,17 +146,17 @@ def grpo_loss(policy, old, reference, advantages, mask, clip, kl_coefficient):
     return ((-surrogate + kl_coefficient * kl) * mask).sum(-1).div(mask.sum(-1)).mean()
 
 
-def rlvr_loss(model, reference, x, y, tokenizer, c):
+def rlvr_loss(model, reference, x, y, tokenizer, recipe):
     losses, rewards_seen, zero_groups, generated_tokens = [], [], 0, 0
     model.eval()  # Sampling and rescoring must use the same policy, without dropout.
     for source, targets in zip(x, y):
         first = (targets != -100).nonzero()[0].item()
         prefix = source[:first + 1].tolist()
         expected = tokenizer.decode(targets[targets != -100].tolist()).strip()
-        max_new = min(c.stage.rollout_tokens, c.model.context_length + 1 - len(prefix))
+        max_new = min(recipe.stage.rollout_tokens, recipe.model.context_length + 1 - len(prefix))
         trajectories, rewards = [], []
         with torch.no_grad():
-            for _ in range(c.stage.group_size):
+            for _ in range(recipe.stage.group_size):
                 ids = list(prefix)
                 for _ in range(max_new):
                     logits = model(torch.tensor([ids], device=x.device))[:, -1].float()
@@ -168,10 +168,10 @@ def rlvr_loss(model, reference, x, y, tokenizer, c):
                 trajectories.append(ids)
                 generated_tokens += len(ids) - len(prefix)
                 text = tokenizer.decode(ids[len(prefix):])
-                rewards.append(verified_reward(text, expected, c.stage.reward, c.stage.reasoning_format))
+                rewards.append(verified_reward(text, expected, recipe.stage.reward, recipe.stage.reasoning_format))
         padded_x, padded_y = [], []
         for ids in trajectories:
-            padding = c.model.context_length - len(ids) + 1
+            padding = recipe.model.context_length - len(ids) + 1
             padded_x.append(ids[:-1] + [tokenizer.token_to_id('<pad>')] * padding)
             padded_y.append([-100] * (len(prefix) - 1) + ids[len(prefix):] + [-100] * padding)
         rx = torch.tensor(padded_x, device=x.device)
@@ -183,7 +183,7 @@ def rlvr_loss(model, reference, x, y, tokenizer, c):
             ref, _ = token_logps(reference, rx, ry)
         policy, _ = token_logps(model, rx, ry)
         losses.append(grpo_loss(policy, old, ref, advantages, mask,
-                                c.stage.clip_ratio, c.stage.kl_coefficient))
+                                recipe.stage.clip_ratio, recipe.stage.kl_coefficient))
         rewards_seen.extend(rewards.tolist())
         zero_groups += int(rewards.std(unbiased=False).item() == 0)
     model.train()
@@ -192,15 +192,15 @@ def rlvr_loss(model, reference, x, y, tokenizer, c):
                                       'rollout_tokens': generated_tokens}
 
 
-def evaluate_stage(model, reference, blocks, tokenizer, c, device, amp):
-    if c.stage.kind not in {'dpo', 'rlvr'}:
+def evaluate_stage(model, reference, blocks, tokenizer, recipe, device, amp):
+    if recipe.stage.kind not in {'dpo', 'rlvr'}:
         return None
     model.eval()
-    count = (len(blocks[0]) if c.evaluation.batches == 'all' else
-             min(len(blocks[0]), c.evaluation.batches * (c.evaluation.batch_size or c.training.micro_batch_size)))
+    count = (len(blocks[0]) if recipe.evaluation.batches == 'all' else
+             min(len(blocks[0]), recipe.evaluation.batches * (recipe.evaluation.batch_size or recipe.training.micro_batch_size)))
     parts = [part[:count].to(device) for part in blocks]
     with torch.no_grad(), amp():
-        if c.stage.kind == 'dpo':
+        if recipe.stage.kind == 'dpo':
             cx, cy, rx, ry = parts
             chosen, rejected = sequence_logps(model, cx, cy), sequence_logps(model, rx, ry)
             ref_c, ref_r = sequence_logps(reference, cx, cy), sequence_logps(reference, rx, ry)
@@ -208,7 +208,7 @@ def evaluate_stage(model, reference, blocks, tokenizer, c, device, amp):
             return {'examples': count, 'preference_accuracy': (margin > 0).float().mean().item(),
                     'policy_likelihood_accuracy': (chosen > rejected).float().mean().item(),
                     'reference_adjusted_margin': margin.mean().item(),
-                    'dpo_loss': dpo_loss(chosen, rejected, ref_c, ref_r, c.stage.dpo_beta).item()}
+                    'dpo_loss': dpo_loss(chosen, rejected, ref_c, ref_r, recipe.stage.dpo_beta).item()}
         x, y = parts
         rewards = []
         for source, targets in zip(x, y):
@@ -216,32 +216,32 @@ def evaluate_stage(model, reference, blocks, tokenizer, c, device, amp):
             ids = source[:first + 1].tolist()
             prefix = len(ids)
             expected = tokenizer.decode(targets[targets != -100].tolist()).strip()
-            for _ in range(min(c.stage.rollout_tokens, c.model.context_length + 1 - prefix)):
+            for _ in range(min(recipe.stage.rollout_tokens, recipe.model.context_length + 1 - prefix)):
                 token = model(torch.tensor([ids], device=device))[:, -1].argmax(-1).item()
                 ids.append(token)
                 if token == tokenizer.token_to_id('<eos>'):
                     break
             rewards.append(verified_reward(tokenizer.decode(ids[prefix:]), expected,
-                                           c.stage.reward, c.stage.reasoning_format))
+                                           recipe.stage.reward, recipe.stage.reasoning_format))
         return {'examples': count, 'greedy_verified_accuracy': sum(rewards) / len(rewards),
-                'verifier': c.stage.reward}
+                'verifier': recipe.stage.reward}
 
 
-def objective(model, parts, c, reference=None, tokenizer=None):
-    if c.stage.uses_distillation:
+def objective(model, parts, recipe, reference=None, tokenizer=None):
+    if recipe.stage.uses_distillation:
         x, y = parts
         logits = model(x).float()
         with torch.no_grad():
             teacher = reference(x).float()
-        temperature = c.stage.distillation_temperature
+        temperature = recipe.stage.distillation_temperature
         kl = F.kl_div((logits / temperature).log_softmax(-1),
                       (teacher / temperature).softmax(-1), reduction='none').sum(-1)
         mask = y != -100
         soft = kl[mask].mean() * temperature ** 2
         hard = F.cross_entropy(logits.flatten(0, 1), y.flatten())
-        alpha = c.stage.distillation_alpha
+        alpha = recipe.stage.distillation_alpha
         return alpha * soft + (1 - alpha) * hard, {'teacher_kl': soft.item()}
-    if c.stage.kind == 'dpo':
+    if recipe.stage.kind == 'dpo':
         cx, cy, rx, ry = parts
         with torch.no_grad():
             reference_chosen = sequence_logps(reference, cx, cy)
@@ -253,8 +253,8 @@ def objective(model, parts, c, reference=None, tokenizer=None):
         logps = logits.log_softmax(-1).gather(-1, targets.clamp_min(0).unsqueeze(-1)).squeeze(-1)
         chosen, rejected = (logps * mask).sum(-1).split(len(cx))
         return dpo_loss(chosen, rejected,
-                        reference_chosen, reference_rejected, c.stage.dpo_beta), {}
-    if c.stage.kind == 'rlvr':
-        return rlvr_loss(model, reference, *parts, tokenizer, c)
+                        reference_chosen, reference_rejected, recipe.stage.dpo_beta), {}
+    if recipe.stage.kind == 'rlvr':
+        return rlvr_loss(model, reference, *parts, tokenizer, recipe)
     x, y = parts
     return F.cross_entropy(model(x).float().flatten(0, 1), y.flatten()), {}

@@ -15,7 +15,7 @@ class SecurityMiddleware:
         self.settings.setdefault('max_batch_size', 1)
         self.settings.setdefault('max_choices', 1)
         self.secret = os.environ[self.settings['api_key_env']]
-        if len(self.secret) < 32 or any(c.isspace() for c in self.secret):
+        if len(self.secret) < 32 or any(character.isspace() for character in self.secret):
             raise ValueError('API token must contain at least 32 non-whitespace characters')
         self.arrivals = deque()
         self.active = 0
@@ -100,15 +100,15 @@ class SecurityMiddleware:
                         prompt = payload.get('prompt')
                         if not isinstance(prompt, str) and not (isinstance(prompt, list) and
                                 1 <= len(prompt) <= self.settings['max_batch_size'] and
-                                all(isinstance(p, str) for p in prompt)):
+                                all(isinstance(prompt_text, str) for prompt_text in prompt)):
                             return await reject(400)
                     # Text-only boundary prevents user-controlled multimodal URL/file fetching.
                     messages = payload.get('messages', [])
-                    if not isinstance(messages, list) or any(not isinstance(m, dict) or
-                            set(m) - {'role', 'content', 'name'} or
-                            m.get('role') not in {'system', 'developer', 'user', 'assistant'} or
-                            not isinstance(m.get('content'), str) or
-                            ('name' in m and not isinstance(m['name'], str)) for m in messages):
+                    if not isinstance(messages, list) or any(not isinstance(chat_message, dict) or
+                            set(chat_message) - {'role', 'content', 'name'} or
+                            chat_message.get('role') not in {'system', 'developer', 'user', 'assistant'} or
+                            not isinstance(chat_message.get('content'), str) or
+                            ('name' in chat_message and not isinstance(chat_message['name'], str)) for chat_message in messages):
                         return await reject(400)
                     if scope['path'] == '/v1/chat/completions' and not messages:
                         return await reject(400)

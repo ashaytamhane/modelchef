@@ -100,7 +100,7 @@ def register_model(path, root, context=128):
     torch.save({'model': model.state_dict()}, checkpoint)
     report = {'status': 'completed', 'stage': 'import', 'optimizer_steps': 0,
               'checkpoint': str(checkpoint.resolve()), 'source': str(path),
-              'parameters': sum(p.numel() for p in model.parameters()),
+              'parameters': sum(model_file.numel() for model_file in model.parameters()),
               'source_config_sha256': digest((path / 'config.json').read_bytes())}
     (folder / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
     return str(folder)
@@ -133,7 +133,7 @@ def initialize_student(teacher, root, architecture=None):
     path.parent.mkdir()
     torch.save({'model': model.state_dict()}, path)
     (folder / 'report.json').write_text(json.dumps({'status': 'completed', 'stage': 'initialize',
-        'optimizer_steps': 0, 'parameters': sum(p.numel() for p in model.parameters()),
+        'optimizer_steps': 0, 'parameters': sum(parameter.numel() for parameter in model.parameters()),
         'checkpoint': str(path), 'tokenizer_sha256': digest((folder / 'tokenizer.json').read_bytes()),
         'note': 'Random student weights; no optimization yet.'}), encoding='utf-8')
     return str(folder)

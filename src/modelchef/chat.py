@@ -47,101 +47,101 @@ def export_model(folder, checkpoint=None, output_dir=None):
 
     folder = Path(folder).resolve()
     config = RunConfig.model_validate_json((folder / "config.json").read_text())
-    c = config.model
+    model_config = config.model
     from modelchef.engines import load_tokenizer
     state = checkpoint_model_state(folder, checkpoint, config, load_tokenizer(folder))
-    if c.backend == 'native' and c.peft.method == 'lora':
+    if model_config.backend == 'native' and model_config.peft.method == 'lora':
         from modelchef.adapters import merged_state
         adapter_dir = folder / 'adapter'
         adapter_dir.mkdir(exist_ok=True)
         save_file({name: value.contiguous() for name, value in state.items() if '.lora_' in name},
                   str(adapter_dir / 'adapter.safetensors'))
-        (adapter_dir / 'config.json').write_text(c.peft.model_dump_json(indent=2))
-        state = merged_state(state, c.peft)
+        (adapter_dir / 'config.json').write_text(model_config.peft.model_dump_json(indent=2))
+        state = merged_state(state, model_config.peft)
     output = Path(output_dir).resolve() if output_dir is not None else folder / "export"
     output.mkdir(parents=True, exist_ok=True)
-    if c.quantization != 'none':
+    if model_config.quantization != 'none':
         (output / 'modelchef-quantization.json').write_text(json.dumps({
-            'training': c.quantization, 'export': 'full_precision_master_weights',
+            'training': model_config.quantization, 'export': 'full_precision_master_weights',
             'note': 'Export does not preserve fake-quantization forward behavior or produce packed FP4 weights.'}),
             encoding='utf-8')
-    if c.backend == 'huggingface':
+    if model_config.backend == 'huggingface':
         from transformers import AutoTokenizer
 
         from modelchef.engines import create_model, load_tokenizer
         tokenizer = load_tokenizer(folder)
-        load_config = c.model_copy(deep=True)
-        if c.peft.method == 'qlora':
+        load_config = model_config.model_copy(deep=True)
+        if model_config.peft.method == 'qlora':
             load_config.peft.method = 'lora'
         model = create_model(load_config, tokenizer.get_vocab_size())
-        if c.peft.method == 'qlora':
+        if model_config.peft.method == 'qlora':
             adapters = {name: value for name, value in state.items() if 'lora_' in name}
             _, unexpected = model.load_state_dict(adapters, strict=False)
             if unexpected or not adapters:
                 raise ValueError('QLoRA checkpoint adapter tensors do not match the export model')
         else:
             model.load_state_dict(state)
-        if c.peft.method in {'lora', 'qlora'}:
+        if model_config.peft.method in {'lora', 'qlora'}:
             model.model.save_pretrained(folder / 'adapter', safe_serialization=True)
             model.model = model.model.merge_and_unload(safe_merge=True)
         model.model.save_pretrained(output, safe_serialization=True)
-        AutoTokenizer.from_pretrained(c.pretrained_path, local_files_only=True,
+        AutoTokenizer.from_pretrained(model_config.pretrained_path, local_files_only=True,
                                       trust_remote_code=False).save_pretrained(output)
         return output
     weights = {"model.embed_tokens.weight": state["embedding.weight"].contiguous(),
                "model.norm.weight": state["norm.weight"].contiguous()}
-    if not c.tie_embeddings:
+    if not model_config.tie_embeddings:
         weights["lm_head.weight"] = state["head.weight"].contiguous()
     def rotary_layout(weight, heads):
         # Custom attention rotates adjacent pairs; HF Llama rotates two half-vectors.
         shape = weight.shape
-        return weight.reshape(heads, c.hidden_size // c.attention_heads // 2, 2,
+        return weight.reshape(heads, model_config.hidden_size // model_config.attention_heads // 2, 2,
                               *shape[1:]).transpose(1, 2).reshape(shape).contiguous()
     mapping = {"attention_norm.weight": "input_layernorm.weight",
                "ffn_norm.weight": "post_attention_layernorm.weight",
                "gate": "mlp.gate_proj", "up": "mlp.up_proj", "down": "mlp.down_proj",
                "attention.q": "self_attn.q_proj", "attention.k": "self_attn.k_proj",
                "attention.v": "self_attn.v_proj", "attention.out": "self_attn.o_proj"}
-    if c.type == 'decoder_moe':
+    if model_config.type == 'decoder_moe':
         for key in ['gate', 'up', 'down']:
             del mapping[key]
         mapping['moe.router.weight'] = 'block_sparse_moe.gate.weight'
-        for expert in range(c.num_experts):
+        for expert in range(model_config.num_experts):
             for original, target in [('gate', 'w1'), ('down', 'w2'), ('up', 'w3')]:
                 mapping[f'moe.experts.{expert}.{original}'] = f'block_sparse_moe.experts.{expert}.{target}'
-    for layer in range(c.layers):
+    for layer in range(model_config.layers):
         for original, target in mapping.items():
             for suffix in ([""] if original.endswith(".weight") else
-                           ([".weight", ".bias"] if c.bias else [".weight"])):
+                           ([".weight", ".bias"] if model_config.bias else [".weight"])):
                 weight = state[f"blocks.{layer}.{original}{suffix}"]
                 if original in {"attention.q", "attention.k"}:
-                    weight = rotary_layout(weight, c.attention_heads if original.endswith("q")
-                                            else c.kv_heads)
+                    weight = rotary_layout(weight, model_config.attention_heads if original.endswith("q")
+                                            else model_config.kv_heads)
                 weights[f"model.layers.{layer}.{target}{suffix}"] = weight.contiguous()
     save_file(weights, str(output / "model.safetensors"), metadata={"format": "pt"})
     from modelchef.engines import load_tokenizer
     tokenizer = load_tokenizer(folder)
     (output / "tokenizer.json").write_bytes((folder / "tokenizer.json").read_bytes())
     hf_config = {"model_type": "llama", "architectures": ["LlamaForCausalLM"],
-        "vocab_size": tokenizer.get_vocab_size(), "hidden_size": c.hidden_size,
-        "intermediate_size": c.intermediate_size, "num_hidden_layers": c.layers,
-        "num_attention_heads": c.attention_heads, "num_key_value_heads": c.kv_heads,
-        "max_position_embeddings": c.context_length, "rope_theta": c.rope_theta,
-        "rms_norm_eps": c.norm_eps, "hidden_act": "silu", "attention_bias": c.bias,
-        "mlp_bias": c.bias, "attention_dropout": c.attention_dropout,
-        "tie_word_embeddings": c.tie_embeddings, "torch_dtype": "float32",
+        "vocab_size": tokenizer.get_vocab_size(), "hidden_size": model_config.hidden_size,
+        "intermediate_size": model_config.intermediate_size, "num_hidden_layers": model_config.layers,
+        "num_attention_heads": model_config.attention_heads, "num_key_value_heads": model_config.kv_heads,
+        "max_position_embeddings": model_config.context_length, "rope_theta": model_config.rope_theta,
+        "rms_norm_eps": model_config.norm_eps, "hidden_act": "silu", "attention_bias": model_config.bias,
+        "mlp_bias": model_config.bias, "attention_dropout": model_config.attention_dropout,
+        "tie_word_embeddings": model_config.tie_embeddings, "torch_dtype": "float32",
         "bos_token_id": tokenizer.token_to_id("<bos>"),
         "eos_token_id": tokenizer.token_to_id("<eos>"),
-        "pad_token_id": tokenizer.token_to_id("<pad>"), "initializer_range": c.init_std}
-    if c.type == 'decoder_moe':
+        "pad_token_id": tokenizer.token_to_id("<pad>"), "initializer_range": model_config.init_std}
+    if model_config.type == 'decoder_moe':
         hf_config.update(model_type='mixtral', architectures=['MixtralForCausalLM'],
-                         num_local_experts=c.num_experts, num_experts_per_tok=c.experts_per_token,
-                         router_aux_loss_coef=c.router_aux_loss_coef, sliding_window=None)
+                         num_local_experts=model_config.num_experts, num_experts_per_tok=model_config.experts_per_token,
+                         router_aux_loss_coef=model_config.router_aux_loss_coef, sliding_window=None)
     (output / "config.json").write_text(json.dumps(hf_config, indent=2), encoding="utf-8")
     tokenizer_config = {"tokenizer_class": "PreTrainedTokenizerFast",
                         **{role + '_token': tokenizer.id_to_token(tokenizer.token_to_id('<' + role + '>'))
                            for role in ['bos', 'eos', 'unk', 'pad']},
-                        "model_max_length": c.context_length, "clean_up_tokenization_spaces": False}
+                        "model_max_length": model_config.context_length, "clean_up_tokenization_spaces": False}
     if config.stage.prompt_format == 'chat_transcript':
         tokenizer_config['chat_template'] = (
             "{% for message in messages %}{{ message['role']|capitalize + ': ' + "

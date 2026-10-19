@@ -57,7 +57,7 @@ def compare(run_dir, baselines, output):
             sorted(path.glob('*.safetensors')) or sorted(path.glob('*.bin')))
         tokenizer_path = path / 'tokenizer.json'
         results.append({'model': str(path), 'context': context, 'scores': scores,
-                        'weights_sha256': {p.name: file_digest(p) for p in weight_paths},
+                        'weights_sha256': {weight_path.name: file_digest(weight_path) for weight_path in weight_paths},
                         'tokenizer_sha256': file_digest(tokenizer_path) if tokenizer_path.exists() else None})
         del model
         if not (path / 'report.json').exists():

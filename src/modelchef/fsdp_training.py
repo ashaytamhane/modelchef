@@ -93,19 +93,19 @@ def run_fsdp(config, root, resume=None):
             raise RuntimeError(preparation[0]['error'])
         result = preparation[0]['prepared']
         folder = Path(result['run_dir'])
-        t, m = config.training, config.model
-        random.seed(t.seed + rank)
-        torch.manual_seed(t.seed + rank)
-        torch.use_deterministic_algorithms(t.deterministic)
-        torch.backends.cuda.matmul.allow_tf32 = t.allow_tf32
+        training, model_config = config.training, config.model
+        random.seed(training.seed + rank)
+        torch.manual_seed(training.seed + rank)
+        torch.use_deterministic_algorithms(training.deterministic)
+        torch.backends.cuda.matmul.allow_tf32 = training.allow_tf32
         supported = torch.tensor(int(torch.cuda.is_bf16_supported()), device='cuda')
         dist.all_reduce(supported, op=dist.ReduceOp.MIN)
-        precision = t.precision
+        precision = training.precision
         if precision == 'bf16' and not supported.item():
             raise ValueError('BF16 must be supported by every rank; select FP32')
         if precision == 'auto':
             precision = 'bf16' if supported.item() else 'fp32'
-        phases = PhaseMetrics('cuda', t.profile_phases)
+        phases = PhaseMetrics('cuda', training.profile_phases)
         tokenizer = load_tokenizer(folder)
         blocks = load_blocks(folder)
         identities = {name: file_digest(folder / name) for name in
@@ -115,16 +115,16 @@ def run_fsdp(config, root, resume=None):
                 identities[optional] = file_digest(folder / optional)
         with phases.measure('initialization'):
             with torch.device('meta'):
-                model = create_model(m, tokenizer.get_vocab_size())
+                model = create_model(model_config, tokenizer.get_vocab_size())
             model = shard_native(model, precision)
             groups = [{'params': [p for p in model.parameters() if p.ndim >= 2],
-                       'weight_decay': t.weight_decay},
+                       'weight_decay': training.weight_decay},
                       {'params': [p for p in model.parameters() if p.ndim < 2], 'weight_decay': 0}]
-            options = {'fused': True} if t.optimizer_kernel == 'fused' else (
-                {'foreach': True} if t.optimizer_kernel == 'foreach' else {})
-            optimizer = torch.optim.AdamW(groups, lr=t.learning_rate, betas=t.betas,
-                                         eps=t.optimizer_eps, **options)
-            sampler = torch.Generator().manual_seed(t.seed + rank)
+            options = {'fused': True} if training.optimizer_kernel == 'fused' else (
+                {'foreach': True} if training.optimizer_kernel == 'foreach' else {})
+            optimizer = torch.optim.AdamW(groups, lr=training.learning_rate, betas=training.betas,
+                                         eps=training.optimizer_eps, **options)
+            sampler = torch.Generator().manual_seed(training.seed + rank)
             step, consumed = 0, 0
             if resume:
                 metadata, state = load_sharded(model, optimizer, resume, identities)
@@ -148,7 +148,7 @@ def run_fsdp(config, root, resume=None):
             with phases.measure('validation' if split == 'validation' else 'test'):
                 # All ranks execute the same number of forwards: FSDP forwards are collective.
                 return evaluate(model, blocks[split][:2], config.evaluation.batches,
-                                config.evaluation.batch_size or t.micro_batch_size, 'cuda', amp)
+                                config.evaluation.batch_size or training.micro_batch_size, 'cuda', amp)
 
         checkpoints = folder / 'checkpoints'
         initial_tokens = consumed
@@ -188,25 +188,25 @@ def run_fsdp(config, root, resume=None):
 
         result['tensorboard'] = tensorboard_info(folder)
         result['initial_validation'] = validation('validation')
-        if os.environ.get('MODELCHEF_RECOVERY_S3_URI') or (t.checkpoint_at_start and not resume):
+        if os.environ.get('MODELCHEF_RECOVERY_S3_URI') or (training.checkpoint_at_start and not resume):
             checkpoint()
-        while step < t.steps:
-            expired = torch.tensor(int(time.monotonic() - started > t.max_runtime_seconds), device='cuda')
+        while step < training.steps:
+            expired = torch.tensor(int(time.monotonic() - started > training.max_runtime_seconds), device='cuda')
             dist.all_reduce(expired, op=dist.ReduceOp.MAX)
             if expired.item():
                 checkpoint()
                 raise TimeoutError(f'FSDP2 runtime cap reached; resume from {latest}')
-            factor = min(1., (step + 1) / max(1, t.warmup_steps))
-            if t.schedule == 'cosine' and step >= t.warmup_steps:
-                fraction = (step - t.warmup_steps) / max(1, t.steps - t.warmup_steps - 1)
-                factor = t.min_learning_rate_ratio + (1 - t.min_learning_rate_ratio) * (
+            factor = min(1., (step + 1) / max(1, training.warmup_steps))
+            if training.schedule == 'cosine' and step >= training.warmup_steps:
+                fraction = (step - training.warmup_steps) / max(1, training.steps - training.warmup_steps - 1)
+                factor = training.min_learning_rate_ratio + (1 - training.min_learning_rate_ratio) * (
                     1 + math.cos(math.pi * fraction)) / 2
             for group in optimizer.param_groups:
-                group['lr'] = t.learning_rate * factor
+                group['lr'] = training.learning_rate * factor
             optimizer.zero_grad(set_to_none=True)
             loss_total, tokens = 0., 0
-            for _ in range(t.gradient_accumulation):
-                indices = torch.randint(len(blocks['train'][0]), (t.micro_batch_size,), generator=sampler)
+            for _ in range(training.gradient_accumulation):
+                indices = torch.randint(len(blocks['train'][0]), (training.micro_batch_size,), generator=sampler)
                 x, y = tuple(part[indices].to('cuda') for part in blocks['train'])
                 if config.tokenizer.packing == 'document':
                     x, y = trim_padded_pair(x, y)
@@ -218,13 +218,13 @@ def run_fsdp(config, root, resume=None):
                     dist.all_reduce(invalid, op=dist.ReduceOp.MAX)
                     if invalid.item():
                         raise FloatingPointError('Non-finite FSDP2 training loss')
-                    (loss / t.gradient_accumulation).backward()
-                    loss_total += loss.item() / t.gradient_accumulation
+                    (loss / training.gradient_accumulation).backward()
+                    loss_total += loss.item() / training.gradient_accumulation
                     tokens += (y != -100).sum().item()
                     del logits, loss
             with phases.measure('optimizer'):
                 # DTensor dispatch computes the norm over all parameter shards.
-                norm = torch.nn.utils.clip_grad_norm_(model.parameters(), t.gradient_clip_norm or float('inf'))
+                norm = torch.nn.utils.clip_grad_norm_(model.parameters(), training.gradient_clip_norm or float('inf'))
                 norm_value = norm.full_tensor().item() if hasattr(norm, 'full_tensor') else norm.item()
                 if not math.isfinite(norm_value):
                     raise FloatingPointError('Non-finite FSDP2 gradient norm')
@@ -237,14 +237,14 @@ def run_fsdp(config, root, resume=None):
                 'gradient_norm': norm_value, 'learning_rate': optimizer.param_groups[0]['lr'],
                 'tokens_seen': consumed, 'target_tokens_per_second': (consumed-initial_tokens) /
                 max(time.monotonic()-started, 1e-9)}
-            if step % t.evaluate_every == 0 or step == t.steps:
+            if step % training.evaluate_every == 0 or step == training.steps:
                 row['validation'] = validation('validation')
             if rank == 0:
                 record_metrics(folder, row)
-                if step % t.log_every == 0 or step == 1 or step == t.steps:
+                if step % training.log_every == 0 or step == 1 or step == training.steps:
                     from modelchef.progress import report
-                    report(f'FSDP2 step {step}/{t.steps}: loss={row["training_loss"]:.4f}')
-            if step % t.checkpoint_every == 0 or step == t.steps:
+                    report(f'FSDP2 step {step}/{training.steps}: loss={row["training_loss"]:.4f}')
+            if step % training.checkpoint_every == 0 or step == training.steps:
                 checkpoint()
         checkpoint()
         result['validation'] = validation('validation')
@@ -264,7 +264,7 @@ def run_fsdp(config, root, resume=None):
         examples = json.loads((folder / 'benchmark-examples.json').read_text())
         with phases.measure('benchmark'):
             result['benchmark_scores'] = (evaluate_choices(model, tokenizer, examples, 'cuda',
-                m.context_length, amp) if examples else None)
+                model_config.context_length, amp) if examples else None)
         ids = tokenizer.encode(config.evaluation.prompt).ids or [tokenizer.token_to_id('<bos>')]
         if config.tokenizer.add_bos and ids[0] != tokenizer.token_to_id('<bos>'):
             ids.insert(0, tokenizer.token_to_id('<bos>'))
@@ -273,7 +273,7 @@ def run_fsdp(config, root, resume=None):
             for _ in range(config.evaluation.generate_tokens):
                 # Every rank forwards the SAME prefix. Only rank zero samples, then broadcasts.
                 with amp():
-                    scores = model(generated[:, -m.context_length:])[:, -1].float()
+                    scores = model(generated[:, -model_config.context_length:])[:, -1].float()
                 token = torch.empty((1, 1), dtype=torch.long, device='cuda')
                 if rank == 0:
                     scores /= config.evaluation.temperature
@@ -294,7 +294,7 @@ def run_fsdp(config, root, resume=None):
         result.update(status='completed', checkpoint=str(latest), optimizer_steps=step,
             tokens_seen=consumed, checkpoint_reload_verified=True,
             checkpoint_recovery='passed', parameters=sum(p.numel() for p in model.parameters()),
-            global_batch_size=t.micro_batch_size*t.gradient_accumulation*world,
+            global_batch_size=training.micro_batch_size*training.gradient_accumulation*world,
             performance={'training_loop_seconds': time.monotonic()-started,
                 'tokens_per_second': (consumed-initial_tokens)/max(time.monotonic()-started, 1e-9),
                 'peak_cuda_allocated_bytes': peaks[0].item(),

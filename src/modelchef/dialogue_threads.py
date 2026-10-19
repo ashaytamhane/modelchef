@@ -53,8 +53,8 @@ def thread_pairs(rows, source, context=None):
         if invalid:
             skipped[invalid] += 1
             continue
-        if len(chain) < 2 or any(m['role'] != ('user' if i % 2 == 0 else 'assistant')
-                                 for i, m in enumerate(chain)):
+        if len(chain) < 2 or any(message['role'] != ('user' if i % 2 == 0 else 'assistant')
+                                 for i, message in enumerate(chain)):
             skipped['invalid_role_sequence'] += 1
             continue
         prompt = transcript(chain[:-1], source.system_prompt, source.system_prefix)

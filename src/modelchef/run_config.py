@@ -213,26 +213,26 @@ class RunConfig(Section):
 
     @model_validator(mode="after")
     def consistency(self):
-        m, p, t = self.model, self.processing, self.training
-        if m.hidden_size % m.attention_heads or m.attention_heads % m.kv_heads:
+        model_config, processing, training = self.model, self.processing, self.training
+        if model_config.hidden_size % model_config.attention_heads or model_config.attention_heads % model_config.kv_heads:
             raise ValueError("hidden_size must be divisible by heads; heads by kv_heads")
-        if (m.hidden_size // m.attention_heads) % 2:
+        if (model_config.hidden_size // model_config.attention_heads) % 2:
             raise ValueError("RoPE head dimension must be even")
-        if p.min_chars > p.max_chars or p.validation_fraction + p.test_fraction >= 1:
+        if processing.min_chars > processing.max_chars or processing.validation_fraction + processing.test_fraction >= 1:
             raise ValueError("Invalid processing lengths or split fractions")
-        if p.collapse_consecutive_duplicate_sentences and self.stage.kind not in {'pretrain', 'midtrain'}:
+        if processing.collapse_consecutive_duplicate_sentences and self.stage.kind not in {'pretrain', 'midtrain'}:
             raise ValueError('Sentence cleanup requires raw-text pretraining or midtraining')
-        if t.warmup_steps >= t.steps or any(not 0 <= b < 1 for b in t.betas):
+        if training.warmup_steps >= training.steps or any(not 0 <= b < 1 for b in training.betas):
             raise ValueError("Warmup must be shorter than training; betas must be in [0,1)")
-        if t.performance_gate and t.performance_gate.probe_steps >= t.steps:
+        if training.performance_gate and training.performance_gate.probe_steps >= training.steps:
             raise ValueError('Performance probe must be shorter than training')
-        if t.performance_gate and t.distributed != 'none':
+        if training.performance_gate and training.distributed != 'none':
             raise ValueError('Performance gates currently require single-process training')
-        if t.optimizer != 'adamw' and t.optimizer_kernel != 'default':
+        if training.optimizer != 'adamw' and training.optimizer_kernel != 'default':
             raise ValueError('Optional optimizer backends require optimizer_kernel: default')
-        if t.optimizer.endswith('_in_backward') and (
-                t.gradient_accumulation != 1 or t.gradient_clip_norm != 0 or
-                t.distributed != 'none' or t.compile or t.precision == 'fp16' or
+        if training.optimizer.endswith('_in_backward') and (
+                training.gradient_accumulation != 1 or training.gradient_clip_norm != 0 or
+                training.distributed != 'none' or training.compile or training.precision == 'fp16' or
                 self.stage.kind in {'dpo', 'rlvr'}):
             raise ValueError('In-backward AdamW requires accumulation=1, gradient_clip_norm=0, '
                                  'single process, no compile/FP16, and a supervised objective')
@@ -265,39 +265,39 @@ class RunConfig(Section):
             raise ValueError('Token distillation requires a teacher_run')
         if self.stage.teacher_run and self.stage.kind not in {'pretrain', 'midtrain', 'sft', 'distill'}:
             raise ValueError('Online token distillation supports pretrain, midtrain, sft and distill only')
-        if m.backend == 'huggingface' and not m.pretrained_path:
+        if model_config.backend == 'huggingface' and not model_config.pretrained_path:
             raise ValueError('Hugging Face backend requires a local pretrained_path')
-        if m.peft.method != 'none':
+        if model_config.peft.method != 'none':
             if self.stage.kind == 'pretrain':
                 raise ValueError('PEFT requires a trained parent; use a continuation/post-training stage')
-            if not m.peft.target_modules or any(not name.strip() for name in m.peft.target_modules):
+            if not model_config.peft.target_modules or any(not name.strip() for name in model_config.peft.target_modules):
                 raise ValueError('LoRA requires explicit nonempty target_modules')
-            if m.quantization != 'none':
+            if model_config.quantization != 'none':
                 raise ValueError('PEFT and FP4 projection quantization cannot be combined')
-        if (m.backend == 'native' and m.peft.method == 'lora' and m.tie_embeddings and
-                any(name == 'head' or name.endswith('.head') for name in m.peft.target_modules)):
+        if (model_config.backend == 'native' and model_config.peft.method == 'lora' and model_config.tie_embeddings and
+                any(name == 'head' or name.endswith('.head') for name in model_config.peft.target_modules)):
             raise ValueError('LoRA on a tied output head cannot be merged; set tie_embeddings: false')
-        if m.peft.method == 'qlora' and m.backend != 'huggingface':
+        if model_config.peft.method == 'qlora' and model_config.backend != 'huggingface':
             raise ValueError('QLoRA requires the Hugging Face backend')
-        if m.experts_per_token > m.num_experts:
+        if model_config.experts_per_token > model_config.num_experts:
             raise ValueError('experts_per_token must not exceed num_experts')
-        if m.custom_swiglu_path and (m.backend != 'native' or m.type != 'decoder_rope'):
+        if model_config.custom_swiglu_path and (model_config.backend != 'native' or model_config.type != 'decoder_rope'):
             raise ValueError('Custom SwiGLU requires a native dense decoder')
-        if m.type == 'decoder_moe' and m.bias:
+        if model_config.type == 'decoder_moe' and model_config.bias:
             raise ValueError('Native MoE requires bias: false for Mixtral-compatible export')
-        if m.quantization == 'nvfp4' and (m.backend != 'native' or m.type != 'decoder_rope'):
+        if model_config.quantization == 'nvfp4' and (model_config.backend != 'native' or model_config.type != 'decoder_rope'):
             raise ValueError('NVFP4 currently requires a native dense decoder')
-        if m.quantization == 'nvfp4' and (m.gradient_checkpointing or m.custom_swiglu_path):
+        if model_config.quantization == 'nvfp4' and (model_config.gradient_checkpointing or model_config.custom_swiglu_path):
             raise ValueError('NVFP4 currently excludes gradient checkpointing and custom SwiGLU')
-        if t.distributed == 'ddp' and (t.compile or m.peft.method == 'qlora' or
-                                      m.quantization == 'nvfp4' or self.stage.kind == 'rlvr'):
+        if training.distributed == 'ddp' and (training.compile or model_config.peft.method == 'qlora' or
+                                      model_config.quantization == 'nvfp4' or self.stage.kind == 'rlvr'):
             raise ValueError('DDP currently excludes compile, QLoRA, NVFP4 and RLVR')
-        if t.distributed != 'none' and t.optimizer != 'adamw':
+        if training.distributed != 'none' and training.optimizer != 'adamw':
             raise ValueError('Distributed training currently requires standard AdamW')
-        if t.distributed == 'fsdp2' and (
-                m.backend != 'native' or m.type != 'decoder_rope' or m.peft.method != 'none' or
-                m.quantization != 'none' or m.custom_swiglu_path or t.compile or
-                t.precision == 'fp16' or t.accelerator not in {'auto', 'cuda'} or
+        if training.distributed == 'fsdp2' and (
+                model_config.backend != 'native' or model_config.type != 'decoder_rope' or model_config.peft.method != 'none' or
+                model_config.quantization != 'none' or model_config.custom_swiglu_path or training.compile or
+                training.precision == 'fp16' or training.accelerator not in {'auto', 'cuda'} or
                 self.stage.kind not in {'pretrain', 'midtrain'} or self.stage.uses_distillation):
             raise ValueError('FSDP2 requires native dense unquantized pretrain/midtrain, standard AdamW, '
                              'CUDA FP32/BF16, no PEFT, teacher, compile or custom kernels')

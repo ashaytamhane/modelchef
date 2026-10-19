@@ -70,7 +70,7 @@ class RecoveryStore:
     def snapshot(self, root, folder, checkpoint):
         if Path(checkpoint).is_symlink():
             raise ValueError('Recovery refuses symlinked checkpoints')
-        root, folder, checkpoint = (Path(p).resolve() for p in (root, folder, checkpoint))
+        root, folder, checkpoint = (Path(artifact_path).resolve() for artifact_path in (root, folder, checkpoint))
         if not folder.is_relative_to(root) or checkpoint.parent != folder / 'checkpoints':
             raise ValueError('Recovery checkpoint must belong to this workspace run')
         files = {}
